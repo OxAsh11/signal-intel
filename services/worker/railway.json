@@ -1,0 +1,14 @@
+{
+  "$schema": "https://railway.com/railway.schema.json",
+  "build": {
+    "builder": "DOCKERFILE",
+    "dockerfilePath": "services/worker/Dockerfile",
+    "watchPatterns": ["services/worker/**", "packages/signal_core/**", "pyproject.toml", "uv.lock"]
+  },
+  "deploy": {
+    "healthcheckPath": "/healthz",
+    "healthcheckTimeout": 90,
+    "restartPolicyType": "ALWAYS",
+    "numReplicas": 1
+  }
+}

@@ -36,7 +36,7 @@ Decisions taken: **TS web + Python workers**, **hosted Supabase dev project (no 
 |---|---|---|
 | Languages | **TypeScript** (Node 24) for the web app; **Python 3.13** for workers and the public API | Python gets the data, NLP and scraping ecosystem for the pipelines (M2–M8). TS gets the best UI stack. |
 | Repo | **One monorepo**: pnpm workspaces + Turborepo (TS side), **uv workspace** (Python side) | One PR can change schema, worker and UI together. Railway builds each service from its own root. |
-| Web app | **Next.js (App Router, latest stable)**, `output: "standalone"` | Server components read through RLS. Server actions are the "audited server functions" (S8) for user-initiated writes (M1 edits, feedback, review decisions, comments). |
+| Web app | **Next.js 16 (App Router, Cache Components)**, built and run from a Dockerfile with `next start` | Server components read through RLS. Server actions are the "audited server functions" (S8) for user-initiated writes (M1 edits, feedback, review decisions, comments). |
 | Worker | **Python service: Procrastinate + psycopg 3** | Job orchestrator (S1), cron schedules, outbox relay (S4), derivation engine (S5), connectors (S2), AI gateway (S3), indexing (S9), health (M17), and the M2–M8 pipelines. |
 | Public API + MCP | **FastAPI service** (Phase 3) sharing the Python core package | `/v1` REST with OpenAPI generated for free (M13), plus webhooks ingress and the official MCP Python SDK. |
 | Database | **Supabase Postgres** + `pgvector`, `pg_trgm`, `unaccent`, `pgcrypto` | F8: one DB holds structured data, vectors (M15) and fuzzy name matching (M4). |
