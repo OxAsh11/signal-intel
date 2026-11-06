@@ -1,0 +1,14 @@
+<!-- @dsCard group="Reporting" height=120 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>MetricTile</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-row'},
+  h(S.MetricTile,{label:'Companies met',value:'38',href:'#',delta:'+6 vs Oct',version:'def v2'}),
+  h(S.MetricTile,{label:'Genuine replies',value:'7.4 / 1k',href:'#',version:'def v1',incomplete:true})));
+</script>
+</body>
+</html>

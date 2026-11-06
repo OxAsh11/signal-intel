@@ -1,0 +1,17 @@
+<!-- @dsCard group="Actions" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Button</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-row'},
+  h(S.Button,{variant:'primary'},'Publish version'),
+  h(S.Button,{cost:'≈ $42'},'Expand to Germany'),
+  h(S.Button,{variant:'quiet'},'Compare versions'),
+  h(S.Button,{variant:'danger'},'Push live'),
+  h(S.Button,{disabled:true},'Enrich')));
+</script>
+</body>
+</html>

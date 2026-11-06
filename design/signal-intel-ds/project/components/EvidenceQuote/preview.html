@@ -1,0 +1,14 @@
+<!-- @dsCard group="Evidence" height=150 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>EvidenceQuote</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-col'},
+  h(S.EvidenceQuote,{claim:'uses_tool = Revit',sourceType:'Job post',sourceName:'werkenbij.example.nl',sourceHref:'#',observed:'3 days ago',translated:'Dutch'},
+    'We are looking for two BIM technicians ', h('mark',null,'fluent in Revit'), ' to join our Rotterdam team.')));
+</script>
+</body>
+</html>

@@ -1,0 +1,15 @@
+<!-- @dsCard group="Evidence" height=330 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>ScoreBreakdown</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-col'},
+  h(S.ScoreBreakdown,{priority:82,band:'High',readiness:40,version:'brief v14 · weights v14',
+    dimensions:[{name:'Fit',value:88},{name:'Evidence',value:91},{name:'Scale',value:64},{name:'Timing',value:77}],
+    gates:[{name:'Not excluded',hit:false},{name:'Not contradicted',hit:false},{name:'No competitor link',hit:false}]})));
+</script>
+</body>
+</html>

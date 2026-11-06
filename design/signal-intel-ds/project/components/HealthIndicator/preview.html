@@ -1,0 +1,15 @@
+<!-- @dsCard group="Status" height=96 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>HealthIndicator</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-col'},
+  h(S.HealthIndicator,{name:'Job-postings radar',status:'ok',detail:'412 records today'}),
+  h(S.HealthIndicator,{name:'Sequencer webhooks',status:'silent',detail:'0 events in expected 2 h window'}),
+  h(S.HealthIndicator,{name:'Derivation lag',status:'degraded',detail:'14 min behind'})));
+</script>
+</body>
+</html>

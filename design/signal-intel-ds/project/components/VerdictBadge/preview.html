@@ -1,0 +1,13 @@
+<!-- @dsCard group="Status" height=64 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>VerdictBadge</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-row'},
+  ['Confirmed','Likely','Unverified','Contradicted'].map(function(v){return h(S.VerdictBadge,{key:v,verdict:v})})));
+</script>
+</body>
+</html>

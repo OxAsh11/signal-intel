@@ -1,0 +1,19 @@
+<!-- @dsCard group="Evidence" height=220 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>DerivedValue</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-col'},
+  h(S.DerivedValue,{label:'Verdict',versions:'brief v14 · rubric v3 · extractor v3.2',defaultOpen:true,
+    explanation:h(React.Fragment,null,
+      h('div',{className:'si-label'},'Rests on 2 claims'),
+      h('div',null,'uses_tool = Revit · job post · 3 days ago'),
+      h('div',null,'hiring_role = BIM technician · job post · 3 days ago'),
+      h('div',null,h(S.Button,{size:'sm',variant:'quiet'},'Record feedback')))},
+    h(S.VerdictBadge,{verdict:'Confirmed'}))));
+</script>
+</body>
+</html>

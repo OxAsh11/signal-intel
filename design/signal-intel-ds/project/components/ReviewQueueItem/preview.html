@@ -1,0 +1,15 @@
+<!-- @dsCard group="Review" height=250 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>ReviewQueueItem</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-col'},
+  h(S.ReviewQueueItem,{kind:'Identity match',confidence:72,waiting:'waiting 2 days',candidates:[
+    {name:'Van Dijk Engineering B.V.',fields:[['Domain','vandijk-eng.nl'],['Country','NL'],['Registry ID','—',true]]},
+    {name:'Van Dijk Ingenieurs',fields:[['Domain','vandijk-eng.nl'],['Country','NL'],['Registry ID','KvK 24318876',true]]}]})));
+</script>
+</body>
+</html>

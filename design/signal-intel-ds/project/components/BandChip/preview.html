@@ -1,0 +1,13 @@
+<!-- @dsCard group="Status" height=64 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>BandChip</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-row'},
+  h(S.BandChip,{band:'High'}),h(S.BandChip,{band:'Medium'}),h(S.BandChip,{band:'Low'}),h(S.BandChip,{band:'Excluded',reason:'Competitor'})));
+</script>
+</body>
+</html>

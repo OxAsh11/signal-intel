@@ -1,0 +1,12 @@
+<!-- @dsCard group="Actions" height=64 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>PushModeSwitch</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-row'},h(S.PushModeSwitch,{value:'dry run'}),h(S.PushModeSwitch,{value:'live'})));
+</script>
+</body>
+</html>

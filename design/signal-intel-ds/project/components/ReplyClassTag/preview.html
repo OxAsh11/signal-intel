@@ -1,0 +1,14 @@
+<!-- @dsCard group="Status" height=64 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>ReplyClassTag</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div',{className:'si-row'},
+  h(S.ReplyClassTag,{replyClass:'Interested',source:'human'}),h(S.ReplyClassTag,{replyClass:'Referral'}),h(S.ReplyClassTag,{replyClass:'Not now'}),
+  h(S.ReplyClassTag,{replyClass:'Not interested'}),h(S.ReplyClassTag,{replyClass:'Out of office'}),h(S.ReplyClassTag,{replyClass:'Unsubscribe'})));
+</script>
+</body>
+</html>
