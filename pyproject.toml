@@ -1,0 +1,46 @@
+[project]
+name = "signal-intel"
+version = "0.1.0"
+requires-python = ">=3.13,<3.14"
+
+[tool.uv]
+package = false
+
+[tool.uv.workspace]
+members = ["packages/signal_core", "services/worker"]
+
+[tool.uv.sources]
+signal-core = { workspace = true }
+worker = { workspace = true }
+
+[dependency-groups]
+dev = [
+  "mypy>=1.18",
+  "pytest>=8.4",
+  "pytest-asyncio>=1.2",
+  "ruff>=0.14",
+]
+
+[tool.ruff]
+line-length = 100
+target-version = "py313"
+extend-exclude = ["node_modules", ".next", "apps", "design"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+
+[tool.mypy]
+python_version = "3.13"
+strict = true
+packages = ["signal_core", "worker"]
+mypy_path = ["packages/signal_core/src", "services/worker/src"]
+plugins = ["pydantic.mypy"]
+
+[[tool.mypy.overrides]]
+module = ["procrastinate.*"]
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+testpaths = ["packages/signal_core/tests", "services/worker/tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"

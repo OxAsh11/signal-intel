@@ -1,0 +1,8 @@
+pnpm-lock.yaml
+uv.lock
+.next
+dist
+design
+docs/PRD.md
+packages/contracts/gen
+packages/db-types/src/database.ts

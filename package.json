@@ -1,0 +1,28 @@
+{
+  "name": "signal-intel",
+  "private": true,
+  "packageManager": "pnpm@10.34.9",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "turbo run dev --filter=web",
+    "build": "turbo run build",
+    "lint": "turbo run lint",
+    "typecheck": "turbo run typecheck",
+    "test": "turbo run test",
+    "codegen": "pnpm --filter @signal/contracts gen && pnpm --filter @signal/ui build:tokens",
+    "codegen:check": "pnpm --filter @signal/contracts gen:check && pnpm --filter @signal/ui build:tokens:check",
+    "db:check": "node scripts/check-migrations.mjs",
+    "db:types": "supabase gen types typescript --project-id \"$SUPABASE_PROJECT_REF\" --schema public,app > packages/db-types/src/database.ts",
+    "py:check": "uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest",
+    "format": "prettier --write ."
+  },
+  "devDependencies": {
+    "@electric-sql/pglite": "~0.3.16",
+    "prettier": "^3.9.10",
+    "supabase": "^2.122.1",
+    "turbo": "^2.11.10",
+    "typescript": "^5.9.3"
+  }
+}

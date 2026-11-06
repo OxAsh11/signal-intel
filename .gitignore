@@ -1,0 +1,32 @@
+# deps
+node_modules/
+.pnpm-store/
+.venv/
+__pycache__/
+*.pyc
+
+# build
+.next/
+dist/
+out/
+.turbo/
+*.tsbuildinfo
+.mypy_cache/
+.ruff_cache/
+.pytest_cache/
+
+# env — never commit secrets
+.env
+.env.*
+!.env.example
+
+# supabase
+supabase/.branches
+supabase/.temp
+
+# os / editors
+.DS_Store
+Thumbs.db
+.vscode/*
+!.vscode/extensions.json
+.idea/

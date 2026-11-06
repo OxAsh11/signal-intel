@@ -1,0 +1,254 @@
+lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: true
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    devDependencies:
+      '@electric-sql/pglite':
+        specifier: ~0.3.16
+        version: 0.3.16
+      prettier:
+        specifier: ^3.9.10
+        version: 3.9.10
+      supabase:
+        specifier: ^2.122.1
+        version: 2.122.1
+      turbo:
+        specifier: ^2.11.10
+        version: 2.11.10
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
+  packages/config: {}
+
+  packages/contracts:
+    dependencies:
+      zod:
+        specifier: ^4.6.7
+        version: 4.6.7
+
+packages:
+
+  '@ecies/ciphers@0.2.6':
+    resolution: {integrity: sha512-patgsRPKGkhhoBjETV4XxD0En4ui5fbX0hzayqI3M8tvNMGUoUvmyYAIWwlxBc1KX5cturfqByYdj5bYGRpN9g==}
+    engines: {bun: '>=1', deno: '>=2.7.10', node: '>=16'}
+    peerDependencies:
+      '@noble/ciphers': ^1.0.0
+
+  '@electric-sql/pglite@0.3.16':
+    resolution: {integrity: sha512-mZkZfOd9OqTMHsK+1cje8OSzfAQcpD7JmILXTl5ahdempjUDdmg4euf1biDex5/LfQIDJ3gvCu6qDgdnDxfJmA==}
+
+  '@noble/ciphers@1.3.0':
+    resolution: {integrity: sha512-2I0gnIVPtfnMw9ee9h1dJG7tp81+8Ob3OJb3Mv37rx5L40/b0i7djjCVvGOVqc9AEIQyvyu1i6ypKdFw8R8gQw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/curves@1.9.7':
+    resolution: {integrity: sha512-gbKGcRUYIjA3/zCCNaWDciTMFI0dCkvou3TL8Zmy5Nc7sJ47a0jtOeZoTaMxkuqRo9cRhjOdZJXegxYE5FN/xw==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@noble/hashes@1.8.0':
+    resolution: {integrity: sha512-jCs9ldd7NwzpgXDIf6P3+NrHh9/sD6CQdxHyjQI+h/6rDNo88ypBxxz45UDuZHz9r3tNz7N/VInSVoVdtXEI4A==}
+    engines: {node: ^14.21.3 || >=16}
+
+  '@supabase/cli-darwin-arm64@2.122.1':
+    resolution: {integrity: sha512-yttIyKa7QU+yB6oxdErlI7zHYn2ohHSMqjNWzuOiZrwoMfMTCTk4/pbRrTUrL81rj1E0kC3SYNy1o4x6449/kA==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@supabase/cli-darwin-x64@2.122.1':
+    resolution: {integrity: sha512-8ykhbmyowzJP4BKKn223mtuOLdkM1HCSPiDtg8sOrYR+IxH69kbBRUSt3yd8BL5e4So+YDBvHVX8I4yTPRgIqA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@supabase/cli-linux-arm64-musl@2.122.1':
+    resolution: {integrity: sha512-rF1VueZTVg9w2eSe53ABkPk37lEf3cq8dcwMLUxgnDFfL5UqNw/TSI3bkE1Q32o+KnL3RPaaI8z+xWX7vOQXVA==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@supabase/cli-linux-arm64@2.122.1':
+    resolution: {integrity: sha512-5lUt9kCQ6bEXh7gRkGgIx9HN7sQt2RviWCUArzmRWHkJsVkXq2zzmpeQN829uH5LCFG4wPJV9l6avJx7mYOlnQ==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@supabase/cli-linux-x64-musl@2.122.1':
+    resolution: {integrity: sha512-BdGs8w0FuTPLOhA9GtZr06FmlRb+1z+GeTiJkU1kQCorwDv+BY4i92qA/x8XlfBfDp+J6i2dtyaWMhGMCzICaw==}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@supabase/cli-linux-x64@2.122.1':
+    resolution: {integrity: sha512-uMnSbNFJt/KjVyCQe/D0OzWZyGlVGsJKBxGiJfaiNhKlvrrsgQcqGLb27J2qdhPXuGnEfiaHpVYhALRRVQy54A==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@supabase/cli-windows-arm64@2.122.1':
+    resolution: {integrity: sha512-bi/sA/9glToq8zr5xSKudVh36wJYY9DKlBSHWLitKgoPY09jWAhW5d2O6v6MxFyrvwMMkUUzdEAgmMX0Fr5/qA==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@supabase/cli-windows-x64@2.122.1':
+    resolution: {integrity: sha512-m0+Q0k/Jx9oPlTolb/vUmGT3eUuz/MSDSR5Tqe1kfnDl8ra0Fi84697iBUkEc0hD80vIqImBAsTjq6tzNggTlQ==}
+    cpu: [x64]
+    os: [win32]
+
+  '@turbo/darwin-64@2.11.10':
+    resolution: {integrity: sha512-By4idRap5+nLnMuRzLB4qkOPRlvNdyY1ne4VJYDyUoUB11H94k7uif9mbe3JT8JSNXs1D68uMcBj6hJ/jMQRvA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@turbo/darwin-arm64@2.11.10':
+    resolution: {integrity: sha512-pyEYlVcuexOPa92p0Wlwl9YT1Is5D60lxN3ItWm3g30YLvFaUq86TF4BBWg5ZAc0uMTnrOzCvuCsOBTdzUWnRQ==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@turbo/linux-64@2.11.10':
+    resolution: {integrity: sha512-1tYeR/IDZ5HEdsb0jNq2L2xam5nMQ+g80tlV2BZmv4OFw+pMcUM0mMmUcfc5wXPPNHVNPuDMjh9Y8G8HgXPLZA==}
+    cpu: [x64]
+    os: [android, linux]
+
+  '@turbo/linux-arm64@2.11.10':
+    resolution: {integrity: sha512-HuekQxvVGhUd46g1Im/DKdOtglHr4/gguZAvzEpPUgtxNkztSa8lWhQEGQ+EmPQ0n7w19qjThFU+OfEEd0uvlw==}
+    cpu: [arm64]
+    os: [android, linux]
+
+  '@turbo/windows-64@2.11.10':
+    resolution: {integrity: sha512-UJOP3BkbreY3/JlMgJR6ZiimxYIBn+c+B4tnBIxD0E9c3Estmk+XoVNVBNBottZLNRXe3/ScgOU4+/k8tIWysg==}
+    cpu: [x64]
+    os: [win32]
+
+  '@turbo/windows-arm64@2.11.10':
+    resolution: {integrity: sha512-xOkEjF3ws/b/YNlc+bvJHMYBn+vL+QbEISZFVi0qS+ImmhA1X3/gmNmBrjjIG3dg6aeN+n6gQitzSkXQ286qJQ==}
+    cpu: [arm64]
+    os: [win32]
+
+  eciesjs@0.5.0:
+    resolution: {integrity: sha512-s0J9SEVYAEPg7J63GFMApLYzPH9VNIQIyC6s15JpnqVc0TqcKWdbgFlnAweEBRyMmko2dcs2sfC83Hj4J43tuA==}
+    engines: {bun: '>=1', deno: '>=2.7.10', node: '>=16'}
+
+  jose@6.2.15:
+    resolution: {integrity: sha512-qdF6ewcZARtef63fJ9AKKZPgxw+t7USH6HLXYcD4CrdmSvDp79rpJSPFEKc90QBeGS63u1KQtN2MZQHC0yDIzA==}
+
+  prettier@3.9.10:
+    resolution: {integrity: sha512-skGHTH1Yb9QvaTC4hWnRTzEYtCpApF0UMBPz+t/0ZPzP8ihefo/btKd+QA7pUE0fEwA1SbS/NmhyEcstdXOIdA==}
+    engines: {node: '>=14'}
+    hasBin: true
+
+  supabase@2.122.1:
+    resolution: {integrity: sha512-uorIJ5Cu8qeJtudBmj1eoFrQzriy7TRPtNM9Kiwb5BDOR7xPGIr1cSBaNCjUncJfKl3swuUrfVJsWz0+ywmEMA==}
+    hasBin: true
+
+  turbo@2.11.10:
+    resolution: {integrity: sha512-3GJYwig8ygEI89oaOZdduJX8/aw6O9eRPYHoIt6T3FZl9hkKjiyIspufJoVgqXihPoJu8M5CSV0DlZvzfohBCw==}
+    hasBin: true
+
+  typescript@5.9.3:
+    resolution: {integrity: sha512-jl1vZzPDinLr9eUt3J/t7V6FgNEw9QjvBPdysz9KfQDD41fQrC2Y4vKQdiaUpFT4bXlb1RHhLpp8wtm6M5TgSw==}
+    engines: {node: '>=14.17'}
+    hasBin: true
+
+  zod@4.6.7:
+    resolution: {integrity: sha512-g8W2D2kU6a8untc053fX1uVBKzM7yqAxW/3zwk83+6RyF2+SKOuV+c0wBDhUwzV1PaGapmZH+rmcUzPf+3CGwg==}
+
+snapshots:
+
+  '@ecies/ciphers@0.2.6(@noble/ciphers@1.3.0)':
+    dependencies:
+      '@noble/ciphers': 1.3.0
+
+  '@electric-sql/pglite@0.3.16': {}
+
+  '@noble/ciphers@1.3.0': {}
+
+  '@noble/curves@1.9.7':
+    dependencies:
+      '@noble/hashes': 1.8.0
+
+  '@noble/hashes@1.8.0': {}
+
+  '@supabase/cli-darwin-arm64@2.122.1':
+    optional: true
+
+  '@supabase/cli-darwin-x64@2.122.1':
+    optional: true
+
+  '@supabase/cli-linux-arm64-musl@2.122.1':
+    optional: true
+
+  '@supabase/cli-linux-arm64@2.122.1':
+    optional: true
+
+  '@supabase/cli-linux-x64-musl@2.122.1':
+    optional: true
+
+  '@supabase/cli-linux-x64@2.122.1':
+    optional: true
+
+  '@supabase/cli-windows-arm64@2.122.1':
+    optional: true
+
+  '@supabase/cli-windows-x64@2.122.1':
+    optional: true
+
+  '@turbo/darwin-64@2.11.10':
+    optional: true
+
+  '@turbo/darwin-arm64@2.11.10':
+    optional: true
+
+  '@turbo/linux-64@2.11.10':
+    optional: true
+
+  '@turbo/linux-arm64@2.11.10':
+    optional: true
+
+  '@turbo/windows-64@2.11.10':
+    optional: true
+
+  '@turbo/windows-arm64@2.11.10':
+    optional: true
+
+  eciesjs@0.5.0:
+    dependencies:
+      '@ecies/ciphers': 0.2.6(@noble/ciphers@1.3.0)
+      '@noble/ciphers': 1.3.0
+      '@noble/curves': 1.9.7
+      '@noble/hashes': 1.8.0
+
+  jose@6.2.15: {}
+
+  prettier@3.9.10: {}
+
+  supabase@2.122.1:
+    dependencies:
+      eciesjs: 0.5.0
+      jose: 6.2.15
+    optionalDependencies:
+      '@supabase/cli-darwin-arm64': 2.122.1
+      '@supabase/cli-darwin-x64': 2.122.1
+      '@supabase/cli-linux-arm64': 2.122.1
+      '@supabase/cli-linux-arm64-musl': 2.122.1
+      '@supabase/cli-linux-x64': 2.122.1
+      '@supabase/cli-linux-x64-musl': 2.122.1
+      '@supabase/cli-windows-arm64': 2.122.1
+      '@supabase/cli-windows-x64': 2.122.1
+
+  turbo@2.11.10:
+    optionalDependencies:
+      '@turbo/darwin-64': 2.11.10
+      '@turbo/darwin-arm64': 2.11.10
+      '@turbo/linux-64': 2.11.10
+      '@turbo/linux-arm64': 2.11.10
+      '@turbo/windows-64': 2.11.10
+      '@turbo/windows-arm64': 2.11.10
+
+  typescript@5.9.3: {}
+
+  zod@4.6.7: {}

@@ -1,0 +1,19 @@
+{
+  "name": "@signal/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./gen/ts/enums.ts",
+    "./enums.json": "./schema/enums.json"
+  },
+  "scripts": {
+    "gen": "node scripts/gen.mjs",
+    "gen:check": "node scripts/gen.mjs --check",
+    "test": "node --test \"test/**/*.test.mjs\"",
+    "typecheck": "tsc --noEmit -p ."
+  },
+  "dependencies": {
+    "zod": "^4.6.7"
+  }
+}

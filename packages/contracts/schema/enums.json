@@ -1,0 +1,28 @@
+{
+  "$comment": "Canonical closed value lists — PRD Appendix A.2, A.3, A.4. The ONLY source of these values in code. Postgres enums in supabase/migrations must match (checked by `pnpm db:check`). Changing a list = a reviewed change + a migration.",
+  "enums": {
+    "EntityType":                { "pg": "entity_type",                 "values": ["company", "person", "site", "digital_asset", "query"] },
+    "AliasType":                 { "pg": "alias_type",                  "values": ["registry_id", "domain", "profile_url", "name_country"], "note": "Listed in matching priority order." },
+    "DataScope":                 { "pg": "data_scope",                  "values": ["shared", "tenant"] },
+    "ClaimStatus":               { "pg": "claim_status",                "values": ["active", "superseded", "retracted"] },
+    "ExtractionStatus":          { "pg": "extraction_status",           "values": ["pending", "extracted", "irrelevant", "failed"] },
+    "BriefState":                { "pg": "brief_state",                 "values": ["Draft", "Pilot", "Active", "Paused", "Archived"] },
+    "EditTier":                  { "pg": "edit_tier",                   "values": ["Narrow", "Redefine", "Expand"] },
+    "Verdict":                   { "pg": "verdict_value",               "values": ["Confirmed", "Likely", "Unverified", "Contradicted"] },
+    "ScoreDimension":            { "pg": "score_dimension",             "values": ["Fit", "Evidence", "Scale", "Timing", "Reachability"] },
+    "Band":                      { "pg": "band",                        "values": ["High", "Medium", "Low", "Excluded"] },
+    "Stage":                     { "pg": "stage",                       "values": ["Untouched", "Queued", "Contacted", "Engaged", "Qualified", "Meeting", "Handed off", "Dormant", "Disqualified"] },
+    "ReplyClass":                { "pg": "reply_class",                 "values": ["Interested", "Referral", "Not now", "Not interested", "Out of office", "Unsubscribe"] },
+    "Motion":                    { "pg": "motion",                      "values": ["Geographic", "Vertical", "Event", "Trigger", "Re-engagement"] },
+    "PushMode":                  { "pg": "push_mode",                   "values": ["off", "dry run", "live"] },
+    "AccessMode":                { "pg": "access_mode",                 "values": ["Read", "Write", "Read-write"] },
+    "FieldOwner":                { "pg": "field_owner",                 "values": ["Platform", "External"] },
+    "ContactVerificationStatus": { "pg": "contact_verification_status", "values": ["valid", "risky", "invalid", "unknown"] },
+    "Role":                      { "pg": "member_role",                 "values": ["Owner", "Admin", "Editor", "Operator", "Viewer"], "note": "Owner and Admin are organisation-level; Editor, Operator, Viewer are per workspace." },
+    "TokenScope":                { "pg": "token_scope",                 "values": ["Read", "Write", "Admin"] },
+    "NextStepMode":              { "pg": "next_step_mode",              "values": ["Suggest", "Active"] },
+    "GateOutcome":               { "pg": "gate_outcome",                "values": ["applied", "review queue", "digest"] },
+    "ActivityKind":              { "pg": "activity_kind",               "values": ["message_sent", "message_bounced", "reply_received", "auto_reply", "unsubscribed", "inbound_contact", "meeting_scheduled", "meeting_held", "call_logged", "note_added", "marked_qualified", "marked_disqualified", "deal_created", "deal_stage_changed", "task_completed"] },
+    "EventType":                 { "pg": "event_type",                  "values": ["brief.version_published", "source_record.created", "claim.created", "claim.retracted", "entity.created", "entity.merged", "entity.unmerged", "verdict.changed", "research_doc.published", "contact_point.verified", "score.band_changed", "campaign.member_added", "campaign.paused", "reply.received", "reply.classified", "account.stage_changed", "meeting.held", "task.created", "health.incident_opened", "health.incident_resolved"], "note": "Closed event catalogue (A.4). Adding an event is a reviewed change." }
+  }
+}

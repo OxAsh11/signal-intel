@@ -1,0 +1,13 @@
+packages:
+  - "apps/*"
+  - "packages/ui"
+  - "packages/contracts"
+  - "packages/db-types"
+  - "packages/config"
+
+onlyBuiltDependencies:
+  - supabase
+  - esbuild
+  - sharp
+  - "@tailwindcss/oxide"
+  - unrs-resolver
