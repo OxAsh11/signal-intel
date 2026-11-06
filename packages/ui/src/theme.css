@@ -1,0 +1,38 @@
+/* GENERATED from design/signal-intel-ds/project/tokens.json by packages/ui/scripts/build-tokens.mjs. Do not edit. */
+@theme inline {
+  --color-paper: var(--paper);
+  --color-surface: var(--surface);
+  --color-surface-sunken: var(--surface-sunken);
+  --color-line: var(--line);
+  --color-line-strong: var(--line-strong);
+  --color-ink: var(--ink);
+  --color-ink-muted: var(--ink-muted);
+  --color-ink-faint: var(--ink-faint);
+  --color-signal: var(--signal);
+  --color-signal-strong: var(--signal-strong);
+  --color-signal-soft: var(--signal-soft);
+  --color-on-signal: var(--on-signal);
+  --color-marker: var(--marker);
+  --color-marker-soft: var(--marker-soft);
+  --color-verdict-confirmed: var(--verdict-confirmed);
+  --color-verdict-confirmed-soft: var(--verdict-confirmed-soft);
+  --color-on-verdict-confirmed: var(--on-verdict-confirmed);
+  --color-positive: var(--positive);
+  --color-positive-soft: var(--positive-soft);
+  --color-caution: var(--caution);
+  --color-caution-soft: var(--caution-soft);
+  --color-danger: var(--danger);
+  --color-danger-soft: var(--danger-soft);
+  --color-on-danger: var(--on-danger);
+  --color-band-medium: var(--band-medium);
+}
+
+@theme {
+  --radius-xs: 2px;
+  --radius-sm: 4px;
+  --radius-md: 6px;
+  --radius-lg: 10px;
+  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --font-serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
+}

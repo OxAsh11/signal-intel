@@ -1,0 +1,33 @@
+@import 'tailwindcss';
+@import '@signal/ui/tokens.css';
+@import '@signal/ui/theme.css';
+@import '@signal/ui/components.css';
+
+/* next/font self-hosts the faces; put them first in each stack from tokens.json. */
+:root {
+  --font-sans: var(--font-instrument-sans), 'Instrument Sans', ui-sans-serif, system-ui, 'Segoe UI', sans-serif;
+  --font-serif: var(--font-source-serif), 'Source Serif 4', Georgia, serif;
+  --font-mono: var(--font-jetbrains-mono), 'JetBrains Mono', ui-monospace, 'Cascadia Mono', monospace;
+}
+
+html,
+body {
+  height: 100%;
+}
+
+body {
+  margin: 0;
+  background: var(--paper);
+  color: var(--ink);
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 20px;
+  -webkit-font-smoothing: antialiased;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * {
+    transition: none !important;
+    animation: none !important;
+  }
+}
