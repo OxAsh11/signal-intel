@@ -2,6 +2,7 @@
 name = "signal-intel"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
+dependencies = ["signal-core", "worker"]
 
 [tool.uv]
 package = false
@@ -29,6 +30,9 @@ extend-exclude = ["node_modules", ".next", "apps", "design"]
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
 
+[tool.ruff.lint.isort]
+known-first-party = ["signal_core", "worker"]
+
 [tool.mypy]
 python_version = "3.13"
 strict = true
@@ -43,4 +47,5 @@ ignore_missing_imports = true
 [tool.pytest.ini_options]
 testpaths = ["packages/signal_core/tests", "services/worker/tests"]
 asyncio_mode = "auto"
+addopts = "--import-mode=importlib"
 asyncio_default_fixture_loop_scope = "function"

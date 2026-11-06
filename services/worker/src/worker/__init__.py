@@ -1,0 +1,1 @@
+"""Signal Intel worker service."""

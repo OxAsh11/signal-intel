@@ -14,7 +14,8 @@ alter table public.job_type_config enable row level security;   -- service role 
 
 insert into public.job_type_config (job_type, expected_window) values
   ('system.heartbeat', interval '5 minutes'),
-  ('outbox.relay',     null);
+  ('outbox.relay',     null),
+  ('outbox.dispatch',  null);
 
 create table public.workspace_settings (
   workspace_id            uuid primary key references public.workspace (id) on delete cascade,
