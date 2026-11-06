@@ -66,10 +66,15 @@ pnpm install
 ```bash
 uv sync
 ```
+Pull the dev project's URL and keys into `apps/web/.env.local` (web) and `.env` (worker). The script never prints them:
+
 ```bash
-cp .env.example .env.local
+pnpm exec supabase login
 ```
-Fill `.env.local` (web) and `.env` (worker) with the **dev** project's values, then run:
+```bash
+pnpm env:pull <dev-project-ref>
+```
+Then add `DATABASE_URL_SESSION` to `.env` by hand (Supabase → Connect → Session pooler; it contains your database password), and run:
 
 ```bash
 pnpm dev
