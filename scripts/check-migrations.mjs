@@ -382,8 +382,8 @@ check('memory_chunk full-text search works', (await one(
     `insert into public.usage_ledger (org_id, workspace_id, brief_id, capability, provider, model, unit, quantity, cost_usd, status)
      values ($1, $2, $3, 'extract', 'anthropic', 'claude-sonnet-5-5', 'ai_input_tokens', 1000, $4, $5)`, [orgA, ws, brief, cost, status]);
   const cap = (ws, brief, period, usd) => rpc(A, `select public.set_budget($1, $2, $3::public.budget_period, $4)`, [ws, brief, period, usd]);
-  const reserve = async (ws, brief, est, approval = null) =>
-    (await one(`select app.reserve_budget($1, $2, $3, 'extract.run', '{"k":1}', $4) r`, [ws, brief, est, approval])).r;
+  const reserve = async (ws, brief, est, approval = null, args = '{"k":1}') =>
+    (await one(`select app.reserve_budget($1, $2, $3, 'extract.run', $5::jsonb, $4) r`, [ws, brief, est, approval, args])).r;
   const day = async (ws) => Number((await one(`select app.period_spend($1, null, 'day') v`, [ws])).v);
 
   // Seeds.
@@ -485,7 +485,7 @@ check('memory_chunk full-text search works', (await one(
     await cap(ws, null, 'day', 10);
     await spend(ws, null, 9);
     const big = (await reserve(ws, null, 30)).approval_id;
-    const small = (await reserve(ws, null, 20)).approval_id;
+    const small = (await reserve(ws, null, 20, null, '{"k":2}')).approval_id;  // other args: a separate request
     check('viewer cannot approve', await throws(() => rpc(K, `select public.decide_budget_approval($1, true)`, [small])));
     check('operator cannot approve', await throws(() => rpc(H, `select public.decide_budget_approval($1, true)`, [small])));
     check('viewer cannot read approvals', (await rpc(K, `select count(*)::int n from public.budget_approval`)).rows[0].n === 0);
@@ -545,6 +545,71 @@ check('memory_chunk full-text search works', (await one(
     check('a null cap deletes the budget', (await one(`select count(*)::int n from public.budget where workspace_id = $1`, [ws])).n === 0);
   }
 
+  // 0014: pending approvals are reused, not duplicated
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 1);
+    const r1 = await reserve(ws, brief, 5);
+    const r2 = await reserve(ws, brief, 5);
+    check('a repeated refusal reuses the pending approval', r1.ok === false && r2.ok === false && r1.approval_id === r2.approval_id, JSON.stringify([r1, r2]));
+    const cnt = (await one(`select count(*)::int n from public.budget_approval where workspace_id = $1`, [ws])).n;
+    check('only one approval row exists for the repeated request', cnt === 1, String(cnt));
+    const aud = (await one(`select count(*)::int n from public.audit_log where target_id = $1 and action = 'budget.approval_requested'`, [r1.approval_id])).n;
+    check('the reused approval is audited once', aud === 1, String(aud));
+    const other = (await one(`select app.reserve_budget($1, $2, 5, 'extract.run', '{"k":2}') r`, [ws, brief])).r;
+    check('different job args get their own approval', other.approval_id !== r1.approval_id);
+    const noBrief = await reserve(ws, null, 5);
+    check('a different Brief scope gets its own approval', noBrief.approval_id !== r1.approval_id);
+    await rpc(A, `select public.decide_budget_approval($1, false)`, [r1.approval_id]);
+    const r3 = await reserve(ws, brief, 5);
+    check('a decided approval is not reused', r3.approval_id !== r1.approval_id);
+  }
+
+  // 0014: set_budget no-op remove and null period
+  {
+    const { ws } = await newWs();
+    const before = (await one(`select count(*)::int n from public.audit_log where target_id = $1`, [ws])).n;
+    await rpc(A, `select public.set_budget($1, null, 'day', null)`, [ws]);
+    const after = (await one(`select count(*)::int n from public.audit_log where target_id = $1`, [ws])).n;
+    check('removing a budget that does not exist writes no audit row', before === after, `${before} -> ${after}`);
+    check('set_budget with a null period raises', await throws(() => rpc(A, `select public.set_budget($1, null, null, 5)`, [ws])));
+  }
+
+  // 0014: stale reservations are released, old pending approvals expire
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 100);
+    const old = (await one(
+      `insert into public.usage_ledger (org_id, workspace_id, brief_id, capability, cost_usd, status, reservation_id, created_at)
+       values ($1, $2, $3, 'extract.run', 4, 'reserved', gen_random_uuid(), now() - interval '2 hours') returning reservation_id`, [orgA, ws, brief])).reservation_id;
+    const settledOld = (await one(
+      `insert into public.usage_ledger (org_id, workspace_id, capability, cost_usd, status, reservation_id, created_at)
+       values ($1, $2, 'extract.run', 3, 'reserved', gen_random_uuid(), now() - interval '2 hours') returning reservation_id`, [orgA, ws])).reservation_id;
+    await db.query(`select app.settle_reservation($1, null)`, [settledOld]);
+    const fresh = await reserve(ws, null, 2);
+    const oldApproval = (await one(
+      `insert into public.budget_approval (org_id, workspace_id, job_type, estimate_usd, reason, requested_at)
+       values ($1, $2, 'extract.run', 1, 'x', now() - interval '8 days') returning id`, [orgA, ws])).id;
+    const newApproval = (await one(
+      `insert into public.budget_approval (org_id, workspace_id, job_type, estimate_usd, reason)
+       values ($1, $2, 'extract.run', 1, 'x') returning id`, [orgA, ws])).id;
+    check('stale and fresh reservations both count before the sweep', (await day(ws)) === 6, String(await day(ws)));
+    const res = (await one(`select app.release_stale_reservations() r`)).r;
+    check('the sweep reports one release and one expiry', res.released === 1 && res.expired === 1, JSON.stringify(res));
+    check('releasing a stale reservation drops spend', (await day(ws)) === 2, String(await day(ws)));
+    const twin = await one(`select cost_usd::float8 c, brief_id, capability from public.usage_ledger where reservation_id = $1 and status = 'released'`, [old]);
+    check('the released row is a zero-cost twin copying brief and capability', twin.c === 0 && twin.brief_id === brief && twin.capability === 'extract.run', JSON.stringify(twin));
+    const freshTwin = (await one(`select count(*)::int n from public.usage_ledger where reservation_id = $1 and status = 'released'`, [fresh.reservation_id])).n;
+    check('a fresh reservation is untouched', freshTwin === 0);
+    const st = async (id) => (await one(`select status from public.budget_approval where id = $1`, [id])).status;
+    check('a pending approval older than 7 days expires', (await st(oldApproval)) === 'expired');
+    check('a recent pending approval is untouched', (await st(newApproval)) === 'pending');
+    const again = (await one(`select app.release_stale_reservations() r`)).r;
+    check('a second sweep finds nothing', again.released === 0 && again.expired === 0, JSON.stringify(again));
+    check('clients cannot call release_stale_reservations', await throws(() => rpc(A, `select app.release_stale_reservations()`)));
+    check('budget.release_stale is seeded', (await one(`select count(*)::int n from public.job_type_config where job_type = 'budget.release_stale'`)).n === 1);
+  }
+
   // access
   {
     check('other org cannot read ledger', (await rpc(B, `select count(*)::int n from public.usage_ledger`)).rows[0].n === 0);
@@ -571,6 +636,21 @@ check('memory_chunk full-text search works', (await one(
     await db.query(`insert into public.health_check (component, status, detail) values ('ai_gateway', 'ok', '{"chat":true,"embed":false,"secret":"x"}')`);
     const s = (await rpc(C, `select public.ai_status() s`)).rows[0].s;
     check('ai_status reflects the latest gateway check and nothing else', s.chat === true && s.embed === false && Boolean(s.checked_at) && Object.keys(s).sort().join() === 'chat,checked_at,embed', JSON.stringify(s));
+  }
+
+  // M1: no function in public or app is executable by anon
+  {
+    // Allowlist: functions anon may run on purpose. Empty: signed-out visitors call nothing here.
+    const allow = new Set([]);
+    const { rows } = await db.query(
+      `select n.nspname || '.' || p.proname as fn
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname in ('public', 'app') and p.prokind = 'f'
+          and has_function_privilege('anon', p.oid, 'execute')
+          and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+        order by 1`);
+    const bad = rows.map((r) => r.fn).filter((f) => !allow.has(f));
+    check('no public function executable by anon outside allowlist', bad.length === 0, bad.join(','));
   }
 
   // audit

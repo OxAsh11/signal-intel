@@ -2,6 +2,16 @@
 
 The budget check comes before the call: a reservation over a cap never goes through.
 Nothing here logs prompt text or completions; at most ids, amounts and statuses.
+
+Job/approval contract (R30). When a call would exceed a cap, `reserve` raises BudgetPaused and an
+approval is recorded from the CallContext. After it is approved, `budget.resume` re-queues the job
+only if all of these hold:
+  * `CallContext.job_type` is a registered Procrastinate task name;
+  * `CallContext.job_args` are exactly that task's keyword arguments;
+  * the task accepts an `approval_id` keyword argument (passed through to CallContext.job_args so
+    the retried call is let through).
+An approval covers one call's estimate, not a whole job. Calls from the eval CLI are not resumable:
+their pause is reported and nothing re-queues them.
 """
 
 import json
@@ -121,6 +131,10 @@ class ApprovalStore(Protocol):
     async def claim_approved(self, limit: int) -> list[ApprovedJob]: ...
 
     async def unclaim(self, approval_id: UUID) -> None: ...
+
+    async def release_stale(self) -> dict[str, int]:
+        """Release leaked reservations and expire old pending approvals; returns counts only."""
+        ...
 
 
 # -- Postgres implementations ---------------------------------------------------
@@ -253,6 +267,13 @@ class PgApprovalStore:
                 (approval_id,),
             )
 
+    async def release_stale(self) -> dict[str, int]:
+        async with self._pool.connection() as conn, conn.transaction():
+            cur = await conn.execute("select app.release_stale_reservations()")
+            row = await cur.fetchone()
+        result = row[0] if row else {}
+        return {"released": int(result.get("released", 0)), "expired": int(result.get("expired", 0))}
+
 
 # -- In-memory test doubles -----------------------------------------------------
 
@@ -366,6 +387,7 @@ class MemoryApprovalStore:
     def __init__(self, approvals: list[ApprovedJob] | None = None) -> None:
         self.approvals = list(approvals or [])
         self.resumed: set[UUID] = set()
+        self.release_stale_calls = 0
 
     async def claim_approved(self, limit: int) -> list[ApprovedJob]:
         claimed = [a for a in self.approvals if a.id not in self.resumed][:limit]
@@ -374,3 +396,7 @@ class MemoryApprovalStore:
 
     async def unclaim(self, approval_id: UUID) -> None:
         self.resumed.discard(approval_id)
+
+    async def release_stale(self) -> dict[str, int]:
+        self.release_stale_calls += 1
+        return {"released": 0, "expired": 0}

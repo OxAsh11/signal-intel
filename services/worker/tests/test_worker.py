@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Any
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import procrastinate
 import pytest
@@ -64,7 +64,7 @@ def make_app(
 def test_app_registers_phase0_jobs() -> None:
     app = make_app()
     assert {"system.heartbeat", "system.canary", DISPATCH_TASK} <= set(app.tasks)
-    assert {"system.ai_status", "budget.resume"} <= set(app.tasks)
+    assert {"system.ai_status", "budget.resume", "budget.release_stale"} <= set(app.tasks)
     assert isinstance(app, procrastinate.App)
 
 
@@ -253,3 +253,49 @@ async def test_approved_job_not_paused_again() -> None:
         uuid4(), ws, None, "j", "test.work", {"approval_id": str(paused.value.approval_id)}
     )
     assert await guard.reserve(resumed, Decimal("2"))
+
+
+async def test_release_stale_cron_is_registered_and_calls_the_store() -> None:
+    store = MemoryApprovalStore()
+    app = make_app(approvals=store)
+    periodic = [t for t in app.periodic_registry.periodic_tasks.values()]
+    assert any(
+        t.task.name == "budget.release_stale" and t.cron == "*/5 * * * *" for t in periodic
+    )
+    assert app.tasks["budget.release_stale"].queue == "system"
+    async with app.open_async():
+        await app.tasks["budget.release_stale"].defer_async(timestamp=0)
+        await run_system_queue(app)
+    assert store.release_stale_calls >= 1
+
+
+class FlakyUnclaimStore(MemoryApprovalStore):
+    def __init__(self, approvals: list[ApprovedJob]) -> None:
+        super().__init__(approvals)
+        self.unclaim_attempts: list[UUID] = []
+
+    async def unclaim(self, approval_id: UUID) -> None:
+        self.unclaim_attempts.append(approval_id)
+        raise RuntimeError("db down")
+
+
+async def test_unclaim_failure_does_not_lose_the_batch() -> None:
+    first, second = approved(), approved()
+    store = FlakyUnclaimStore([first, second])
+    connector = InMemoryConnector()
+    app = make_app(approvals=store, connector=connector)
+    real = connector.defer_jobs_all
+
+    async def fail_first(jobs: Any) -> Any:
+        if any(
+            j.task_name == "test.work" and j.args.get("approval_id") == str(first.id) for j in jobs
+        ):
+            raise RuntimeError("db down")
+        return await real(jobs)
+
+    connector.defer_jobs_all = fail_first  # type: ignore[method-assign]
+    async with app.open_async():
+        await tick(app)
+    assert store.unclaim_attempts == [first.id]  # the unclaim was tried and failed
+    ids = [j["args"]["approval_id"] for j in work_jobs(connector)]
+    assert ids == [str(second.id)]  # the rest of the batch still resumed

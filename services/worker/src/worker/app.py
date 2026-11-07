@@ -18,6 +18,7 @@ log = get_logger(__name__)
 
 CANARY_CRON = "17 3 * * *"  # daily, 03:17 UTC
 AI_STATUS_CRON = "*/10 * * * *"
+RELEASE_STALE_CRON = "*/5 * * * *"
 RESUME_BATCH = 50
 
 
@@ -85,7 +86,11 @@ def build_app(
                         name=approved.job_type, queueing_lock=str(approved.id)
                     ).defer_async(**args)
             except Exception:
-                await approvals.unclaim(approved.id)
+                try:
+                    await approvals.unclaim(approved.id)
+                except Exception:
+                    # One failed unclaim must not lose the rest of the batch (ids only in the log).
+                    log.exception("budget.unclaim_failed", approval_id=str(approved.id))
                 log.exception(
                     "budget.resume_failed",
                     approval_id=str(approved.id),
@@ -95,6 +100,15 @@ def build_app(
             log.info("budget.resumed", approval_id=str(approved.id), job_type=approved.job_type)
             resumed += 1
         return resumed
+
+    @app.periodic(cron=RELEASE_STALE_CRON, periodic_id="budget.release_stale")
+    @job(app, type="budget.release_stale", kill_switch=kill_switch, queue="system", retry=0)
+    async def budget_release_stale(timestamp: int) -> dict[str, int]:
+        # A crash between reserve and settle leaves a reservation counting as spend; release those
+        # older than 30 minutes and expire approvals pending over 7 days. Counts only in the log.
+        counts = await approvals.release_stale()
+        log.info("budget.release_stale", **counts)
+        return counts
 
     @job(app, type=DISPATCH_TASK, kill_switch=kill_switch, queue="events")
     async def dispatch(**event: Any) -> None:
