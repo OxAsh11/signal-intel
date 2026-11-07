@@ -7,7 +7,8 @@ import { createClient } from '@/lib/supabase/client';
 
 type Provider = 'google' | 'azure';
 
-export function SignInButtons() {
+/** Buttons only for providers that are switched on; the login page shows placeholders for the rest. */
+export function SignInButtons({ providers }: { providers: Provider[] }) {
   const params = useSearchParams();
   const [pending, setPending] = useState<Provider | null>(null);
   const [error, setError] = useState<string | null>(params.get('error') ? 'Sign-in did not complete. Try again.' : null);
@@ -40,12 +41,16 @@ export function SignInButtons() {
 
   return (
     <div className="flex flex-col gap-3">
-      <Button variant="primary" disabled={pending !== null} onClick={() => signIn('google')}>
-        {pending === 'google' ? 'Redirecting…' : 'Continue with Google'}
-      </Button>
-      <Button disabled={pending !== null} onClick={() => signIn('azure')}>
-        {pending === 'azure' ? 'Redirecting…' : 'Continue with Microsoft'}
-      </Button>
+      {providers.includes('google') ? (
+        <Button variant="primary" disabled={pending !== null} onClick={() => signIn('google')}>
+          {pending === 'google' ? 'Redirecting…' : 'Continue with Google'}
+        </Button>
+      ) : null}
+      {providers.includes('azure') ? (
+        <Button variant={providers.includes('google') ? undefined : 'primary'} disabled={pending !== null} onClick={() => signIn('azure')}>
+          {pending === 'azure' ? 'Redirecting…' : 'Continue with Microsoft'}
+        </Button>
+      ) : null}
       {error ? (
         <p role="alert" className="text-danger">
           {error}
