@@ -5,9 +5,7 @@ actual values of the mismatched keys.
 """
 
 import argparse
-import asyncio
 import json
-import selectors
 import sys
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass, field
@@ -25,6 +23,7 @@ from signal_core.ai_gateway.prompts import Prompt, load_prompt
 from signal_core.ai_gateway.providers.fake import FakeProvider
 from signal_core.config import Settings, get_settings
 from signal_core.contracts.enums import UsageUnit
+from signal_core.db import run_async
 from signal_core.metering import BudgetPaused, CallContext, MemoryBudgetGuard, MemoryPriceBook
 
 # packages/signal_core/evals, next to src/. Evals run from the repo checkout.
@@ -155,13 +154,7 @@ async def _run_real(
 
 
 def _run(make: Callable[[], Coroutine[Any, Any, EvalReport]]) -> EvalReport:
-    if sys.platform == "win32":
-        # psycopg's async mode cannot run on Windows' default Proactor loop.
-        with asyncio.Runner(
-            loop_factory=lambda: asyncio.SelectorEventLoop(selectors.SelectSelector())
-        ) as runner:
-            return runner.run(make())
-    return asyncio.run(make())
+    return run_async(make())
 
 
 def main(argv: list[str] | None = None) -> int:

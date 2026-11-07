@@ -9,7 +9,7 @@ from psycopg import AsyncConnection
 
 from signal_core.ai_gateway.factory import build_gateway
 from signal_core.config import Settings, get_settings
-from signal_core.db import configure_worker_connection, make_pool
+from signal_core.db import configure_worker_connection, make_pool, run_async
 from signal_core.events import (
     DISPATCH_TASK,
     Deferrer,
@@ -118,7 +118,7 @@ async def amain() -> None:
 
 def run() -> None:
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(amain())
+        run_async(amain())
 
 
 if __name__ == "__main__":
