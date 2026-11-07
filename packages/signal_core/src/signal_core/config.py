@@ -23,7 +23,7 @@ class Settings(BaseSettings):
     ai_model_judge: str = "claude-sonnet-5-5"
     ai_model_prejudge: str = "claude-haiku-5-5"
     ai_model_write: str = "claude-sonnet-5-5"
-    ai_model_embed: str = "voyage-3.5"
+    ai_model_embed: str = "voyage-4"
 
     sentry_dsn: SecretStr | None = None
 
