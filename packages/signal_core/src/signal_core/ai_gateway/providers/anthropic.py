@@ -68,11 +68,11 @@ class AnthropicProvider:
                 **extra,
             )
         except APIStatusError as exc:
-            raise AiProviderError(f"anthropic status {exc.status_code}") from exc
+            raise AiProviderError(f"anthropic status {exc.status_code}") from None
         except APIConnectionError as exc:
-            raise AiProviderError(f"anthropic connection error: {type(exc).__name__}") from exc
+            raise AiProviderError(f"anthropic connection error: {type(exc).__name__}") from None
         except AnthropicError as exc:
-            raise AiProviderError(f"anthropic error: {type(exc).__name__}") from exc
+            raise AiProviderError(f"anthropic error: {type(exc).__name__}") from None
         text = "".join(b.text for b in response.content if b.type == "text")
         return Completion(
             text=text,

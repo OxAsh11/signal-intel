@@ -1,4 +1,5 @@
 import time
+import traceback
 from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
@@ -115,6 +116,20 @@ async def test_schema_invalid_output_rejected_and_ledgered() -> None:
     assert [s.status for s in budget.settles] == ["rejected"]
     assert len(budget.lines) == 2
     assert not budget.reservations
+
+
+async def test_invalid_output_does_not_chain_completion() -> None:
+    secret = "TOP-SECRET-COMPLETION-TEXT"
+    gw, _, _ = make(chat=FakeProvider({"*": f'{{"company": "{secret}"}}'}))
+    with pytest.raises(AiOutputInvalid) as exc:
+        await gw.run(Capability.EXTRACT, load_prompt("canary_extract", 1), vars_(), Canary, ctx())
+    err = exc.value
+    # The pydantic error carries input_value=<completion>; it must not be reachable from here.
+    assert err.__cause__ is None
+    assert err.__context__ is None or err.__suppress_context__
+    assert secret not in str(err)
+    assert secret not in repr(err)
+    assert secret not in "".join(traceback.format_exception(err))
 
 
 async def test_max_tokens_stop_is_invalid_and_ledgered() -> None:

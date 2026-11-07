@@ -30,6 +30,6 @@ class VoyageProvider:
                 texts, model=model, input_type=input_type, output_dimension=DIMENSIONS
             )
         except VoyageError as exc:
-            raise AiProviderError(f"voyage error: {type(exc).__name__}") from exc
+            raise AiProviderError(f"voyage error: {type(exc).__name__}") from None
         vectors = [[float(x) for x in v] for v in result.embeddings]
         return Embeddings(vectors=vectors, tokens=int(result.total_tokens), model=model)

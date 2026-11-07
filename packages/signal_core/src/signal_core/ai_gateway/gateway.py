@@ -230,11 +230,16 @@ class AiGateway:
         if completion.stop_reason == "max_tokens":
             await settle("rejected")
             raise AiOutputInvalid(["output truncated at max_tokens"])
+        errors: list[str] | None = None
         try:
             value = output.model_validate_json(strip_fence(completion.text))
         except ValidationError as exc:
+            errors = _error_strings(exc)
+        if errors is not None:
+            # Raised outside the handler and unchained: the pydantic error carries the completion
+            # (input_value) and Procrastinate logs failed jobs with their traceback.
             await settle("rejected")
-            raise AiOutputInvalid(_error_strings(exc)) from exc
+            raise AiOutputInvalid(errors) from None
         await settle("ok")
         return Result(value=value, extractor_version_id=version_id, cost_usd=total)
 
