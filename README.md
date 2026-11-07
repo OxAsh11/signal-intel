@@ -37,3 +37,5 @@ Full checks:
 ```bash
 pnpm codegen:check && pnpm lint && pnpm typecheck && pnpm test && pnpm db:check && pnpm build && pnpm py:check
 ```
+
+AI keys, `uv run ai-eval`, `pytest -m db` and the job/approval contract are described in [docs/deploy.md](docs/deploy.md#ai-gateway-evals-and-budgets).

@@ -94,6 +94,14 @@ pnpm py:check
 
 `pnpm db:check` applies every migration to an in-memory Postgres (PGlite) and checks tenant isolation, write paths, audit immutability and enum drift. The full pgTAP suite runs against real Supabase in CI.
 
+## AI gateway, evals and budgets
+
+- **Keys and models (worker):** `ANTHROPIC_API_KEY` (Claude), `VOYAGE_API_KEY` (embeddings), and the model names `AI_MODEL_EXTRACT`, `AI_MODEL_JUDGE`, `AI_MODEL_PREJUDGE`, `AI_MODEL_WRITE`, `AI_MODEL_EMBED` (defaults are in `.env.example`). Without a key the matching capability is off and Settings shows "Not set up yet"; jobs that need it end without retrying.
+- **Eval CLI:** `uv run ai-eval <name>@<version> [--fake] [--workspace <uuid>]`. `--fake` uses a deterministic provider and spends nothing. Without it, `--workspace` names the workspace to charge.
+- **Database tests:** `uv run pytest -m db` runs against `DATABASE_URL_SESSION` (the shared dev database) and leaves its test rows there.
+- **Job and approval contract:** when a call would pass a budget cap, the job pauses (it ends cleanly and is not retried) and an approval is raised. A paused job resumes only when `CallContext.job_type` is a registered task name, `job_args` are exactly that task's keyword arguments, and the task accepts an `approval_id` keyword argument. An approval covers one call's estimate, not a whole job. Eval CLI pauses are not resumable.
+- **Housekeeping:** the `budget.release_stale` job (every 5 minutes) releases reservations older than 30 minutes and expires approvals pending over 7 days.
+
 ## Rules
 
 - Schema changes only through new files in `supabase/migrations/`, merged through a PR. CI applies them. Never edit an applied migration.

@@ -48,4 +48,5 @@ ignore_missing_imports = true
 testpaths = ["packages/signal_core/tests", "services/worker/tests"]
 asyncio_mode = "auto"
 addopts = "--import-mode=importlib"
+markers = ["db: needs a real database (DATABASE_URL_SESSION)"]
 asyncio_default_fixture_loop_scope = "function"

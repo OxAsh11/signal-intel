@@ -198,6 +198,29 @@ class EventType(StrEnum):
     HEALTH_INCIDENT_RESOLVED = "health.incident_resolved"
 
 
+class UsageUnit(StrEnum):
+    """S6 metering units."""
+
+    AI_INPUT_TOKENS = "ai_input_tokens"
+    AI_OUTPUT_TOKENS = "ai_output_tokens"
+    EMBED_TOKENS = "embed_tokens"
+    FETCH = "fetch"
+    ENRICHMENT_LOOKUP = "enrichment_lookup"
+    RESEARCH_DOC = "research_doc"
+
+
+class BudgetPeriod(StrEnum):
+    DAY = "day"
+    MONTH = "month"
+
+
+class ApprovalStatus(StrEnum):
+    PENDING = "pending"
+    APPROVED = "approved"
+    REJECTED = "rejected"
+    EXPIRED = "expired"
+
+
 PG_ENUM_NAMES: dict[str, str] = {
     "EntityType": "entity_type",
     "AliasType": "alias_type",
@@ -222,4 +245,7 @@ PG_ENUM_NAMES: dict[str, str] = {
     "GateOutcome": "gate_outcome",
     "ActivityKind": "activity_kind",
     "EventType": "event_type",
+    "UsageUnit": "usage_unit",
+    "BudgetPeriod": "budget_period",
+    "ApprovalStatus": "approval_status",
 }

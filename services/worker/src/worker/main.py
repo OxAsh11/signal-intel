@@ -7,8 +7,9 @@ import signal
 from procrastinate import PsycopgConnector
 from psycopg import AsyncConnection
 
+from signal_core.ai_gateway.factory import build_gateway
 from signal_core.config import Settings, get_settings
-from signal_core.db import configure_worker_connection, make_pool
+from signal_core.db import configure_worker_connection, make_pool, run_async
 from signal_core.events import (
     DISPATCH_TASK,
     Deferrer,
@@ -19,6 +20,7 @@ from signal_core.events import (
 from signal_core.health import PgHealthStore
 from signal_core.jobs import DbKillSwitch
 from signal_core.logging import configure_logging, get_logger
+from signal_core.metering import PgApprovalStore
 from worker.app import build_app
 from worker.health import HealthState, serve_health
 
@@ -64,7 +66,14 @@ async def amain() -> None:
     connector = PsycopgConnector(
         conninfo=conninfo, configure=configure_worker_connection, kwargs={"prepare_threshold": None}
     )
-    app = build_app(connector, DbKillSwitch(pool), state, PgHealthStore(pool))
+    app = build_app(
+        connector,
+        DbKillSwitch(pool),
+        state,
+        PgHealthStore(pool),
+        ai_configured=build_gateway(settings, pool).configured,
+        approvals=PgApprovalStore(pool),
+    )
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
@@ -75,6 +84,8 @@ async def amain() -> None:
     log.info("worker.starting", env=settings.app_env, port=settings.port)
     async with app.open_async():
         dispatch_task = app.tasks[DISPATCH_TASK]
+        # Report AI status right away so Settings is not blank for the first ten minutes.
+        await app.tasks["system.ai_status"].defer_async(timestamp=0)
         relay = asyncio.create_task(
             relay_loop(
                 settings,
@@ -107,7 +118,7 @@ async def amain() -> None:
 
 def run() -> None:
     with contextlib.suppress(KeyboardInterrupt):
-        asyncio.run(amain())
+        run_async(amain())
 
 
 if __name__ == "__main__":

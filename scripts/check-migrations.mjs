@@ -162,6 +162,17 @@ const asWriter = (fn) =>
   check('canary marks its source record extracted', sr.extraction_status === 'extracted');
 }
 
+// The worker connects as service_role: its canary must still pass after the 0014 grant sweep
+// (guard_derived and friends run as the invoker). Supabase gives service_role table access.
+{
+  await db.exec(`grant all on all tables in schema public to service_role`);
+  const r = await db.transaction(async (tx) => {
+    await tx.exec(`set local role service_role`);
+    return (await tx.query(`select app.run_canary() as r`)).rows[0].r;
+  });
+  check('canary runs as service_role', r.status === 'ok', JSON.stringify(r).slice(0, 200));
+}
+
 // Fixtures in org A for the remaining checks.
 const ext = (await one(`insert into public.extractor_version (capability, prompt_version, model, parser_version)
                          values ('extract', 'v1', 'test', 'v1') returning id`)).id;
@@ -356,6 +367,308 @@ check('memory_chunk full-text search works', (await one(
   const actions = (await one(`select array_agg(distinct action) a from public.audit_log where org_id = $1`, [orgA])).a;
   check('every access change is audited', ['invitation.created', 'invitation.accepted', 'invitation.revoked', 'role.changed',
     'member.removed', 'organisation.domains_changed', 'team.created', 'team.member_added'].every((x) => actions.includes(x)), actions.join(','));
+}
+
+
+// ── Phase 1a: metering (S6 usage ledger, budgets and approvals) ──────────────
+{
+  const J = '00000000-0000-4000-8000-000000000021'; // Editor
+  const K = '00000000-0000-4000-8000-000000000022'; // Viewer
+  const L = '00000000-0000-4000-8000-000000000023'; // Admin
+  const H = '00000000-0000-4000-8000-000000000012'; // Operator in wsA (set up in the access checks)
+  await db.exec(`insert into auth.users (id, email) values ('${J}','j@alpha.test'), ('${K}','k@alpha.test'), ('${L}','l@alpha.test')`);
+  const mk = async (uid, email) => (await one(`insert into public.member (org_id, user_id, email) values ($1, $2, $3) returning id`, [orgA, uid, email])).id;
+  const mJ = await mk(J, 'j@alpha.test'), mK = await mk(K, 'k@alpha.test'), mL = await mk(L, 'l@alpha.test');
+  await db.query(`insert into public.role_assignment (org_id, member_id, role) values ($1, $2, 'Admin')`, [orgA, mL]);
+  const rpc = (uid, sql, params) => asUser(uid, (tx) => tx.query(sql, params));
+
+  let n = 0;
+  const newWs = async () => {
+    const ws = (await rpc(A, `select public.create_workspace($1, $2) id`, [orgA, `Metering ${++n}`])).rows[0].id;
+    await db.query(`insert into public.role_assignment (org_id, member_id, workspace_id, role) values ($1, $2, $3, 'Editor'), ($1, $4, $3, 'Viewer')`, [orgA, mJ, ws, mK]);
+    const brief = (await one(`insert into public.brief (org_id, workspace_id, name) values ($1, $2, 'Metered') returning id`, [orgA, ws])).id;
+    return { ws, brief };
+  };
+  const spend = (ws, brief, cost, status = 'ok') => db.query(
+    `insert into public.usage_ledger (org_id, workspace_id, brief_id, capability, provider, model, unit, quantity, cost_usd, status)
+     values ($1, $2, $3, 'extract', 'anthropic', 'claude-sonnet-5-5', 'ai_input_tokens', 1000, $4, $5)`, [orgA, ws, brief, cost, status]);
+  const cap = (ws, brief, period, usd) => rpc(A, `select public.set_budget($1, $2, $3::public.budget_period, $4)`, [ws, brief, period, usd]);
+  const reserve = async (ws, brief, est, approval = null, args = '{"k":1}') =>
+    (await one(`select app.reserve_budget($1, $2, $3, 'extract.run', $5::jsonb, $4) r`, [ws, brief, est, approval, args])).r;
+  const day = async (ws) => Number((await one(`select app.period_spend($1, null, 'day') v`, [ws])).v);
+
+  // Seeds.
+  check('model_price seeded for the default models', (await one(`select count(*)::int n from public.model_price`)).n === 5);
+  check('model_price is readable by authenticated', (await rpc(C, `select count(*)::int n from public.model_price`)).rows[0].n === 5);
+  check('job types for AI status and budget resume are seeded', (await one(`select count(*)::int n from public.job_type_config where job_type in ('system.ai_status','budget.resume')`)).n === 2);
+  check('editor approval limit defaults to 25', Number((await one(`select editor_approval_limit_usd v from public.workspace_settings where workspace_id = $1`, [wsA])).v) === 25);
+
+  // ledger is insert-only
+  {
+    const { ws } = await newWs();
+    await spend(ws, null, 1);
+    check('ledger is insert-only: update raises', await throws(() => db.query(`update public.usage_ledger set cost_usd = 0 where workspace_id = $1`, [ws])));
+    check('ledger is insert-only: delete raises', await throws(() => db.query(`delete from public.usage_ledger where workspace_id = $1`, [ws])));
+    check('ledger needs a unit for real spend', await throws(() => db.query(
+      `insert into public.usage_ledger (org_id, workspace_id, capability, quantity, cost_usd, status) values ($1, $2, 'x', 1, 1, 'ok')`, [orgA, ws])));
+  }
+
+  // reserve within cap
+  {
+    const { ws } = await newWs();
+    await cap(ws, null, 'day', 10);
+    await spend(ws, null, 4);
+    const r = await reserve(ws, null, 5);
+    check('reserve within cap ok', r.ok === true && Boolean(r.reservation_id), JSON.stringify(r));
+    check('a reservation counts toward spend until released', (await day(ws)) === 9);
+  }
+
+  // reserve over cap pauses
+  {
+    const { ws } = await newWs();
+    await cap(ws, null, 'day', 10);
+    await spend(ws, null, 4);
+    const r = await reserve(ws, null, 7);
+    const ap = (await db.query(`select status, reason from public.budget_approval where workspace_id = $1`, [ws])).rows;
+    check('reserve over cap pauses', r.ok === false && r.period === 'day' && Number(r.cap) === 10 && Number(r.spent) === 4 && ap.length === 1 && ap[0].status === 'pending' && Boolean(r.approval_id), JSON.stringify(r));
+    check('approval reason names the cap that stopped it', ap[0]?.reason === 'workspace day cap', ap[0]?.reason);
+    check('no reservation is written when refused', (await one(`select count(*)::int n from public.usage_ledger where workspace_id = $1 and status = 'reserved'`, [ws])).n === 0);
+  }
+
+  // no budget = no cap; month cap applies
+  {
+    const { ws } = await newWs();
+    check('no budget means no cap', (await reserve(ws, null, 1000000)).ok === true);
+    const m = await newWs();
+    await cap(m.ws, null, 'month', 20);
+    await spend(m.ws, null, 18);
+    const r = await reserve(m.ws, null, 3);
+    check('workspace month cap applies', r.ok === false && r.period === 'month', JSON.stringify(r));
+  }
+
+  // brief cap under workspace cap
+  {
+    const { ws, brief } = await newWs();
+    const other = (await one(`insert into public.brief (org_id, workspace_id, name) values ($1, $2, 'Other') returning id`, [orgA, ws])).id;
+    await cap(ws, null, 'day', 100);
+    await cap(ws, brief, 'day', 5);
+    await spend(ws, brief, 3);
+    const r = await reserve(ws, brief, 3);
+    check('brief cap applies under workspace cap', r.ok === false && r.period === 'day' && Number(r.cap) === 5 && Number(r.spent) === 3, JSON.stringify(r));
+    check('brief approval is named for the Brief cap', (await one(`select reason from public.budget_approval where id = $1`, [r.approval_id])).reason === 'Brief day cap');
+    check('a Brief without its own cap is only held to the workspace cap', (await reserve(ws, other, 3)).ok === true);
+    check('Brief caps do not apply to workspace-level work', (await reserve(ws, null, 3)).ok === true);
+  }
+
+  // sequential overspend
+  {
+    const { ws } = await newWs();
+    await cap(ws, null, 'day', 10);
+    await spend(ws, null, 1);
+    const first = await reserve(ws, null, 5);
+    const second = await reserve(ws, null, 5);
+    check('concurrent calls cannot both overspend', first.ok === true && second.ok === false, `${first.ok} ${second.ok}`);
+  }
+
+  // settle
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 10);
+    const r = await reserve(ws, brief, 5);
+    await db.query(`select app.settle_reservation($1, $2::jsonb)`, [r.reservation_id, JSON.stringify({
+      capability: 'extract', provider: 'anthropic', model: 'claude-sonnet-5-5', latency_ms: 420, status: 'ok', job_id: 'job-1',
+      lines: [{ unit: 'ai_input_tokens', quantity: 1000, cost_usd: 0.002 }, { unit: 'ai_output_tokens', quantity: 200, cost_usd: 0.002 }] })]);
+    const rows = (await db.query(`select status, brief_id from public.usage_ledger where workspace_id = $1 order by id`, [ws])).rows;
+    check('settle writes released then actual rows', rows.map((x) => x.status).join() === 'reserved,released,ok,ok', rows.map((x) => x.status).join());
+    check('settled spend is the actual cost, not the estimate', Math.abs((await day(ws)) - 0.004) < 1e-9);
+    check('settle keeps the Brief on actual rows', rows.filter((x) => x.status === 'ok').every((x) => x.brief_id === brief));
+    check('settling twice raises', await throws(() => db.query(`select app.settle_reservation($1, null)`, [r.reservation_id])));
+    check('settling an unknown reservation raises', await throws(() => db.query(`select app.settle_reservation(gen_random_uuid(), null)`)));
+    const r2 = await reserve(ws, null, 4);
+    await db.query(`select app.settle_reservation($1, null)`, [r2.reservation_id]);
+    check('release only frees the estimate', Math.abs((await day(ws)) - 0.004) < 1e-9);
+  }
+
+  // approvals
+  {
+    const { ws } = await newWs();
+    await db.query(`insert into public.role_assignment (org_id, member_id, workspace_id, role) values ($1, (select id from public.member where user_id = $2 and org_id = $1), $3, 'Operator')`, [orgA, H, ws]);
+    await cap(ws, null, 'day', 10);
+    await spend(ws, null, 9);
+    const big = (await reserve(ws, null, 30)).approval_id;
+    const small = (await reserve(ws, null, 20, null, '{"k":2}')).approval_id;  // other args: a separate request
+    check('viewer cannot approve', await throws(() => rpc(K, `select public.decide_budget_approval($1, true)`, [small])));
+    check('operator cannot approve', await throws(() => rpc(H, `select public.decide_budget_approval($1, true)`, [small])));
+    check('viewer cannot read approvals', (await rpc(K, `select count(*)::int n from public.budget_approval`)).rows[0].n === 0);
+    check('editor limit enforced', await throws(() => rpc(J, `select public.decide_budget_approval($1, true)`, [big])));
+    check('editor can approve within the limit', !(await throws(() => rpc(J, `select public.decide_budget_approval($1, true)`, [small]))));
+    check('only pending approvals can be decided', await throws(() => rpc(A, `select public.decide_budget_approval($1, false)`, [small])));
+    check('admin can approve any', !(await throws(() => rpc(L, `select public.decide_budget_approval($1, true)`, [big]))));
+    const through = await reserve(ws, null, 30, big);
+    check('an approved request lets the same work through', through.ok === true, JSON.stringify(through));
+    check('an approval does not cover a larger estimate', (await reserve(ws, null, 31, big)).ok === false);
+    const { ws: other } = await newWs();
+    await cap(other, null, 'day', 1);
+    check('an approval from another workspace does not apply', (await reserve(other, null, 30, big)).ok === false);
+    check('editor sees approvals in their workspace', (await rpc(J, `select count(*)::int n from public.budget_approval where workspace_id = $1`, [ws])).rows[0].n >= 2);
+  }
+
+  // approval is bounded: estimate, Brief, job type, 24 hours
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 10);
+    await spend(ws, null, 9);
+    const ap = (await reserve(ws, null, 30)).approval_id;
+    await rpc(A, `select public.decide_budget_approval($1, true)`, [ap]);
+    const first = await reserve(ws, null, 20, ap);
+    const again = await reserve(ws, null, 20, ap);
+    const pending = (await one(`select count(*)::int n from public.budget_approval where workspace_id = $1 and status = 'pending'`, [ws])).n;
+    check('approval cannot be reused beyond its estimate', first.ok === true && again.ok === false && pending === 1, JSON.stringify([first.ok, again.ok, pending]));
+    check('reservation carries its approval', (await one(`select count(*)::int n from public.usage_ledger where approval_id = $1 and status = 'reserved'`, [ap])).n === 1);
+    await db.query(`select app.settle_reservation($1, null)`, [first.reservation_id]);
+    check('a released reservation frees the approval', (await reserve(ws, null, 20, ap)).ok === true);
+    const ap2 = (await reserve(ws, null, 50)).approval_id;
+    await rpc(A, `select public.decide_budget_approval($1, true)`, [ap2]);
+    const wrongBrief = await reserve(ws, brief, 5, ap2);
+    const wrongJob = (await one(`select app.reserve_budget($1, null, 5, 'other.job', '{}', $2) r`, [ws, ap2])).r;
+    const right = await reserve(ws, null, 5, ap2);
+    check('approval scoped to brief and job type', wrongBrief.ok === false && wrongJob.ok === false && right.ok === true, JSON.stringify([wrongBrief.ok, wrongJob.ok, right.ok]));
+    const ap3 = (await reserve(ws, null, 50)).approval_id;
+    await rpc(A, `select public.decide_budget_approval($1, true)`, [ap3]);
+    await db.query(`update public.budget_approval set decided_at = now() - interval '25 hours' where id = $1`, [ap3]);
+    check('approval expires after 24 hours', (await reserve(ws, null, 5, ap3)).ok === false);
+    let msg = '';
+    try { await rpc(J, `select public.decide_budget_approval($1, true)`, [ap]); } catch (e) { msg = e.message; }
+    check('decided approvals report their status before the limit', /already been decided/.test(msg), msg);
+  }
+
+  // set_budget
+  {
+    const { ws } = await newWs();
+    check('set_budget requires Admin: Editor refused', await throws(() => rpc(J, `select public.set_budget($1, null, 'day', 5)`, [ws])));
+    check('set_budget requires Admin: Viewer refused', await throws(() => rpc(K, `select public.set_budget($1, null, 'day', 5)`, [ws])));
+    check('Admin can set a budget', !(await throws(() => rpc(L, `select public.set_budget($1, null, 'day', 5)`, [ws]))));
+    await rpc(A, `select public.set_budget($1, null, 'day', 8)`, [ws]);
+    const b = await one(`select count(*)::int n, max(cap_usd)::float8 c from public.budget where workspace_id = $1`, [ws]);
+    check('set_budget updates in place', b.n === 1 && b.c === 8);
+    check('a cap must be positive', await throws(() => rpc(A, `select public.set_budget($1, null, 'day', 0)`, [ws])));
+    await rpc(A, `select public.set_budget($1, null, 'day', null)`, [ws]);
+    check('a null cap deletes the budget', (await one(`select count(*)::int n from public.budget where workspace_id = $1`, [ws])).n === 0);
+  }
+
+  // 0014: pending approvals are reused, not duplicated
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 1);
+    const r1 = await reserve(ws, brief, 5);
+    const r2 = await reserve(ws, brief, 5);
+    check('a repeated refusal reuses the pending approval', r1.ok === false && r2.ok === false && r1.approval_id === r2.approval_id, JSON.stringify([r1, r2]));
+    const cnt = (await one(`select count(*)::int n from public.budget_approval where workspace_id = $1`, [ws])).n;
+    check('only one approval row exists for the repeated request', cnt === 1, String(cnt));
+    const aud = (await one(`select count(*)::int n from public.audit_log where target_id = $1 and action = 'budget.approval_requested'`, [r1.approval_id])).n;
+    check('the reused approval is audited once', aud === 1, String(aud));
+    const other = (await one(`select app.reserve_budget($1, $2, 5, 'extract.run', '{"k":2}') r`, [ws, brief])).r;
+    check('different job args get their own approval', other.approval_id !== r1.approval_id);
+    const noBrief = await reserve(ws, null, 5);
+    check('a different Brief scope gets its own approval', noBrief.approval_id !== r1.approval_id);
+    await rpc(A, `select public.decide_budget_approval($1, false)`, [r1.approval_id]);
+    const r3 = await reserve(ws, brief, 5);
+    check('a decided approval is not reused', r3.approval_id !== r1.approval_id);
+  }
+
+  // 0014: set_budget no-op remove and null period
+  {
+    const { ws } = await newWs();
+    const before = (await one(`select count(*)::int n from public.audit_log where target_id = $1`, [ws])).n;
+    await rpc(A, `select public.set_budget($1, null, 'day', null)`, [ws]);
+    const after = (await one(`select count(*)::int n from public.audit_log where target_id = $1`, [ws])).n;
+    check('removing a budget that does not exist writes no audit row', before === after, `${before} -> ${after}`);
+    check('set_budget with a null period raises', await throws(() => rpc(A, `select public.set_budget($1, null, null, 5)`, [ws])));
+  }
+
+  // 0014: stale reservations are released, old pending approvals expire
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 100);
+    const old = (await one(
+      `insert into public.usage_ledger (org_id, workspace_id, brief_id, capability, cost_usd, status, reservation_id, created_at)
+       values ($1, $2, $3, 'extract.run', 4, 'reserved', gen_random_uuid(), now() - interval '2 hours') returning reservation_id`, [orgA, ws, brief])).reservation_id;
+    const settledOld = (await one(
+      `insert into public.usage_ledger (org_id, workspace_id, capability, cost_usd, status, reservation_id, created_at)
+       values ($1, $2, 'extract.run', 3, 'reserved', gen_random_uuid(), now() - interval '2 hours') returning reservation_id`, [orgA, ws])).reservation_id;
+    await db.query(`select app.settle_reservation($1, null)`, [settledOld]);
+    const fresh = await reserve(ws, null, 2);
+    const oldApproval = (await one(
+      `insert into public.budget_approval (org_id, workspace_id, job_type, estimate_usd, reason, requested_at)
+       values ($1, $2, 'extract.run', 1, 'x', now() - interval '8 days') returning id`, [orgA, ws])).id;
+    const newApproval = (await one(
+      `insert into public.budget_approval (org_id, workspace_id, job_type, estimate_usd, reason)
+       values ($1, $2, 'extract.run', 1, 'x') returning id`, [orgA, ws])).id;
+    check('stale and fresh reservations both count before the sweep', (await day(ws)) === 6, String(await day(ws)));
+    const res = (await one(`select app.release_stale_reservations() r`)).r;
+    check('the sweep reports one release and one expiry', res.released === 1 && res.expired === 1, JSON.stringify(res));
+    check('releasing a stale reservation drops spend', (await day(ws)) === 2, String(await day(ws)));
+    const twin = await one(`select cost_usd::float8 c, brief_id, capability from public.usage_ledger where reservation_id = $1 and status = 'released'`, [old]);
+    check('the released row is a zero-cost twin copying brief and capability', twin.c === 0 && twin.brief_id === brief && twin.capability === 'extract.run', JSON.stringify(twin));
+    const freshTwin = (await one(`select count(*)::int n from public.usage_ledger where reservation_id = $1 and status = 'released'`, [fresh.reservation_id])).n;
+    check('a fresh reservation is untouched', freshTwin === 0);
+    const st = async (id) => (await one(`select status from public.budget_approval where id = $1`, [id])).status;
+    check('a pending approval older than 7 days expires', (await st(oldApproval)) === 'expired');
+    check('a recent pending approval is untouched', (await st(newApproval)) === 'pending');
+    const again = (await one(`select app.release_stale_reservations() r`)).r;
+    check('a second sweep finds nothing', again.released === 0 && again.expired === 0, JSON.stringify(again));
+    check('clients cannot call release_stale_reservations', await throws(() => rpc(A, `select app.release_stale_reservations()`)));
+    check('budget.release_stale is seeded', (await one(`select count(*)::int n from public.job_type_config where job_type = 'budget.release_stale'`)).n === 1);
+  }
+
+  // access
+  {
+    check('other org cannot read ledger', (await rpc(B, `select count(*)::int n from public.usage_ledger`)).rows[0].n === 0);
+    check('other org cannot read budgets', (await rpc(B, `select count(*)::int n from public.budget`)).rows[0].n === 0);
+    check('Viewer can read the ledger of their workspace', (await rpc(K, `select count(*)::int n from public.usage_ledger`)).rows[0].n > 0);
+    check('Viewer can read budgets of their workspace', (await rpc(K, `select count(*)::int n from public.budget`)).rows[0].n > 0);
+    check('clients cannot call reserve_budget', await throws(() => rpc(A, `select app.reserve_budget($1, null, 1, 'x', '{}')`, [wsA])));
+    check('clients cannot insert into the ledger', await throws(() => rpc(A, `insert into public.usage_ledger (org_id, workspace_id, capability, unit, quantity, cost_usd, status) values ($1, $2, 'x', 'fetch', 1, 1, 'ok')`, [orgA, wsA])));
+  }
+
+  // workspace_spend
+  {
+    const { ws, brief } = await newWs();
+    await spend(ws, brief, 1.5);
+    await spend(ws, null, 2);
+    const r = (await rpc(K, `select public.workspace_spend($1) s`, [ws])).rows[0].s;
+    check('workspace_spend returns day and month for a viewer', Number(r.day) === 3.5 && Number(r.month) === 3.5, JSON.stringify(r));
+    check('workspace_spend refused for a non-member', await throws(() => rpc(B, `select public.workspace_spend($1)`, [ws])));
+  }
+
+  // AI status
+  {
+    check('ai_status default not configured', JSON.stringify((await rpc(A, `select public.ai_status() s`)).rows[0].s) === JSON.stringify({ chat: false, embed: false, checked_at: null }));
+    await db.query(`insert into public.health_check (component, status, detail) values ('ai_gateway', 'ok', '{"chat":true,"embed":false,"secret":"x"}')`);
+    const s = (await rpc(C, `select public.ai_status() s`)).rows[0].s;
+    check('ai_status reflects the latest gateway check and nothing else', s.chat === true && s.embed === false && Boolean(s.checked_at) && Object.keys(s).sort().join() === 'chat,checked_at,embed', JSON.stringify(s));
+  }
+
+  // M1: no function in public or app is executable by anon
+  {
+    // Allowlist: functions anon may run on purpose. Empty: signed-out visitors call nothing here.
+    const allow = new Set([]);
+    const { rows } = await db.query(
+      `select n.nspname || '.' || p.proname as fn
+         from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+        where n.nspname in ('public', 'app') and p.prokind = 'f'
+          and has_function_privilege('anon', p.oid, 'execute')
+          and not exists (select 1 from pg_depend d where d.objid = p.oid and d.deptype = 'e')
+        order by 1`);
+    const bad = rows.map((r) => r.fn).filter((f) => !allow.has(f));
+    check('no public function executable by anon outside allowlist', bad.length === 0, bad.join(','));
+  }
+
+  // audit
+  {
+    const actions = (await one(`select array_agg(distinct action) a from public.audit_log where org_id = $1`, [orgA])).a;
+    check('metering writes are audited', ['budget.set', 'budget.removed', 'budget.approval_requested', 'budget.approval_approved'].every((x) => actions.includes(x)), actions.join(','));
+  }
 }
 
 await db.close();
