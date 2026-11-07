@@ -70,6 +70,15 @@ export type ActivityKind = z.infer<typeof ActivityKind>;
 export const EventType = z.enum(["brief.version_published","source_record.created","claim.created","claim.retracted","entity.created","entity.merged","entity.unmerged","verdict.changed","research_doc.published","contact_point.verified","score.band_changed","campaign.member_added","campaign.paused","reply.received","reply.classified","account.stage_changed","meeting.held","task.created","health.incident_opened","health.incident_resolved"]);
 export type EventType = z.infer<typeof EventType>;
 
+export const UsageUnit = z.enum(["ai_input_tokens","ai_output_tokens","embed_tokens","fetch","enrichment_lookup","research_doc"]);
+export type UsageUnit = z.infer<typeof UsageUnit>;
+
+export const BudgetPeriod = z.enum(["day","month"]);
+export type BudgetPeriod = z.infer<typeof BudgetPeriod>;
+
+export const ApprovalStatus = z.enum(["pending","approved","rejected","expired"]);
+export type ApprovalStatus = z.infer<typeof ApprovalStatus>;
+
 export const PG_ENUM_NAMES = {
   "EntityType": "entity_type",
   "AliasType": "alias_type",
@@ -93,5 +102,8 @@ export const PG_ENUM_NAMES = {
   "NextStepMode": "next_step_mode",
   "GateOutcome": "gate_outcome",
   "ActivityKind": "activity_kind",
-  "EventType": "event_type"
+  "EventType": "event_type",
+  "UsageUnit": "usage_unit",
+  "BudgetPeriod": "budget_period",
+  "ApprovalStatus": "approval_status"
 } as const;
