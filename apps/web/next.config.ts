@@ -4,7 +4,8 @@ import type { NextConfig } from 'next';
 
 // One env file for the whole repo: load <repo>/.env so web and worker share it.
 // Variables already set (Railway, CI) always win; Next still reads apps/web/.env* if present.
-loadEnvConfig(path.resolve(process.cwd(), '../..'), process.env.NODE_ENV !== 'production');
+// forceReload: Next has already loaded (and cached) env files from apps/web by the time this runs.
+loadEnvConfig(path.resolve(process.cwd(), '../..'), process.env.NODE_ENV !== 'production', undefined, true);
 
 const nextConfig: NextConfig = {
   cacheComponents: true,
