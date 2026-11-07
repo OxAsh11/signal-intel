@@ -62,7 +62,7 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
   const isEditor = atLeast(ctx.workspaceRole, 'Editor');
   const now = new Date();
 
-  const [{ data: statusData }, { data: budgetData }, { data: spendData }, { data: settingsData }, { data: approvalData }, ledger] =
+  const [{ data: statusData, error: statusError }, { data: budgetData }, { data: spendData, error: spendError }, { data: settingsData }, { data: approvalData }, ledger] =
     await Promise.all([
       supabase.rpc('ai_status'),
       supabase.from('budget').select('period, cap_usd').eq('workspace_id', wsId).is('brief_id', null),
@@ -109,7 +109,9 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
     <>
       <Section title="AI providers" hint="Whether the worker can reach each AI provider. Keys live in the environment, never on this page.">
         <div className="grid gap-3 sm:grid-cols-2">
-          {status.chat ? (
+          {statusError ? (
+            <p className="m-0 text-ink-muted sm:col-span-2">Status couldn&apos;t be loaded.</p>
+          ) : status.chat ? (
             <div className="flex items-center justify-between gap-2 rounded-md border border-line p-3">
               <span className="font-semibold">Claude (extract, judge, write)</span>
               <span className="si-chip">Set up</span>
@@ -117,7 +119,7 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
           ) : (
             <NotConfigured name="Claude (extract, judge, write)" setup={['Add ANTHROPIC_API_KEY to the environment and restart the worker.']} />
           )}
-          {status.embed ? (
+          {statusError ? null : status.embed ? (
             <div className="flex items-center justify-between gap-2 rounded-md border border-line p-3">
               <span className="font-semibold">Voyage (embeddings)</span>
               <span className="si-chip">Set up</span>
@@ -126,7 +128,7 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
             <NotConfigured name="Voyage (embeddings)" setup={['Add VOYAGE_API_KEY to the environment and restart the worker.']} />
           )}
         </div>
-        {!status.checked_at ? <p className="m-0 text-[13px] text-ink-muted">The worker hasn&apos;t reported yet.</p> : null}
+        {!statusError && !status.checked_at ? <p className="m-0 text-[13px] text-ink-muted">The worker hasn&apos;t reported yet.</p> : null}
       </Section>
 
       <Section
@@ -137,9 +139,13 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
           {periods.map((p) => (
             <div key={p.key} className="flex flex-col gap-0.5 rounded-md border border-line p-3">
               <span className="si-label">{p.label}</span>
-              <Link href={`?ledger=${p.key}`} scroll={false} className="text-[22px] font-semibold text-ink underline decoration-line-strong underline-offset-4">
-                {usd(p.spend)}
-              </Link>
+              {spendError ? (
+                <span className="text-ink-muted">Spend couldn&apos;t be loaded.</span>
+              ) : (
+                <Link href={`?ledger=${p.key}`} scroll={false} className="text-[22px] font-semibold text-ink underline decoration-line-strong underline-offset-4">
+                  {usd(p.spend)}
+                </Link>
+              )}
               <span className="text-[13px] text-ink-muted">Cap: {capText(p.key)}</span>
             </div>
           ))}

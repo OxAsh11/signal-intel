@@ -272,7 +272,7 @@ class PgApprovalStore:
             cur = await conn.execute("select app.release_stale_reservations()")
             row = await cur.fetchone()
         result = row[0] if row else {}
-        return {"released": int(result.get("released", 0)), "expired": int(result.get("expired", 0))}
+        return {k: int(result.get(k, 0)) for k in ("released", "expired")}
 
 
 # -- In-memory test doubles -----------------------------------------------------

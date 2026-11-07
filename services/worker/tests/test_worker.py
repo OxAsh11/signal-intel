@@ -259,9 +259,7 @@ async def test_release_stale_cron_is_registered_and_calls_the_store() -> None:
     store = MemoryApprovalStore()
     app = make_app(approvals=store)
     periodic = [t for t in app.periodic_registry.periodic_tasks.values()]
-    assert any(
-        t.task.name == "budget.release_stale" and t.cron == "*/5 * * * *" for t in periodic
-    )
+    assert any(t.task.name == "budget.release_stale" and t.cron == "*/5 * * * *" for t in periodic)
     assert app.tasks["budget.release_stale"].queue == "system"
     async with app.open_async():
         await app.tasks["budget.release_stale"].defer_async(timestamp=0)

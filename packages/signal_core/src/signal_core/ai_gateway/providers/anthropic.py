@@ -16,6 +16,7 @@ from signal_core.ai_gateway.providers.base import Completion
 __all__ = ["AnthropicProvider", "AsyncAnthropic", "strict_schema"]
 
 MAX_RETRIES = 2
+TIMEOUT_SECONDS = 120.0
 
 
 def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
@@ -40,7 +41,7 @@ class AnthropicProvider:
 
     def __init__(self, api_key: SecretStr, *, client: AsyncAnthropic | None = None) -> None:
         self._client = client or AsyncAnthropic(
-            api_key=api_key.get_secret_value(), max_retries=MAX_RETRIES
+            api_key=api_key.get_secret_value(), timeout=TIMEOUT_SECONDS, max_retries=MAX_RETRIES
         )
 
     async def complete(
