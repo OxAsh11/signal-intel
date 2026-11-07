@@ -15,7 +15,12 @@ from uuid import UUID, uuid4
 from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel, ValidationError
 
-from signal_core.ai_gateway.errors import AiNotConfigured, AiOutputInvalid, AiProviderError
+from signal_core.ai_gateway.errors import (
+    AiNotConfigured,
+    AiOutputInvalid,
+    AiProviderError,
+    PromptChanged,
+)
 from signal_core.ai_gateway.prompts import Capability, Prompt, render
 from signal_core.ai_gateway.providers.base import ChatProvider, Completion, EmbedProvider
 from signal_core.config import Settings
@@ -58,16 +63,28 @@ class PgExtractorVersions:
                 insert into public.extractor_version
                   (capability, prompt_version, model, parser_version, prompt_hash)
                 values (%s, %s, %s, %s, %s)
-                on conflict (capability, prompt_version, model, parser_version)
-                  do update set prompt_hash = coalesce(
-                    public.extractor_version.prompt_hash, excluded.prompt_hash)
+                on conflict (capability, prompt_version, model, parser_version) do nothing
                 returning id
                 """,
                 (capability, version, model, parser_version, prompt.sha256),
             )
             row = await cur.fetchone()
+            stored_hash: str | None = prompt.sha256
+            if row is None:
+                cur = await conn.execute(
+                    """
+                    select id, prompt_hash from public.extractor_version
+                    where capability = %s and prompt_version = %s
+                      and model = %s and parser_version = %s
+                    """,
+                    (capability, version, model, parser_version),
+                )
+                row = await cur.fetchone()
+                stored_hash = row[1] if row else None
         if row is None:
-            raise AiProviderError("extractor_version upsert returned no row")
+            raise AiProviderError("extractor_version row not found")
+        if stored_hash is not None and stored_hash != prompt.sha256:
+            raise PromptChanged(f"{version} differs from the released prompt")
         return UUID(str(row[0]))
 
 
@@ -82,6 +99,8 @@ class MemoryExtractorVersions:
         self, capability: str, prompt: Prompt, model: str, parser_version: str
     ) -> UUID:
         key = (capability, f"{prompt.name}/v{prompt.version}", model, parser_version)
+        if key in self.ids and self.hashes[self.ids[key]] != prompt.sha256:
+            raise PromptChanged(f"{key[1]} differs from the released prompt")
         if key not in self.ids:
             self.ids[key] = uuid4()
             self.hashes[self.ids[key]] = prompt.sha256
@@ -200,7 +219,7 @@ class AiGateway:
         total = sum((ln.cost_usd for ln in lines), Decimal(0))
 
         async def settle(status: SettleStatus) -> None:
-            await self._budget.settle(
+            await self._settle_or_release(
                 reservation, ctx, str(capability), chat.name, model, lines, latency_ms, status
             )
             self._log_call(capability, prompt, completion, total, latency_ms, status)
@@ -242,7 +261,7 @@ class AiGateway:
             raise
         latency_ms = int((time.monotonic() - started) * 1000)
         cost = cost_usd(price, result.tokens)
-        await self._budget.settle(
+        await self._settle_or_release(
             reservation,
             ctx,
             str(Capability.EMBED),
@@ -263,6 +282,29 @@ class AiGateway:
             status="ok",
         )
         return result.vectors
+
+    async def _settle_or_release(
+        self,
+        reservation: UUID,
+        ctx: CallContext,
+        capability: str,
+        provider: str,
+        model: str,
+        lines: list[UsageLine],
+        latency_ms: int,
+        status: SettleStatus,
+    ) -> None:
+        """Settle; if that fails, free the reservation so its estimate stops counting."""
+        try:
+            await self._budget.settle(
+                reservation, ctx, capability, provider, model, lines, latency_ms, status
+            )
+        except BaseException:
+            try:
+                await self._budget.release(reservation)
+            except Exception:
+                log.error("ai.release_failed", reservation_id=str(reservation))
+            raise
 
     def _log_call(
         self,

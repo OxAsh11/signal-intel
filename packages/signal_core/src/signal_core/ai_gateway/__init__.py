@@ -5,6 +5,7 @@ from signal_core.ai_gateway.errors import (
     AiOutputInvalid,
     AiProviderError,
     BudgetPaused,
+    PromptChanged,
 )
 from signal_core.ai_gateway.gateway import (
     AiGateway,
@@ -26,6 +27,7 @@ __all__ = [
     "MemoryExtractorVersions",
     "PgExtractorVersions",
     "Prompt",
+    "PromptChanged",
     "Result",
     "load_prompt",
     "render",

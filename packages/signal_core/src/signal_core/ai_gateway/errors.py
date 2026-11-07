@@ -2,7 +2,13 @@
 
 from signal_core.metering import BudgetPaused
 
-__all__ = ["AiNotConfigured", "AiOutputInvalid", "AiProviderError", "BudgetPaused"]
+__all__ = [
+    "AiNotConfigured",
+    "AiOutputInvalid",
+    "AiProviderError",
+    "BudgetPaused",
+    "PromptChanged",
+]
 
 
 class AiNotConfigured(Exception):
@@ -19,3 +25,7 @@ class AiOutputInvalid(Exception):
     def __init__(self, errors: list[str]) -> None:
         super().__init__("; ".join(errors) or "invalid output")
         self.errors = errors
+
+
+class PromptChanged(Exception):
+    """A released prompt version's file no longer matches the hash stored for it."""

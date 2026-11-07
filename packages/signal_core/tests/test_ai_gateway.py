@@ -315,3 +315,98 @@ async def test_voyage_adapter_requests_1024_dims() -> None:
     )
     assert seen == {"model": "voyage-4", "input_type": "query", "output_dimension": 1024}
     assert out.tokens == 9 and len(out.vectors[0]) == 1024
+
+
+class SettleFails(MemoryBudgetGuard):
+    released: list[UUID] | None = None
+
+    async def settle(self, *args: Any, **kwargs: Any) -> None:
+        raise RuntimeError("ledger down")
+
+    async def release(self, reservation_id: UUID) -> None:
+        self.released = [*(self.released or []), reservation_id]
+        await super().release(reservation_id)
+
+
+async def test_settle_failure_releases_reservation_and_propagates() -> None:
+    budget = SettleFails()
+    gw, _, _ = make(chat=FakeProvider({"*": GOOD}), budget=budget)
+    with pytest.raises(RuntimeError, match="ledger down"):
+        await gw.run(Capability.EXTRACT, load_prompt("canary_extract", 1), vars_(), Canary, ctx())
+    assert budget.released is not None and len(budget.released) == 1
+    assert not budget.reservations
+
+
+async def test_release_failure_during_settle_failure_is_swallowed() -> None:
+    class BothFail(SettleFails):
+        async def release(self, reservation_id: UUID) -> None:
+            raise OSError("also down")
+
+    gw, _, _ = make(chat=FakeProvider({"*": GOOD}), budget=BothFail())
+    with pytest.raises(RuntimeError, match="ledger down"):
+        await gw.run(Capability.EXTRACT, load_prompt("canary_extract", 1), vars_(), Canary, ctx())
+
+
+def test_strip_fence_negative_cases() -> None:
+    from signal_core.ai_gateway.gateway import strip_fence
+
+    assert strip_fence('```json\n{"a": 1}\n```') == '{"a": 1}'
+    assert strip_fence('```\n{"a": 1}\n```') == '{"a": 1}'
+    # Text outside the fence is left alone (and then fails JSON validation).
+    assert strip_fence('Here:\n```json\n{"a": 1}\n```') == 'Here:\n```json\n{"a": 1}\n```'
+    assert strip_fence('```json\n{"a": 1}\n```\nThanks') == '```json\n{"a": 1}\n```\nThanks'
+    # Only one fence layer is stripped; the inner fence stays and fails validation.
+    assert strip_fence('```\n```json\n{"a": 1}\n```\n```') == '```json\n{"a": 1}\n```'
+    # Any language tag is accepted by the regex; the payload is still validated later.
+    assert strip_fence('```python\n{"a": 1}\n```') == '{"a": 1}'
+
+
+async def test_text_around_fence_is_rejected() -> None:
+    gw, budget, _ = make(chat=FakeProvider({"*": f"Sure!\n```json\n{GOOD}\n```"}))
+    with pytest.raises(AiOutputInvalid):
+        await gw.run(Capability.EXTRACT, load_prompt("canary_extract", 1), vars_(), Canary, ctx())
+    assert [s.status for s in budget.settles] == ["rejected"]
+
+
+async def test_memory_versions_detect_changed_prompt() -> None:
+    from dataclasses import replace
+
+    from signal_core.ai_gateway import PromptChanged
+
+    mv = MemoryExtractorVersions()
+    p = load_prompt("canary_extract", 1)
+    first = await mv.ensure("extract", p, "m", "1")
+    assert await mv.ensure("extract", p, "m", "1") == first
+    with pytest.raises(PromptChanged):
+        await mv.ensure("extract", replace(p, sha256="0" * 64), "m", "1")
+
+
+@pytest.mark.db
+async def test_pg_extractor_versions_idempotent() -> None:
+    from dataclasses import replace
+
+    from signal_core.ai_gateway import PgExtractorVersions, PromptChanged
+    from signal_core.db import make_pool
+
+    url = Settings().database_url_session
+    assert url is not None
+    prompt = replace(load_prompt("canary_extract", 1), name="test_prompt", sha256="a" * 64)
+    pool = make_pool(url.get_secret_value())
+    await pool.open()
+    try:
+        versions = PgExtractorVersions(pool)
+        first = await versions.ensure("test", prompt, "test-model", "test-parser")
+        second = await versions.ensure("test", prompt, "test-model", "test-parser")
+        assert first == second
+        async with pool.connection() as conn:
+            cur = await conn.execute(
+                "select prompt_hash from public.extractor_version where id = %s", (first,)
+            )
+            row = await cur.fetchone()
+        assert row is not None and row[0] == "a" * 64
+        with pytest.raises(PromptChanged):
+            await versions.ensure(
+                "test", replace(prompt, sha256="b" * 64), "test-model", "test-parser"
+            )
+    finally:
+        await pool.close()
