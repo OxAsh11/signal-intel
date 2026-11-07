@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 // Copies a Supabase project's URL and API keys into local env files WITHOUT printing them.
-//   apps/web/.env.local  ← NEXT_PUBLIC_SUPABASE_URL, NEXT_PUBLIC_SUPABASE_ANON_KEY, SUPABASE_PROJECT_REF
-//   .env (worker)        ← SUPABASE_PROJECT_REF, SUPABASE_SERVICE_ROLE_KEY
+//   .env at the repo root (read by both the web app and the worker)
 // Prerequisite (once): `pnpm exec supabase login` (opens your browser).
 // Usage: pnpm env:pull <project-ref>
 import { execFileSync } from 'node:child_process';
@@ -53,11 +52,10 @@ function upsert(file, entries) {
   console.log(`updated ${file}: ${Object.keys(entries).filter((k) => entries[k]).join(', ')}`);
 }
 
-upsert('apps/web/.env.local', {
+upsert('.env', {
   NEXT_PUBLIC_SUPABASE_URL: `https://${ref}.supabase.co`,
   NEXT_PUBLIC_SUPABASE_ANON_KEY: publishable,
   SUPABASE_PROJECT_REF: ref,
-  NEXT_PUBLIC_SITE_URL: 'http://localhost:3000',
+  SUPABASE_SERVICE_ROLE_KEY: secret,
 });
-upsert('.env', { SUPABASE_PROJECT_REF: ref, SUPABASE_SERVICE_ROLE_KEY: secret, APP_ENV: 'local' });
 console.log('\nStill to add by hand in .env: DATABASE_URL_SESSION (Supabase → Connect → Session pooler; it contains your DB password).');

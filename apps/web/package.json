@@ -10,6 +10,7 @@
     "typecheck": "next typegen && tsc --noEmit"
   },
   "dependencies": {
+    "@next/env": "16.4.5",
     "@signal/contracts": "workspace:*",
     "@signal/ui": "workspace:*",
     "@supabase/ssr": "^0.12.7",

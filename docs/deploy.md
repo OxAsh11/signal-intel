@@ -66,7 +66,7 @@ pnpm install
 ```bash
 uv sync
 ```
-Pull the dev project's URL and keys into `apps/web/.env.local` (web) and `.env` (worker). The script never prints them:
+Both the web app and the worker read **one file: `.env` at the repo root** (git-ignored). Fill it by hand from `.env.example`, or pull the URL and keys with the script below, which never prints them:
 
 ```bash
 pnpm exec supabase login
