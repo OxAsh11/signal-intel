@@ -555,6 +555,16 @@ check('memory_chunk full-text search works', (await one(
     check('clients cannot insert into the ledger', await throws(() => rpc(A, `insert into public.usage_ledger (org_id, workspace_id, capability, unit, quantity, cost_usd, status) values ($1, $2, 'x', 'fetch', 1, 1, 'ok')`, [orgA, wsA])));
   }
 
+  // workspace_spend
+  {
+    const { ws, brief } = await newWs();
+    await spend(ws, brief, 1.5);
+    await spend(ws, null, 2);
+    const r = (await rpc(K, `select public.workspace_spend($1) s`, [ws])).rows[0].s;
+    check('workspace_spend returns day and month for a viewer', Number(r.day) === 3.5 && Number(r.month) === 3.5, JSON.stringify(r));
+    check('workspace_spend refused for a non-member', await throws(() => rpc(B, `select public.workspace_spend($1)`, [ws])));
+  }
+
   // AI status
   {
     check('ai_status default not configured', JSON.stringify((await rpc(A, `select public.ai_status() s`)).rows[0].s) === JSON.stringify({ chat: false, embed: false, checked_at: null }));

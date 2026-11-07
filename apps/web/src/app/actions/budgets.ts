@@ -15,12 +15,15 @@ async function rpc(fn: string, args: Record<string, unknown>) {
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
-/** An empty input removes the cap (null); otherwise a positive USD amount. */
+/** An empty input removes the cap (null); otherwise a plain decimal in USD that fits numeric(12,2). */
 function parseCap(raw: string, label: string): { cap: number | null; error?: string } {
   if (raw === '') return { cap: null };
-  const n = Number(raw.replace(/^\$/, ''));
-  if (!Number.isFinite(n) || n <= 0) return { cap: null, error: `Enter a ${label} cap above 0, or leave it empty for no cap.` };
-  return { cap: Math.round(n * 100) / 100 };
+  const bad = { cap: null, error: `Enter a ${label} cap between 0.01 and 9,999,999,999.99, or leave it empty for no cap.` };
+  const plain = raw.replace(/^\$/, '');
+  if (!/^\d+(\.\d{1,2})?$/.test(plain)) return bad;
+  const n = Number(plain);
+  if (!(n > 0) || n > 9999999999.99) return bad;
+  return { cap: n };
 }
 
 /** Workspace-level day and month caps. Brief caps arrive with Brief Studio. */
@@ -45,7 +48,9 @@ export async function setBudget(_: ActionState, form: FormData): Promise<ActionS
 export async function decideApproval(_: ActionState, form: FormData): Promise<ActionState> {
   const id = text(form, 'approval');
   if (!id) return { error: 'That approval was not found.' };
-  const { error } = await rpc('decide_budget_approval', { p_id: id, p_approve: text(form, 'decision') === 'approve' });
+  const decision = text(form, 'decision');
+  if (decision !== 'approve' && decision !== 'reject') return { error: 'Choose approve or reject.' };
+  const { error } = await rpc('decide_budget_approval', { p_id: id, p_approve: decision === 'approve' });
   if (error) return { error };
   refresh();
   return { ok: true };

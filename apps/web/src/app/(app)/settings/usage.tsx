@@ -61,21 +61,13 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
   const isAdmin = atLeast(ctx.orgRole, 'Admin');
   const isEditor = atLeast(ctx.workspaceRole, 'Editor');
   const now = new Date();
-  const monthStart = periodStart('month', now);
-  const dayStart = periodStart('day', now);
 
   const [{ data: statusData }, { data: budgetData }, { data: spendData }, { data: settingsData }, { data: approvalData }, ledger] =
     await Promise.all([
       supabase.rpc('ai_status'),
       supabase.from('budget').select('period, cap_usd').eq('workspace_id', wsId).is('brief_id', null),
-      // Open reservations are excluded from the displayed figure; only settled (ok, rejected) rows count.
-      supabase
-        .from('usage_ledger')
-        .select('cost_usd, created_at')
-        .eq('workspace_id', wsId)
-        .in('status', ['ok', 'rejected'])
-        .gte('created_at', monthStart)
-        .limit(10000),
+      // Totals come from SQL and match the cap maths: open reservations count, released ones do not.
+      supabase.rpc('workspace_spend', { p_ws: wsId }),
       isEditor
         ? supabase.from('workspace_settings').select('editor_approval_limit_usd').eq('workspace_id', wsId).maybeSingle()
         : Promise.resolve({ data: null }),
@@ -100,9 +92,9 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
 
   const status = (statusData ?? {}) as AiStatus;
   const caps = new Map(((budgetData ?? []) as { period: string; cap_usd: number }[]).map((b) => [b.period, Number(b.cap_usd)]));
-  const spendRows = (spendData ?? []) as { cost_usd: number; created_at: string }[];
-  const monthSpend = spendRows.reduce((s, r) => s + Number(r.cost_usd), 0);
-  const daySpend = spendRows.filter((r) => r.created_at >= dayStart).reduce((s, r) => s + Number(r.cost_usd), 0);
+  const spend = (spendData ?? {}) as { day?: number | string; month?: number | string };
+  const monthSpend = Number(spend.month ?? 0);
+  const daySpend = Number(spend.day ?? 0);
   const editorLimit = Number((settingsData as { editor_approval_limit_usd?: number } | null)?.editor_approval_limit_usd ?? DEFAULT_EDITOR_LIMIT);
   const approvals = (approvalData ?? []) as ApprovalRow[];
   const ledgerRows = (ledger.data ?? []) as LedgerRow[];
@@ -139,7 +131,7 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
 
       <Section
         title="Spend"
-        hint="Totals for this workspace in UTC days and months. Work still in progress is not counted until it settles. Select a figure to see the rows behind it."
+        hint="Totals for this workspace in UTC days and months. Work in progress counts until it settles. Select a figure to see the rows behind it."
       >
         <div className="grid gap-3 sm:grid-cols-2">
           {periods.map((p) => (
