@@ -1,5 +1,6 @@
 import asyncio
 import json
+from typing import Any
 
 import procrastinate
 from procrastinate.testing import InMemoryConnector
@@ -14,19 +15,60 @@ class AllEnabled:
         return True
 
 
+class FakeHealth:
+    def __init__(self, canary_result: dict[str, Any] | None = None) -> None:
+        self.records: list[tuple[str, str, str]] = []
+        self.canary_runs = 0
+        self.canary_result = canary_result or {"status": "ok", "verdict_id": "v1"}
+
+    async def record(
+        self, component: str, status: Any, detail: dict[str, Any], owner: str = "M17"
+    ) -> None:
+        self.records.append((component, status, owner))
+
+    async def run_canary(self) -> dict[str, Any]:
+        self.canary_runs += 1
+        return self.canary_result
+
+
+async def run_system_queue(app: procrastinate.App) -> None:
+    await app.run_worker_async(queues=["system"], wait=False, install_signal_handlers=False)
+
+
 def test_app_registers_phase0_jobs() -> None:
-    app = build_app(InMemoryConnector(), AllEnabled(), HealthState())
-    assert {"system.heartbeat", DISPATCH_TASK} <= set(app.tasks)
+    app = build_app(InMemoryConnector(), AllEnabled(), HealthState(), FakeHealth())
+    assert {"system.heartbeat", "system.canary", DISPATCH_TASK} <= set(app.tasks)
     assert isinstance(app, procrastinate.App)
 
 
 async def test_heartbeat_job_updates_health() -> None:
-    state = HealthState()
-    app = build_app(InMemoryConnector(), AllEnabled(), state)
+    state, health = HealthState(), FakeHealth()
+    app = build_app(InMemoryConnector(), AllEnabled(), state, health)
     async with app.open_async():
         await app.tasks["system.heartbeat"].defer_async(timestamp=0)
-        await app.run_worker_async(queues=["system"], wait=False, install_signal_handlers=False)
+        await run_system_queue(app)
     assert state.last_heartbeat_at is not None
+    # The periodic scheduler may add its own run; every record must be a healthy heartbeat.
+    assert health.records
+    assert set(health.records) == {("system.heartbeat", "ok", "S1")}
+
+
+async def test_canary_job_runs_the_pipeline_check() -> None:
+    health = FakeHealth()
+    app = build_app(InMemoryConnector(), AllEnabled(), HealthState(), health)
+    async with app.open_async():
+        await app.tasks["system.canary"].defer_async(timestamp=0)
+        await run_system_queue(app)
+    assert health.canary_runs == 1
+
+
+async def test_failed_canary_does_not_crash_the_worker() -> None:
+    health = FakeHealth({"status": "incident", "error": "claim insert failed"})
+    app = build_app(InMemoryConnector(), AllEnabled(), HealthState(), health)
+    async with app.open_async():
+        await app.tasks["system.canary"].defer_async(timestamp=0)
+        await run_system_queue(app)
+    assert health.canary_runs == 1  # recorded as an incident in SQL; no retry storm
 
 
 def test_health_goes_stale_without_relay() -> None:

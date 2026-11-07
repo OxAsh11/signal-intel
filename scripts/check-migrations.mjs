@@ -138,6 +138,152 @@ check('user B cannot create a workspace in org A', await throws(() => asUser(B, 
   check('workspace settings carry PRD defaults', s && s.a === 90 && s.r === 40 && s.d === 45 && s.w === 90);
 }
 
+// ── Phase 0b: foundation schema (F2–F8) and health ─────────────────────────
+const one = async (sql, params) => (await db.query(sql, params)).rows[0];
+const asWriter = (fn) =>
+  db.transaction(async (tx) => {
+    await tx.query(`select set_config('app.writer', 'derivation', true)`);
+    return fn(tx);
+  });
+
+// 8. Canary end to end (observed → resolved → fact → derived), twice.
+{
+  const r1 = (await one(`select app.run_canary() as r`)).r;
+  check('canary run 1 passes end to end', r1.status === 'ok', JSON.stringify(r1).slice(0, 160));
+  const r2 = (await one(`select app.run_canary() as r`)).r;
+  check('canary run 2 reuses the resolved entity', r2.status === 'ok' && r2.new_entity === false && r2.entity_id === r1.entity_id);
+  const v = await one(`select count(*)::int n, max(cardinality(claim_ids))::int c from public.verdict where entity_id = $1`, [r1.entity_id]);
+  check('canary verdict recomputed in place, citing its claim', v.n === 1 && v.c === 1);
+  const ev = await one(`select array_agg(distinct event::text order by event::text) e from public.outbox where org_id = '00000000-0000-4000-a000-0000000000c1'`);
+  check('canary emits catalogue events', ['claim.created', 'entity.created', 'source_record.created', 'verdict.changed'].every((x) => ev.e.includes(x)), ev.e.join(','));
+  const h = await one(`select status from public.health_check where component = 'pipeline.canary' order by id desc limit 1`);
+  check('canary records health ok', h.status === 'ok');
+  const sr = await one(`select extraction_status from public.source_record where id = $1`, [r2.source_record_id]);
+  check('canary marks its source record extracted', sr.extraction_status === 'extracted');
+}
+
+// Fixtures in org A for the remaining checks.
+const ext = (await one(`insert into public.extractor_version (capability, prompt_version, model, parser_version)
+                         values ('extract', 'v1', 'test', 'v1') returning id`)).id;
+const srA = (await one(`insert into public.source_record (org_id, connector_id, source_type, fetched_at, content_hash)
+                         values ($1, 'test', 'job_post', now(), 'hash-1') returning id`, [orgA])).id;
+const coA = (await one(`insert into public.entity (org_id, entity_type, display_name) values ($1, 'company', 'Van Dijk Engineering') returning id`, [orgA])).id;
+const pBool = (await one(`insert into public.predicate (key, label, value_type, decay_half_life_days) values ('test.hiring', 'Hiring', 'boolean', 90) returning id`)).id;
+const pEnum = (await one(`insert into public.predicate (key, label, value_type, allowed_values) values ('test.uses_tool', 'Uses tool', 'enum', '["Revit","ArchiCAD"]') returning id`)).id;
+const pDate = (await one(`insert into public.predicate (key, label, value_type) values ('test.founded', 'Founded', 'date') returning id`)).id;
+const claimSql = `insert into public.claim (org_id, entity_id, predicate_id, value, source_record_id, observed_at, extractor_version_id, confidence, scope)
+                  values ($1, $2, $3, $4::jsonb, $5, now(), $6, 80, coalesce($7, 'tenant')::public.data_scope) returning id, expires_at`;
+
+// 9. Typed predicates (F3).
+check('claim accepts a valid enum value', !(await throws(() => db.query(claimSql, [orgA, coA, pEnum, '"Revit"', srA, ext, null]))));
+check('claim rejects out-of-registry value', await throws(() => db.query(claimSql, [orgA, coA, pEnum, '"AutoCAD"', srA, ext, null])));
+check('claim rejects wrong value type', await throws(() => db.query(claimSql, [orgA, coA, pBool, '"yes"', srA, ext, null])));
+check('claim rejects a non-date for a date predicate', await throws(() => db.query(claimSql, [orgA, coA, pDate, '"last spring"', srA, ext, null])));
+{
+  const r = (await db.query(claimSql, [orgA, coA, pBool, 'true', srA, ext, null])).rows[0];
+  check('claim expiry defaults from the predicate half-life', r.expires_at !== null);
+}
+check('claim without a source record is refused', await throws(() => db.query(claimSql, [orgA, coA, pBool, 'true', null, ext, null])));
+
+// 10. People are always tenant-scoped (F1).
+check('person entity cannot be shared', await throws(() => db.query(`insert into public.entity (org_id, entity_type, display_name, scope) values ($1, 'person', 'Jane Doe', 'shared')`, [orgA])));
+const personA = (await one(`insert into public.entity (org_id, entity_type, display_name) values ($1, 'person', 'Jane Doe') returning id`, [orgA])).id;
+check('person data is always tenant (claims)', await throws(() => db.query(claimSql, [orgA, personA, pBool, 'true', srA, ext, 'shared'])));
+check('relationship checks endpoint types', await throws(() => db.query(
+  `insert into public.relationship (org_id, from_entity_id, relation, to_entity_id, source_record_id, confidence) values ($1, $2, 'works_at', $3, $4, 90)`,
+  [orgA, coA, personA, srA])));
+check('person works_at company is accepted', !(await throws(() => db.query(
+  `insert into public.relationship (org_id, from_entity_id, relation, to_entity_id, source_record_id, confidence, attributes) values ($1, $2, 'works_at', $3, $4, 90, '{"title":"BIM lead"}')`,
+  [orgA, personA, coA, srA]))));
+
+// 11. Shared facts stay hidden while the platform switch is off (F1).
+{
+  const shared = (await one(`insert into public.entity (org_id, entity_type, display_name, scope) values ($1, 'company', 'Public Port Authority', 'shared') returning id`, [orgA])).id;
+  const seenByB = async () => (await asUser(B, (tx) => tx.query(`select count(*)::int n from public.entity where id = $1`, [shared]))).rows[0].n;
+  check('shared facts hidden while switch off', (await seenByB()) === 0);
+  await db.query(`update public.platform_setting set value = 'true' where key = 'shared_facts_enabled'`);
+  check('shared facts visible once the switch is on (no migration)', (await seenByB()) === 1);
+  await db.query(`update public.platform_setting set value = 'false' where key = 'shared_facts_enabled'`);
+  check('tenant facts never cross organisations', (await asUser(B, (tx) => tx.query(`select count(*)::int n from public.entity where org_id = $1`, [orgA]))).rows[0].n === 0);
+  check('org members read their own facts', (await asUser(A, (tx) => tx.query(`select count(*)::int n from public.claim`))).rows[0].n >= 2);
+  check('clients cannot read the canary organisation', (await asUser(A, (tx) => tx.query(`select count(*)::int n from public.verdict`))).rows[0].n === 0);
+}
+
+// 12. Provenance is immutable; re-fetching never duplicates (M2, F3).
+check('source_record dedupes on content hash', await throws(() => db.query(
+  `insert into public.source_record (org_id, connector_id, source_type, fetched_at, content_hash) values ($1, 'test', 'job_post', now(), 'hash-1')`, [orgA])));
+check('source_record payload is immutable', await throws(() => db.query(`update public.source_record set url = 'https://x.test' where id = $1`, [srA])));
+check('source_record status can advance', !(await throws(() => db.query(`update public.source_record set extraction_status = 'irrelevant' where id = $1`, [srA]))));
+check('claims cannot be deleted', await throws(() => db.query(`delete from public.claim where entity_id = $1`, [coA])));
+check('claim value is immutable (retract instead)', await throws(() => db.query(`update public.claim set value = 'false' where predicate_id = $1`, [pBool])));
+check('extractor_version is immutable', await throws(() => db.query(`update public.extractor_version set model = 'x' where id = $1`, [ext])));
+check('entities are never deleted (merge instead)', await throws(() => db.query(`delete from public.entity where id = $1`, [coA])));
+
+// 13. Merges never delete; references resolve through the canonical entity (F2).
+{
+  const b = (await one(`insert into public.entity (org_id, entity_type, display_name) values ($1, 'company', 'Van Dijk Ingenieurs') returning id`, [orgA])).id;
+  const c = (await one(`insert into public.entity (org_id, entity_type, display_name) values ($1, 'company', 'Van Dijk Group') returning id`, [orgA])).id;
+  await db.query(`update public.entity set status = 'merged', merged_into = $2 where id = $1`, [b, c]);
+  await db.query(`update public.entity set status = 'merged', merged_into = $2 where id = $1`, [coA, b]);
+  check('canonical_entity follows a merge chain', (await one(`select app.canonical_entity($1) id`, [coA])).id === c);
+  check('merged status requires a target', await throws(() => db.query(`update public.entity set status = 'merged', merged_into = null where id = $1`, [c])));
+  await db.query(`update public.entity set status = 'active', merged_into = null where id = $1`, [coA]);
+  check('unmerge restores the entity', (await one(`select app.canonical_entity($1) id`, [coA])).id === coA);
+}
+
+// 14. Briefs: versions are immutable and sequential (F5).
+const briefA = (await one(`insert into public.brief (org_id, workspace_id, name) values ($1, $2, 'CAD adopters NL') returning id`, [orgA, wsA])).id;
+const bvSql = `insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights) values ($1, $2, $3, $4, '{}', '{}', '{}') returning id`;
+const bv1 = (await one(bvSql, [briefA, orgA, wsA, 1])).id;
+check('brief versions are sequential', await throws(() => db.query(bvSql, [briefA, orgA, wsA, 3])));
+check('brief versions are immutable', await throws(() => db.query(`update public.brief_version set config = '{"x":1}' where id = $1`, [bv1])));
+check('Viewer can read Briefs in their workspace', (await asUser(C, (tx) => tx.query(`select count(*)::int n from public.brief`))).rows[0].n === 1);
+
+// 15. Derived tables only accept the derivation engine (F7).
+const accA = (await one(`insert into public.account (org_id, workspace_id, entity_id) values ($1, $2, $3) returning id`, [orgA, wsA, coA])).id;
+const verdictSql = `insert into public.verdict (org_id, workspace_id, brief_version_id, entity_id, value, claim_ids) values ($1, $2, $3, $4, $5, $6) returning id`;
+check('derived tables reject direct writes', await throws(() => db.query(verdictSql, [orgA, wsA, bv1, coA, 'Likely', []])));
+check('derivation writer can write a verdict', !(await throws(() => asWriter((tx) => tx.query(verdictSql, [orgA, wsA, bv1, coA, 'Likely', []])))));
+check('Confirmed verdict needs claims', await throws(() => asWriter((tx) => tx.query(
+  `update public.verdict set value = 'Confirmed', claim_ids = '{}' where entity_id = $1`, [coA]))));
+check('account.stage cannot be set by hand', await throws(() => db.query(`update public.account set stage = 'Engaged' where id = $1`, [accA])));
+check('account owner can still change', !(await throws(() => db.query(`update public.account set owner_member_id = null where id = $1`, [accA]))));
+check('derivation writer can move a stage', !(await throws(() => asWriter((tx) => tx.query(`update public.account set stage = 'Queued' where id = $1`, [accA])))));
+check('score rejects out-of-range dimensions', await throws(() => asWriter((tx) => tx.query(
+  `insert into public.score (org_id, workspace_id, account_id, brief_version_id, fit, band) values ($1, $2, $3, $4, 140, 'High')`, [orgA, wsA, accA, bv1]))));
+
+// 16. Activity and feedback are append-only; replays never double count (F6).
+{
+  const integ = '00000000-0000-4000-8000-0000000000e1';
+  const actSql = `insert into public.activity (org_id, workspace_id, account_id, kind, integration_id, external_id, occurred_at) values ($1, $2, $3, 'message_sent', $4, 'msg-1', now()) returning id`;
+  const act = (await one(actSql, [orgA, wsA, accA, integ])).id;
+  check('replayed external event is rejected', await throws(() => db.query(actSql, [orgA, wsA, accA, integ])));
+  check('activity is append-only', await throws(() => db.query(`update public.activity set channel = 'x' where id = $1`, [act])));
+  const memberA = (await one(`select id from public.member where user_id = $1`, [A])).id;
+  const fb = (await one(`insert into public.feedback (org_id, workspace_id, member_id, target_type, target_id, action) values ($1, $2, $3, 'verdict', $4, 'confirm') returning id`, [orgA, wsA, memberA, coA])).id;
+  check('feedback is append-only', await throws(() => db.query(`delete from public.feedback where id = $1`, [fb])));
+  check('correction feedback needs a value', await throws(() => db.query(
+    `insert into public.feedback (org_id, workspace_id, member_id, target_type, target_id, action) values ($1, $2, $3, 'verdict', $4, 'correct')`, [orgA, wsA, memberA, coA])));
+}
+
+// 17. Health incidents need an owner and a resolution note (M17).
+{
+  await db.query(`select app.record_health('radar.jobs', 'silent', '{"error":"0 records in expected window"}', 'M2')`);
+  const inc = await one(`select id, status, owner from public.health_incident where component = 'radar.jobs'`);
+  check('silence opens an incident with an owner', inc.status === 'open' && inc.owner === 'M2');
+  check('incident cannot close without a note', await throws(() => db.query(`update public.health_incident set status = 'resolved', resolved_at = now() where id = $1`, [inc.id])));
+  await db.query(`select app.record_health('radar.jobs', 'ok', '{}')`);
+  check('recovery resolves the incident with a note', (await one(`select status from public.health_incident where id = $1`, [inc.id])).status === 'resolved');
+}
+
+// 18. Memory chunks accept 1024-d embeddings and full-text search (M15/S9).
+check('memory_chunk stores an embedding', !(await throws(() => asWriter((tx) => tx.query(
+  `insert into public.memory_chunk (org_id, workspace_id, entity_id, doc_type, doc_id, chunk_index, content, embedding, embedding_model)
+   values ($1, $2, $3, 'source_record', $4, 0, 'Hiring Revit technicians in Rotterdam', $5::extensions.vector, 'voyage-3.5')`,
+  [orgA, wsA, coA, srA, `[${Array(1024).fill(0.01).join(',')}]`])))));
+check('memory_chunk full-text search works', (await one(
+  `select count(*)::int n from public.memory_chunk where content_tsv @@ plainto_tsquery('simple', 'revit rotterdam')`)).n === 1);
+
 await db.close();
 if (failures.length) {
   console.error(`\n${failures.length} check(s) failed.`);

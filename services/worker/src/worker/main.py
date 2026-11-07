@@ -16,6 +16,7 @@ from signal_core.events import (
     procrastinate_deferrer,
     relay_once,
 )
+from signal_core.health import PgHealthStore
 from signal_core.jobs import DbKillSwitch
 from signal_core.logging import configure_logging, get_logger
 from worker.app import build_app
@@ -63,7 +64,7 @@ async def amain() -> None:
     connector = PsycopgConnector(
         conninfo=conninfo, configure=configure_worker_connection, kwargs={"prepare_threshold": None}
     )
-    app = build_app(connector, DbKillSwitch(pool), state)
+    app = build_app(connector, DbKillSwitch(pool), state, PgHealthStore(pool))
 
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
