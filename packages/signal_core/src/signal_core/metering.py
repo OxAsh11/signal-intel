@@ -108,6 +108,21 @@ class BudgetGuard(Protocol):
     async def release(self, reservation_id: UUID) -> None: ...
 
 
+@dataclass(frozen=True)
+class ApprovedJob:
+    """A budget approval that was granted and whose paused job has not been re-queued yet."""
+
+    id: UUID
+    job_type: str
+    job_args: dict[str, Any]
+
+
+class ApprovalStore(Protocol):
+    async def claim_approved(self, limit: int) -> list[ApprovedJob]: ...
+
+    async def mark_resumed(self, approval_id: UUID) -> None: ...
+
+
 # -- Postgres implementations ---------------------------------------------------
 
 
@@ -209,6 +224,32 @@ class PgBudgetGuard:
         log.info("budget.released", reservation_id=str(reservation_id))
 
 
+class PgApprovalStore:
+    """Approved, not-yet-resumed budget approvals. resumed_at is set only after deferral."""
+
+    def __init__(self, pool: AsyncConnectionPool) -> None:
+        self._pool = pool
+
+    async def claim_approved(self, limit: int) -> list[ApprovedJob]:
+        async with self._pool.connection() as conn, conn.transaction():
+            cur = await conn.execute(
+                "select id, job_type, job_args from public.budget_approval "
+                "where status = 'approved' and resumed_at is null "
+                "order by decided_at limit %s for update skip locked",
+                (limit,),
+            )
+            rows = await cur.fetchall()
+        return [ApprovedJob(UUID(str(r[0])), str(r[1]), dict(r[2] or {})) for r in rows]
+
+    async def mark_resumed(self, approval_id: UUID) -> None:
+        async with self._pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "update public.budget_approval set resumed_at = now() "
+                "where id = %s and resumed_at is null",
+                (approval_id,),
+            )
+
+
 # -- In-memory test doubles -----------------------------------------------------
 
 
@@ -251,6 +292,7 @@ class MemoryBudgetGuard:
     settles: list[SettleRecord] = field(default_factory=list)
     reservations: dict[UUID, _Reservation] = field(default_factory=dict)
     paused: list[BudgetPaused] = field(default_factory=list)
+    approved: set[UUID] = field(default_factory=set)
     _settled_spend: list[tuple[UUID, UUID | None, Decimal]] = field(default_factory=list)
 
     @property
@@ -270,10 +312,15 @@ class MemoryBudgetGuard:
                 total += r.amount
         return total
 
+    def approve(self, approval_id: UUID) -> None:
+        self.approved.add(approval_id)
+
     async def reserve(self, ctx: CallContext, estimate_usd: Decimal) -> UUID:
         scopes = [None, ctx.brief_id] if ctx.brief_id else [None]
+        raw = ctx.job_args.get("approval_id")
+        bypass = raw is not None and UUID(str(raw)) in self.approved
         for (ws, brief, period), cap in self.caps.items():
-            if ws != ctx.workspace_id or brief not in scopes:
+            if bypass or ws != ctx.workspace_id or brief not in scopes:
                 continue
             spent = self._spent(ws, brief)
             if spent + estimate_usd > cap:
@@ -309,3 +356,15 @@ class MemoryBudgetGuard:
 
     async def release(self, reservation_id: UUID) -> None:
         self.reservations.pop(reservation_id, None)
+
+
+class MemoryApprovalStore:
+    def __init__(self, approvals: list[ApprovedJob] | None = None) -> None:
+        self.approvals = list(approvals or [])
+        self.resumed: set[UUID] = set()
+
+    async def claim_approved(self, limit: int) -> list[ApprovedJob]:
+        return [a for a in self.approvals if a.id not in self.resumed][:limit]
+
+    async def mark_resumed(self, approval_id: UUID) -> None:
+        self.resumed.add(approval_id)

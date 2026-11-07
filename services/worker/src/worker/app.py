@@ -1,18 +1,24 @@
 """Procrastinate app and the Phase 0 job types."""
 
-from typing import Any
+import contextlib
+from collections.abc import Callable
+from typing import Any, Literal
 
 import procrastinate
+from procrastinate.exceptions import AlreadyEnqueued
 
 from signal_core.events import DISPATCH_TASK
 from signal_core.health import HealthStore
 from signal_core.jobs import KillSwitch, job
 from signal_core.logging import get_logger
+from signal_core.metering import ApprovalStore
 from worker.health import HealthState
 
 log = get_logger(__name__)
 
 CANARY_CRON = "17 3 * * *"  # daily, 03:17 UTC
+AI_STATUS_CRON = "*/10 * * * *"
+RESUME_BATCH = 50
 
 
 def build_app(
@@ -20,6 +26,9 @@ def build_app(
     kill_switch: KillSwitch,
     state: HealthState,
     health: HealthStore,
+    *,
+    ai_configured: Callable[[], dict[str, bool]],
+    approvals: ApprovalStore,
 ) -> procrastinate.App:
     app = procrastinate.App(connector=connector)
 
@@ -41,6 +50,41 @@ def build_app(
         else:
             log.error("system.canary.failed", error=result.get("error"))
         return result
+
+    @app.periodic(cron=AI_STATUS_CRON, periodic_id="system.ai_status")
+    @job(app, type="system.ai_status", kill_switch=kill_switch, queue="system", retry=0)
+    async def ai_status(timestamp: int) -> dict[str, bool]:
+        # Settings shows "not set up" / "degraded" from this row; keys themselves are never read.
+        flags = ai_configured()
+        detail = {"chat": bool(flags.get("chat")), "embed": bool(flags.get("embed"))}
+        status: Literal["ok", "degraded"] = "ok" if all(detail.values()) else "degraded"
+        await health.record("ai_gateway", status, detail, owner="S3")
+        log.info("system.ai_status", status=status, **detail)
+        return detail
+
+    @app.periodic(cron="* * * * *", periodic_id="budget.resume")
+    @job(app, type="budget.resume", kill_switch=kill_switch, queue="system", retry=0)
+    async def budget_resume(timestamp: int) -> int:
+        # Re-queue work paused for budget once its approval is granted. The queueing lock (the
+        # approval id) makes a second deferral impossible even if marking resumed fails.
+        resumed = 0
+        for approved in await approvals.claim_approved(RESUME_BATCH):
+            if approved.job_type not in app.tasks:
+                log.error(
+                    "budget.resume_unknown_job",
+                    approval_id=str(approved.id),
+                    job_type=approved.job_type,
+                )
+            else:
+                args = {**approved.job_args, "approval_id": str(approved.id)}
+                with contextlib.suppress(AlreadyEnqueued):  # already queued: same as success
+                    await app.configure_task(
+                        name=approved.job_type, queueing_lock=str(approved.id)
+                    ).defer_async(**args)
+                log.info("budget.resumed", approval_id=str(approved.id), job_type=approved.job_type)
+                resumed += 1
+            await approvals.mark_resumed(approved.id)
+        return resumed
 
     @job(app, type=DISPATCH_TASK, kill_switch=kill_switch, queue="events")
     async def dispatch(**event: Any) -> None:
