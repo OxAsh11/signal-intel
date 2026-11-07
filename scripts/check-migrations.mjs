@@ -162,6 +162,17 @@ const asWriter = (fn) =>
   check('canary marks its source record extracted', sr.extraction_status === 'extracted');
 }
 
+// The worker connects as service_role: its canary must still pass after the 0014 grant sweep
+// (guard_derived and friends run as the invoker). Supabase gives service_role table access.
+{
+  await db.exec(`grant all on all tables in schema public to service_role`);
+  const r = await db.transaction(async (tx) => {
+    await tx.exec(`set local role service_role`);
+    return (await tx.query(`select app.run_canary() as r`)).rows[0].r;
+  });
+  check('canary runs as service_role', r.status === 'ok', JSON.stringify(r).slice(0, 200));
+}
+
 // Fixtures in org A for the remaining checks.
 const ext = (await one(`insert into public.extractor_version (capability, prompt_version, model, parser_version)
                          values ('extract', 'v1', 'test', 'v1') returning id`)).id;

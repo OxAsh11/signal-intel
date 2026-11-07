@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(20);
+select plan(21);
 
 insert into auth.users (id, email, aud, role) values
   ('00000000-0000-4000-8000-00000000000a', 'a@alpha.test', 'authenticated', 'authenticated'),
@@ -61,8 +61,14 @@ select is((app.reserve_budget((select v from ids where k = 'ws'), null, 5, 'extr
           'concurrent calls cannot both overspend (sequential proof)');
 select is((select count(*)::int from public.budget_approval where status = 'pending'), 1, 'reserve over cap pauses with one pending approval');
 
-insert into ids select 'big', (app.reserve_budget((select v from ids where k = 'ws'), null, 30, 'extract.run', '{}') ->> 'approval_id')::uuid;
-insert into ids select 'small', (app.reserve_budget((select v from ids where k = 'ws'), null, 20, 'extract.run', '{}') ->> 'approval_id')::uuid;
+-- Dedupe (0014): an identical refusal reuses the pending approval instead of opening another.
+select is((app.reserve_budget((select v from ids where k = 'ws'), null, 5, 'extract.run', '{}')) ->> 'approval_id',
+          (select id::text from public.budget_approval where status = 'pending'),
+          'an identical refusal returns the same pending approval');
+
+-- big and small use distinct job args so they are separate requests.
+insert into ids select 'big', (app.reserve_budget((select v from ids where k = 'ws'), null, 30, 'extract.run', '{"k":"big"}') ->> 'approval_id')::uuid;
+insert into ids select 'small', (app.reserve_budget((select v from ids where k = 'ws'), null, 20, 'extract.run', '{"k":"small"}') ->> 'approval_id')::uuid;
 
 -- Approvals: Viewer no; Editor within the limit only; Admin any.
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000022","role":"authenticated"}', true);

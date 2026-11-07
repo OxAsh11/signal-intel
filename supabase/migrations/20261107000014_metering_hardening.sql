@@ -194,8 +194,8 @@ from public;
 -- Schema-level `alter default privileges ... revoke` (0001) cannot remove the built-in PUBLIC
 -- execute default, so every function created without an explicit revoke is callable by anon.
 -- Sweep it once: anon and PUBLIC lose execute on every function in public and app. Explicit
--- grants to authenticated / service_role are untouched, and trigger functions need no execute
--- privilege to fire. New functions are caught by the `pnpm db:check` anon-privilege check.
+-- grants to authenticated / service_role survive, but anything service_role or authenticated
+-- reached only through PUBLIC is re-granted below. New functions are caught by the `pnpm db:check` anon-privilege check.
 do $$
 declare
   f record;
@@ -209,3 +209,9 @@ begin
     execute format('revoke execute on function %s from public, anon', f.sig);
   end loop;
 end $$;
+
+-- Re-grants for functions that run as the invoker and were reachable only through PUBLIC:
+--   app.is_derivation_writer(): called by the guard_derived / guard_account_stage triggers, which run as
+--   the writing role. service_role (app.run_canary inserts into derived tables) needs it to pass the
+--   guard; authenticated has no write grants, so granting it only keeps the guard's error clean.
+grant execute on function app.is_derivation_writer() to service_role, authenticated;
