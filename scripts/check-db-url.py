@@ -31,6 +31,8 @@ def main() -> int:
         problems.append("does not start with postgresql://")
     if "[" in url or "]" in url:
         problems.append("square brackets present: delete the [ ] around the password")
+    if "<" in url or ">" in url:
+        problems.append("placeholder like <region> left in: copy the host from Connect")
     if "YOUR-PASSWORD" in url:
         problems.append("placeholder [YOUR-PASSWORD] not replaced")
     if url.count("@") != 1:
@@ -49,7 +51,11 @@ def main() -> int:
                 "select count(*) from information_schema.tables where table_schema = 'public'"
             ).fetchone()
     except psycopg.OperationalError as exc:
-        text = str(exc).lower()
+        # Never echo the password: strip it from the server message before printing anything.
+        password = url.split("://", 1)[1].rsplit("@", 1)[0].split(":", 1)[-1]
+        detail = str(exc).replace(password, "***") if password else str(exc)
+        print("Server said:", " | ".join(x.strip() for x in detail.splitlines() if x.strip())[:400])
+        text = detail.lower()
         if "password authentication failed" in text:
             reason = "wrong password"
         elif "tenant or user not found" in text:
