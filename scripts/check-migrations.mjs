@@ -284,6 +284,80 @@ check('memory_chunk stores an embedding', !(await throws(() => asWriter((tx) => 
 check('memory_chunk full-text search works', (await one(
   `select count(*)::int n from public.memory_chunk where content_tsv @@ plainto_tsquery('simple', 'revit rotterdam')`)).n === 1);
 
+// ── Phase 0c: organisations and access (M14) ─────────────────────────────────
+{
+  const D = '00000000-0000-4000-8000-00000000000d'; // d@alpha.test
+  const E = '00000000-0000-4000-8000-00000000000e'; // e@other.test
+  const G = '00000000-0000-4000-8000-000000000011'; // g@other.test
+  const H = '00000000-0000-4000-8000-000000000012'; // h@alpha.test
+  await db.exec(`insert into auth.users (id, email) values ('${D}','d@alpha.test'), ('${E}','e@other.test'),
+                 ('${G}','g@other.test'), ('${H}','h@alpha.test')`);
+  const rpc = (uid, sql, params) => asUser(uid, (tx) => tx.query(sql, params));
+  const memberOf = async (uid) => (await one(`select id from public.member where user_id = $1 and org_id = $2`, [uid, orgA]))?.id;
+
+  // Invite → accept by token.
+  const tokD = (await rpc(A, `select public.invite_member($1, 'D@Alpha.test', 'Editor', $2) t`, [orgA, wsA])).rows[0].t;
+  check('invitation token is stored only as a hash', (await one(`select count(*)::int n from public.invitation where token_hash = $1`, [tokD])).n === 0);
+  check('invitee accepts by token', !(await throws(() => rpc(D, `select public.accept_invitation($1)`, [tokD]))));
+  check('accepted Editor sees the workspace', (await rpc(D, `select count(*)::int n from public.workspace`)).rows[0].n === 1);
+  check('an invitation is used once', await throws(() => rpc(D, `select public.accept_invitation($1)`, [tokD])));
+  check('clients cannot read token hashes', await throws(() => rpc(A, `select token_hash from public.invitation`)));
+
+  const mA = await memberOf(A);
+  const mC = await memberOf(C);
+  const mD = await memberOf(D);
+
+  // Forwarded link.
+  const tokF = (await rpc(A, `select public.invite_member($1, 'f@alpha.test', 'Viewer', $2) t`, [orgA, wsA])).rows[0].t;
+  check('invitation accepted only by its email', await throws(() => rpc(E, `select public.accept_invitation($1)`, [tokF])));
+
+  // Permission matrix.
+  check('Viewer cannot invite', await throws(() => rpc(C, `select public.invite_member($1, 'x@alpha.test', 'Viewer', $2)`, [orgA, wsA])));
+  check('Editor cannot change roles', await throws(() => rpc(D, `select public.set_member_role($1, 'Editor', $2)`, [mC, wsA])));
+  check('Owner makes D an Admin', !(await throws(() => rpc(A, `select public.set_member_role($1, 'Admin')`, [mD]))));
+  check('admin cannot grant Owner', await throws(() => rpc(D, `select public.set_member_role($1, 'Owner')`, [mC])));
+  check('admin cannot invite an Owner', await throws(() => rpc(D, `select public.invite_member($1, 'y@alpha.test', 'Owner')`, [orgA])));
+  check('admin can invite an Editor', !(await throws(() => rpc(D, `select public.invite_member($1, 'z@alpha.test', 'Editor', $2)`, [orgA, wsA]))));
+  check('admin cannot remove the Owner', await throws(() => rpc(D, `select public.remove_member($1)`, [mA])));
+  check('workspace roles need a workspace', await throws(() => rpc(A, `select public.set_member_role($1, 'Viewer')`, [mC])));
+  check('member of another org cannot manage this one', await throws(() => rpc(B, `select public.invite_member($1, 'q@alpha.test', 'Viewer', $2)`, [orgA, wsA])));
+
+  // At least one Owner.
+  check('last owner cannot be removed', await throws(() => rpc(A, `select public.remove_member($1)`, [mA])));
+  check('last owner cannot be demoted', await throws(() => rpc(A, `select public.set_member_role($1, 'Admin')`, [mA])));
+
+  // Removing a member ends access immediately.
+  check('Owner removes a member', !(await throws(() => rpc(A, `select public.remove_member($1)`, [mD]))));
+  check('removed member sees nothing', (await rpc(D, `select (select count(*) from public.workspace)::int + (select count(*) from public.organisation)::int n`)).rows[0].n === 0);
+
+  // Allowed domains.
+  const tokG = (await rpc(A, `select public.invite_member($1, 'g@other.test', 'Viewer', $2) t`, [orgA, wsA])).rows[0].t;
+  check('invalid domain is rejected', await throws(() => rpc(A, `select public.set_allowed_domains($1, array['not a domain'])`, [orgA])));
+  check('Owner sets allowed domains', !(await throws(() => rpc(A, `select public.set_allowed_domains($1, array[' Alpha.TEST '])`, [orgA]))));
+  check('domains are normalised', (await one(`select allowed_email_domains d from public.organisation where id = $1`, [orgA])).d.join() === 'alpha.test');
+  check('domain outside allowed list refused at invite', await throws(() => rpc(A, `select public.invite_member($1, 'k@other.test', 'Viewer', $2)`, [orgA, wsA])));
+  check('domain outside allowed list refused at accept', await throws(() => rpc(G, `select public.accept_invitation($1)`, [tokG])));
+
+  // In-app acceptance without a token.
+  await rpc(A, `select public.invite_member($1, 'h@alpha.test', 'Operator', $2)`, [orgA, wsA]);
+  const mine = (await rpc(H, `select * from public.my_invitations()`)).rows;
+  check('my_invitations lists only my pending invitations', mine.length === 1 && mine[0].role === 'Operator' && mine[0].org_name === 'Alpha Engineering');
+  check('others cannot see my invitations', (await rpc(E, `select count(*)::int n from public.my_invitations()`)).rows[0].n === 0);
+  check('accept_my_invitation joins the workspace', !(await throws(() => rpc(H, `select public.accept_my_invitation($1)`, [mine[0].id]))));
+
+  const mH = await memberOf(H);
+
+  // Revoke, teams, audit.
+  const pend = (await one(`select id from public.invitation where email = 'z@alpha.test'`)).id;
+  check('Owner revokes an invitation', !(await throws(() => rpc(A, `select public.revoke_invitation($1)`, [pend]))));
+  const team = (await rpc(A, `select public.create_team($1, 'Benelux') id`, [orgA])).rows[0].id;
+  check('Owner adds a member to a team', !(await throws(() => rpc(A, `select public.set_team_member($1, $2, true)`, [team, mH]))));
+  check('Operator cannot manage teams', await throws(() => rpc(H, `select public.create_team($1, 'Rogue')`, [orgA])));
+  const actions = (await one(`select array_agg(distinct action) a from public.audit_log where org_id = $1`, [orgA])).a;
+  check('every access change is audited', ['invitation.created', 'invitation.accepted', 'invitation.revoked', 'role.changed',
+    'member.removed', 'organisation.domains_changed', 'team.created', 'team.member_added'].every((x) => actions.includes(x)), actions.join(','));
+}
+
 await db.close();
 if (failures.length) {
   console.error(`\n${failures.length} check(s) failed.`);
