@@ -1,12 +1,13 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(16);
+select plan(18);
 
 insert into auth.users (id, email, aud, role) values
   ('00000000-0000-4000-8000-00000000000a', 'a@alpha.test', 'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-000000000021', 'j@alpha.test', 'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-000000000022', 'k@alpha.test', 'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-000000000023', 'l@alpha.test', 'authenticated', 'authenticated'),
+  ('00000000-0000-4000-8000-000000000024', 'o@alpha.test', 'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-00000000000b', 'b@beta.test', 'authenticated', 'authenticated');
 
 -- Alpha: Owner A, Editor J, Viewer K, Admin L. Beta: Owner B.
@@ -25,10 +26,12 @@ insert into ids select 'ws', w.id from public.workspace w join public.organisati
 insert into public.member (id, org_id, user_id, email) values
   ('00000000-0000-4000-8000-0000000000a1', (select v from ids where k = 'org'), '00000000-0000-4000-8000-000000000021', 'j@alpha.test'),
   ('00000000-0000-4000-8000-0000000000a2', (select v from ids where k = 'org'), '00000000-0000-4000-8000-000000000022', 'k@alpha.test'),
-  ('00000000-0000-4000-8000-0000000000a3', (select v from ids where k = 'org'), '00000000-0000-4000-8000-000000000023', 'l@alpha.test');
+  ('00000000-0000-4000-8000-0000000000a3', (select v from ids where k = 'org'), '00000000-0000-4000-8000-000000000023', 'l@alpha.test'),
+  ('00000000-0000-4000-8000-0000000000a4', (select v from ids where k = 'org'), '00000000-0000-4000-8000-000000000024', 'o@alpha.test');
 insert into public.role_assignment (org_id, member_id, workspace_id, role) values
   ((select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000000a1', (select v from ids where k = 'ws'), 'Editor'),
-  ((select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000000a2', (select v from ids where k = 'ws'), 'Viewer');
+  ((select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000000a2', (select v from ids where k = 'ws'), 'Viewer'),
+  ((select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000000a4', (select v from ids where k = 'ws'), 'Operator');
 insert into public.role_assignment (org_id, member_id, role) values
   ((select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000000a3', 'Admin');
 
@@ -40,7 +43,9 @@ select throws_ok($$ delete from public.usage_ledger $$, '42501', null, 'ledger i
 
 -- The reservation takes a per-workspace advisory lock before reading spend.
 select ok((select prosrc from pg_proc where proname = 'reserve_budget' and pronamespace = 'app'::regnamespace)
-          like '%pg_advisory_xact_lock%', 'reserve_budget takes the advisory lock');
+          like '%hashtextextended(p_ws::text, 0)%', 'reserve_budget locks on the workspace alone');
+select ok((select prosrc from pg_proc where proname = 'settle_reservation' and pronamespace = 'app'::regnamespace)
+          like '%hashtextextended(r.workspace_id::text, 0)%', 'settle_reservation locks on the workspace alone');
 
 -- Admin sets a day cap of 10 (spent 4).
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000023","role":"authenticated"}', true);
@@ -63,6 +68,8 @@ insert into ids select 'small', (app.reserve_budget((select v from ids where k =
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000022","role":"authenticated"}', true);
 set local role authenticated;
 select throws_ok($$ select public.decide_budget_approval((select v from ids where k = 'small'), true) $$, '42501', null, 'viewer cannot approve');
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000024","role":"authenticated"}', true);
+select throws_ok($$ select public.decide_budget_approval((select v from ids where k = 'small'), true) $$, '42501', null, 'operator cannot approve');
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000021","role":"authenticated"}', true);
 select throws_ok($$ select public.decide_budget_approval((select v from ids where k = 'big'), true) $$, '42501', null, 'editor limit enforced');
 select lives_ok($$ select public.decide_budget_approval((select v from ids where k = 'small'), true) $$, 'editor approves within the limit');

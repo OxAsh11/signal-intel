@@ -364,6 +364,7 @@ check('memory_chunk full-text search works', (await one(
   const J = '00000000-0000-4000-8000-000000000021'; // Editor
   const K = '00000000-0000-4000-8000-000000000022'; // Viewer
   const L = '00000000-0000-4000-8000-000000000023'; // Admin
+  const H = '00000000-0000-4000-8000-000000000012'; // Operator in wsA (set up in the access checks)
   await db.exec(`insert into auth.users (id, email) values ('${J}','j@alpha.test'), ('${K}','k@alpha.test'), ('${L}','l@alpha.test')`);
   const mk = async (uid, email) => (await one(`insert into public.member (org_id, user_id, email) values ($1, $2, $3) returning id`, [orgA, uid, email])).id;
   const mJ = await mk(J, 'j@alpha.test'), mK = await mk(K, 'k@alpha.test'), mL = await mk(L, 'l@alpha.test');
@@ -480,11 +481,13 @@ check('memory_chunk full-text search works', (await one(
   // approvals
   {
     const { ws } = await newWs();
+    await db.query(`insert into public.role_assignment (org_id, member_id, workspace_id, role) values ($1, (select id from public.member where user_id = $2 and org_id = $1), $3, 'Operator')`, [orgA, H, ws]);
     await cap(ws, null, 'day', 10);
     await spend(ws, null, 9);
     const big = (await reserve(ws, null, 30)).approval_id;
     const small = (await reserve(ws, null, 20)).approval_id;
     check('viewer cannot approve', await throws(() => rpc(K, `select public.decide_budget_approval($1, true)`, [small])));
+    check('operator cannot approve', await throws(() => rpc(H, `select public.decide_budget_approval($1, true)`, [small])));
     check('viewer cannot read approvals', (await rpc(K, `select count(*)::int n from public.budget_approval`)).rows[0].n === 0);
     check('editor limit enforced', await throws(() => rpc(J, `select public.decide_budget_approval($1, true)`, [big])));
     check('editor can approve within the limit', !(await throws(() => rpc(J, `select public.decide_budget_approval($1, true)`, [small]))));
@@ -497,6 +500,35 @@ check('memory_chunk full-text search works', (await one(
     await cap(other, null, 'day', 1);
     check('an approval from another workspace does not apply', (await reserve(other, null, 30, big)).ok === false);
     check('editor sees approvals in their workspace', (await rpc(J, `select count(*)::int n from public.budget_approval where workspace_id = $1`, [ws])).rows[0].n >= 2);
+  }
+
+  // approval is bounded: estimate, Brief, job type, 24 hours
+  {
+    const { ws, brief } = await newWs();
+    await cap(ws, null, 'day', 10);
+    await spend(ws, null, 9);
+    const ap = (await reserve(ws, null, 30)).approval_id;
+    await rpc(A, `select public.decide_budget_approval($1, true)`, [ap]);
+    const first = await reserve(ws, null, 20, ap);
+    const again = await reserve(ws, null, 20, ap);
+    const pending = (await one(`select count(*)::int n from public.budget_approval where workspace_id = $1 and status = 'pending'`, [ws])).n;
+    check('approval cannot be reused beyond its estimate', first.ok === true && again.ok === false && pending === 1, JSON.stringify([first.ok, again.ok, pending]));
+    check('reservation carries its approval', (await one(`select count(*)::int n from public.usage_ledger where approval_id = $1 and status = 'reserved'`, [ap])).n === 1);
+    await db.query(`select app.settle_reservation($1, null)`, [first.reservation_id]);
+    check('a released reservation frees the approval', (await reserve(ws, null, 20, ap)).ok === true);
+    const ap2 = (await reserve(ws, null, 50)).approval_id;
+    await rpc(A, `select public.decide_budget_approval($1, true)`, [ap2]);
+    const wrongBrief = await reserve(ws, brief, 5, ap2);
+    const wrongJob = (await one(`select app.reserve_budget($1, null, 5, 'other.job', '{}', $2) r`, [ws, ap2])).r;
+    const right = await reserve(ws, null, 5, ap2);
+    check('approval scoped to brief and job type', wrongBrief.ok === false && wrongJob.ok === false && right.ok === true, JSON.stringify([wrongBrief.ok, wrongJob.ok, right.ok]));
+    const ap3 = (await reserve(ws, null, 50)).approval_id;
+    await rpc(A, `select public.decide_budget_approval($1, true)`, [ap3]);
+    await db.query(`update public.budget_approval set decided_at = now() - interval '25 hours' where id = $1`, [ap3]);
+    check('approval expires after 24 hours', (await reserve(ws, null, 5, ap3)).ok === false);
+    let msg = '';
+    try { await rpc(J, `select public.decide_budget_approval($1, true)`, [ap]); } catch (e) { msg = e.message; }
+    check('decided approvals report their status before the limit', /already been decided/.test(msg), msg);
   }
 
   // set_budget

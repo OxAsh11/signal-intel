@@ -47,6 +47,7 @@ create table public.usage_ledger (
   latency_ms     int,
   status         text not null check (status in ('ok', 'rejected', 'reserved', 'released')),
   reservation_id uuid,
+  approval_id    uuid,   -- the budget_approval this spend was let through under (FK added below)
   created_at     timestamptz not null default now(),
   constraint ledger_unit_for_spend check (status in ('reserved', 'released') or unit is not null)
 );
@@ -101,6 +102,8 @@ create table public.budget_approval (
   resumed_at    timestamptz
 );
 create index budget_approval_ws_idx on public.budget_approval (workspace_id, status);
+alter table public.usage_ledger add constraint usage_ledger_approval_fk foreign key (approval_id) references public.budget_approval (id) on delete restrict;
+create index usage_ledger_approval_idx on public.usage_ledger (approval_id) where approval_id is not null;
 alter table public.budget_approval enable row level security;
 create policy budget_approval_read on public.budget_approval for select to authenticated
   using (app.has_workspace_role(workspace_id, 'Editor'));
@@ -147,12 +150,14 @@ declare
   v_reason text;
   v_approval uuid;
   v_reservation uuid := gen_random_uuid();
+  v_bypass uuid;   -- the approval this reservation is let through under, if any
+  a public.budget_approval%rowtype;
 begin
   if p_estimate is null or p_estimate < 0 then
     raise exception 'the estimate must be zero or more' using errcode = '22023';
   end if;
-  -- Serialise reservations per workspace and Brief before reading spend.
-  perform pg_advisory_xact_lock(hashtextextended(p_ws::text || coalesce(p_brief::text, ''), 0));
+  -- Serialise reservations per workspace (the workspace cap spans all Briefs) before reading spend.
+  perform pg_advisory_xact_lock(hashtextextended(p_ws::text, 0));
 
   select org_id into v_org from public.workspace where id = p_ws;
   if v_org is null then
@@ -162,10 +167,26 @@ begin
     raise exception 'that Brief is not in this workspace' using errcode = '22023';
   end if;
 
-  -- An approved request pre-approves spend up to its estimate, so resumed work is not paused again.
-  if p_approval is null or not exists (
-       select 1 from public.budget_approval a
-       where a.id = p_approval and a.workspace_id = p_ws and a.status = 'approved' and p_estimate <= a.estimate_usd) then
+  -- An approval pre-approves spend only for the same workspace, Brief and job type, within 24 hours of
+  -- the decision, and only up to its estimate counting what is already charged to it. Otherwise the
+  -- normal caps apply (a non-matching approval never errors).
+  if p_approval is not null then
+    select * into a from public.budget_approval x
+     where x.id = p_approval and x.workspace_id = p_ws and x.status = 'approved'
+       and x.brief_id is not distinct from p_brief and x.job_type = p_job_type
+       and x.decided_at >= now() - interval '24 hours';
+    if found and p_estimate + coalesce((
+         select sum(l.cost_usd) from public.usage_ledger l
+          where l.approval_id = p_approval
+            and (l.status in ('ok', 'rejected')
+                 or (l.status = 'reserved' and not exists (
+                       select 1 from public.usage_ledger r
+                        where r.reservation_id = l.reservation_id and r.status = 'released')))), 0) <= a.estimate_usd then
+      v_bypass := p_approval;
+    end if;
+  end if;
+
+  if v_bypass is null then
     -- Workspace caps first (always), then Brief caps (only when a Brief is given); day before month.
     for v_cap in
       select b.brief_id, b.period, b.cap_usd
@@ -188,8 +209,8 @@ begin
     end loop;
   end if;
 
-  insert into public.usage_ledger (org_id, workspace_id, brief_id, capability, cost_usd, status, reservation_id)
-  values (v_org, p_ws, p_brief, p_job_type, p_estimate, 'reserved', v_reservation);
+  insert into public.usage_ledger (org_id, workspace_id, brief_id, capability, cost_usd, status, reservation_id, approval_id)
+  values (v_org, p_ws, p_brief, p_job_type, p_estimate, 'reserved', v_reservation, v_bypass);
   return jsonb_build_object('ok', true, 'reservation_id', v_reservation);
 end $$;
 
@@ -206,7 +227,7 @@ begin
   if not found then
     raise exception 'reservation not found' using errcode = 'P0002';
   end if;
-  perform pg_advisory_xact_lock(hashtextextended(r.workspace_id::text || coalesce(r.brief_id::text, ''), 0));
+  perform pg_advisory_xact_lock(hashtextextended(r.workspace_id::text, 0));
   if exists (select 1 from public.usage_ledger where reservation_id = p_reservation and status = 'released') then
     raise exception 'reservation already released' using errcode = '55000';
   end if;
@@ -214,18 +235,18 @@ begin
     raise exception 'the settled status must be ok or rejected' using errcode = '22023';
   end if;
 
-  insert into public.usage_ledger (org_id, workspace_id, brief_id, job_id, capability, provider, model, cost_usd, status, reservation_id)
-  values (r.org_id, r.workspace_id, r.brief_id, r.job_id, r.capability, r.provider, r.model, 0, 'released', p_reservation);
+  insert into public.usage_ledger (org_id, workspace_id, brief_id, job_id, capability, provider, model, cost_usd, status, reservation_id, approval_id)
+  values (r.org_id, r.workspace_id, r.brief_id, r.job_id, r.capability, r.provider, r.model, 0, 'released', p_reservation, r.approval_id);
 
   if p_actual is not null then
     for l in select * from jsonb_array_elements(coalesce(p_actual -> 'lines', '[]')) loop
       insert into public.usage_ledger (org_id, workspace_id, brief_id, job_id, capability, provider, model, unit,
-                                       quantity, cost_usd, latency_ms, status, reservation_id)
+                                       quantity, cost_usd, latency_ms, status, reservation_id, approval_id)
       values (r.org_id, r.workspace_id, coalesce(r.brief_id, (p_actual ->> 'brief_id')::uuid),
               coalesce(p_actual ->> 'job_id', r.job_id), coalesce(p_actual ->> 'capability', r.capability),
               p_actual ->> 'provider', p_actual ->> 'model', (l ->> 'unit')::public.usage_unit,
               coalesce((l ->> 'quantity')::numeric, 0), coalesce((l ->> 'cost_usd')::numeric, 0),
-              (p_actual ->> 'latency_ms')::int, v_status, p_reservation);
+              (p_actual ->> 'latency_ms')::int, v_status, p_reservation, r.approval_id);
     end loop;
   end if;
 end $$;
@@ -293,15 +314,15 @@ begin
   if not app.has_workspace_role(a.workspace_id, 'Editor') then
     raise exception 'only an Editor, Admin or Owner can decide budget approvals' using errcode = '42501';
   end if;
+  if a.status <> 'pending' then
+    raise exception 'this approval has already been decided' using errcode = '55000';
+  end if;
   if p_approve and not app.has_org_role(a.org_id, 'Admin') then
     select editor_approval_limit_usd into v_limit from public.workspace_settings where workspace_id = a.workspace_id;
     if a.estimate_usd > coalesce(v_limit, 25) then
       raise exception 'this is above your approval limit of % USD: ask an Admin or Owner', coalesce(v_limit, 25)
         using errcode = '42501';
     end if;
-  end if;
-  if a.status <> 'pending' then
-    raise exception 'this approval has already been decided' using errcode = '55000';
   end if;
 
   update public.budget_approval
