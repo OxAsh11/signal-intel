@@ -1,7 +1,7 @@
 import asyncio
 import json
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import procrastinate
 import pytest
@@ -189,21 +189,44 @@ async def test_budget_resume_defers_once() -> None:
     assert store.resumed == {job_.id}
 
 
-class ForgetfulStore(MemoryApprovalStore):
-    async def mark_resumed(self, approval_id: UUID) -> None:
-        return None  # simulates a crash between deferral and marking
+async def test_resume_claims_each_approval_once() -> None:
+    store = MemoryApprovalStore([approved()])
+    first, second = await asyncio.gather(store.claim_approved(10), store.claim_approved(10))
+    assert len(first) + len(second) == 1
 
 
-async def test_budget_resume_survives_missed_mark() -> None:
+async def test_resume_not_repeated_after_job_has_started() -> None:
     connector = InMemoryConnector()
-    app = make_app(approvals=ForgetfulStore([approved()]), connector=connector)
+    app = make_app(approvals=MemoryApprovalStore([approved()]), connector=connector)
+    async with app.open_async():
+        await tick(app)
+        (j,) = work_jobs(connector)
+        j["status"] = "doing"  # the worker picked it up: no longer 'todo', lock is free
+        await tick(app)
+    assert len(work_jobs(connector)) == 1
+
+
+async def test_failed_defer_is_unclaimed_and_retried() -> None:
+    connector = InMemoryConnector()
+    app = make_app(approvals=MemoryApprovalStore([approved()]), connector=connector)
+    real = connector.defer_jobs_all
+    failed = {"done": False}
+
+    async def flaky(jobs: Any) -> Any:
+        if not failed["done"] and any(j.task_name == "test.work" for j in jobs):
+            failed["done"] = True
+            raise RuntimeError("db down")
+        return await real(jobs)
+
+    connector.defer_jobs_all = flaky  # type: ignore[method-assign]
     async with app.open_async():
         await tick(app)
         await tick(app)
-    assert len(work_jobs(connector)) == 1  # queueing lock stops a second deferral
+    assert failed["done"]  # the first deferral really failed
+    assert len(work_jobs(connector)) == 1  # then the retry deferred it exactly once
 
 
-async def test_budget_resume_unknown_job_type_is_marked_resumed() -> None:
+async def test_budget_resume_unknown_job_type_is_not_deferred() -> None:
     job_ = approved("no.such.task")
     store = MemoryApprovalStore([job_])
     connector = InMemoryConnector()

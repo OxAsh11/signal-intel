@@ -65,8 +65,10 @@ def build_app(
     @app.periodic(cron="* * * * *", periodic_id="budget.resume")
     @job(app, type="budget.resume", kill_switch=kill_switch, queue="system", retry=0)
     async def budget_resume(timestamp: int) -> int:
-        # Re-queue work paused for budget once its approval is granted. The queueing lock (the
-        # approval id) makes a second deferral impossible even if marking resumed fails.
+        # Re-queue work paused for budget once its approval is granted. Each approval is claimed
+        # atomically (resumed_at set) before deferral, so it is resumed at most once. If the
+        # deferral fails we unclaim so the next tick retries; a crash between claim and deferral
+        # loses that one job rather than risking a double spend.
         resumed = 0
         for approved in await approvals.claim_approved(RESUME_BATCH):
             if approved.job_type not in app.tasks:
@@ -75,15 +77,23 @@ def build_app(
                     approval_id=str(approved.id),
                     job_type=approved.job_type,
                 )
-            else:
-                args = {**approved.job_args, "approval_id": str(approved.id)}
+                continue
+            args = {**approved.job_args, "approval_id": str(approved.id)}
+            try:
                 with contextlib.suppress(AlreadyEnqueued):  # already queued: same as success
                     await app.configure_task(
                         name=approved.job_type, queueing_lock=str(approved.id)
                     ).defer_async(**args)
-                log.info("budget.resumed", approval_id=str(approved.id), job_type=approved.job_type)
-                resumed += 1
-            await approvals.mark_resumed(approved.id)
+            except Exception:
+                await approvals.unclaim(approved.id)
+                log.exception(
+                    "budget.resume_failed",
+                    approval_id=str(approved.id),
+                    job_type=approved.job_type,
+                )
+                continue
+            log.info("budget.resumed", approval_id=str(approved.id), job_type=approved.job_type)
+            resumed += 1
         return resumed
 
     @job(app, type=DISPATCH_TASK, kill_switch=kill_switch, queue="events")

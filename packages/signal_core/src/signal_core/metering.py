@@ -120,7 +120,7 @@ class ApprovedJob:
 class ApprovalStore(Protocol):
     async def claim_approved(self, limit: int) -> list[ApprovedJob]: ...
 
-    async def mark_resumed(self, approval_id: UUID) -> None: ...
+    async def unclaim(self, approval_id: UUID) -> None: ...
 
 
 # -- Postgres implementations ---------------------------------------------------
@@ -225,27 +225,31 @@ class PgBudgetGuard:
 
 
 class PgApprovalStore:
-    """Approved, not-yet-resumed budget approvals. resumed_at is set only after deferral."""
+    """Approved budget approvals, claimed at most once by setting resumed_at."""
 
     def __init__(self, pool: AsyncConnectionPool) -> None:
         self._pool = pool
 
     async def claim_approved(self, limit: int) -> list[ApprovedJob]:
+        # One statement: the claim (resumed_at = now()) is atomic, so overlapping ticks or
+        # replicas can never receive the same approval.
         async with self._pool.connection() as conn, conn.transaction():
             cur = await conn.execute(
-                "select id, job_type, job_args from public.budget_approval "
+                "update public.budget_approval set resumed_at = now() where id in ("
+                "select id from public.budget_approval "
                 "where status = 'approved' and resumed_at is null "
-                "order by decided_at limit %s for update skip locked",
+                "order by decided_at for update skip locked limit %s) "
+                "returning id, job_type, job_args, resumed_at",
                 (limit,),
             )
             rows = await cur.fetchall()
         return [ApprovedJob(UUID(str(r[0])), str(r[1]), dict(r[2] or {})) for r in rows]
 
-    async def mark_resumed(self, approval_id: UUID) -> None:
+    async def unclaim(self, approval_id: UUID) -> None:
         async with self._pool.connection() as conn, conn.transaction():
             await conn.execute(
-                "update public.budget_approval set resumed_at = now() "
-                "where id = %s and resumed_at is null",
+                "update public.budget_approval set resumed_at = null "
+                "where id = %s and resumed_at is not null",
                 (approval_id,),
             )
 
@@ -364,7 +368,9 @@ class MemoryApprovalStore:
         self.resumed: set[UUID] = set()
 
     async def claim_approved(self, limit: int) -> list[ApprovedJob]:
-        return [a for a in self.approvals if a.id not in self.resumed][:limit]
+        claimed = [a for a in self.approvals if a.id not in self.resumed][:limit]
+        self.resumed.update(a.id for a in claimed)  # no await between check and claim: atomic
+        return claimed
 
-    async def mark_resumed(self, approval_id: UUID) -> None:
-        self.resumed.add(approval_id)
+    async def unclaim(self, approval_id: UUID) -> None:
+        self.resumed.discard(approval_id)

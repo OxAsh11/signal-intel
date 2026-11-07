@@ -115,3 +115,25 @@ async def test_approved_job_not_paused_again_in_sql() -> None:
             await guard.reserve(other, Decimal(6))
     finally:
         await pool.close()
+
+
+@pytest.mark.db
+async def test_pg_claim_approved_is_exclusive() -> None:
+    from signal_core.metering import PgApprovalStore
+
+    pool = await open_pool()
+    try:
+        await ensure_fixture(pool, Decimal(10))
+        async with pool.connection() as conn, conn.transaction():
+            await conn.execute(
+                "insert into public.budget_approval (org_id, workspace_id, job_type, job_args, "
+                "estimate_usd, reason, status, decided_at) "
+                "values (%s, %s, 'test.claim', '{}', 1, 'test', 'approved', now())",
+                (FIXTURE_ORG, FIXTURE_WS),
+            )
+        store = PgApprovalStore(pool)
+        a, b = await asyncio.gather(store.claim_approved(100), store.claim_approved(100))
+        mine = [x for x in a + b if x.job_type == "test.claim"]
+        assert len(mine) == 1  # the row stays claimed: that is the end state
+    finally:
+        await pool.close()
