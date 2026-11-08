@@ -177,6 +177,7 @@ class EventType(StrEnum):
     """Closed event catalogue (A.4). Adding an event is a reviewed change."""
 
     BRIEF_VERSION_PUBLISHED = "brief.version_published"
+    BRIEF_INTAKE_REQUESTED = "brief.intake_requested"
     SOURCE_RECORD_CREATED = "source_record.created"
     CLAIM_CREATED = "claim.created"
     CLAIM_RETRACTED = "claim.retracted"

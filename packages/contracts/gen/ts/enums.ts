@@ -67,7 +67,7 @@ export type GateOutcome = z.infer<typeof GateOutcome>;
 export const ActivityKind = z.enum(["message_sent","message_bounced","reply_received","auto_reply","unsubscribed","inbound_contact","meeting_scheduled","meeting_held","call_logged","note_added","marked_qualified","marked_disqualified","deal_created","deal_stage_changed","task_completed"]);
 export type ActivityKind = z.infer<typeof ActivityKind>;
 
-export const EventType = z.enum(["brief.version_published","source_record.created","claim.created","claim.retracted","entity.created","entity.merged","entity.unmerged","verdict.changed","research_doc.published","contact_point.verified","score.band_changed","campaign.member_added","campaign.paused","reply.received","reply.classified","account.stage_changed","meeting.held","task.created","health.incident_opened","health.incident_resolved"]);
+export const EventType = z.enum(["brief.version_published","brief.intake_requested","source_record.created","claim.created","claim.retracted","entity.created","entity.merged","entity.unmerged","verdict.changed","research_doc.published","contact_point.verified","score.band_changed","campaign.member_added","campaign.paused","reply.received","reply.classified","account.stage_changed","meeting.held","task.created","health.incident_opened","health.incident_resolved"]);
 export type EventType = z.infer<typeof EventType>;
 
 export const UsageUnit = z.enum(["ai_input_tokens","ai_output_tokens","embed_tokens","fetch","enrichment_lookup","research_doc"]);
