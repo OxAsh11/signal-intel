@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { notFound } from 'next/navigation';
+import Link from 'next/link';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgContext, atLeast } from '@/lib/org';
 import { BriefIntakeLoading } from './brief-intake-loading';
@@ -36,6 +37,9 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
         </div>
         {canEdit && <StateControls brief={brief} />}
       </div>
+      <Link href={`/briefs/${id}/versions`} className="text-sm text-ink-muted hover:text-ink">
+        Version history →
+      </Link>
 
       {brief.intake_status === 'pending'
         ? <BriefIntakeLoading briefId={id} />
