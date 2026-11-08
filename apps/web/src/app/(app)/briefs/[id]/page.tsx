@@ -1,10 +1,13 @@
 import type { Metadata } from 'next';
+import { Suspense } from 'react';
 import { notFound } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgContext, atLeast } from '@/lib/org';
 import { BriefIntakeLoading } from './brief-intake-loading';
 import { BriefEditor } from './brief-editor';
 import { StateControls } from './state-controls';
+import { Exclusions } from './exclusions';
+import { Predicates } from './predicates';
 
 export const metadata: Metadata = { title: 'Brief' };
 
@@ -38,7 +41,12 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
         ? <BriefIntakeLoading briefId={id} />
         : <BriefEditor brief={brief} canEdit={canEdit} workspaceId={ctx.workspace.id} />}
 
-      {/* exclusions and predicates added by Task 7 */}
+      <Suspense fallback={null}>
+        <Exclusions briefId={id} canEdit={canEdit} />
+      </Suspense>
+      <Suspense fallback={null}>
+        <Predicates briefId={id} workspaceId={ctx.workspace.id} canEdit={canEdit} />
+      </Suspense>
     </>
   );
 }
