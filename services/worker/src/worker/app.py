@@ -136,7 +136,7 @@ def build_app(
         evt = event.get("event", "")
         payload = event.get("payload") or {}
         if evt == "brief.intake_requested":
-            await brief_intake.defer_async(
+            await brief_intake.configure(queueing_lock=payload["brief_id"]).defer_async(
                 brief_id=payload["brief_id"],
                 description=payload.get("description", payload.get("name", "")),
                 org_id=payload["org_id"],
