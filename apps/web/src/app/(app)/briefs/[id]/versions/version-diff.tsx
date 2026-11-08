@@ -12,6 +12,9 @@ const FIELDS: { key: string; label: string }[] = [
   { key: 'personas', label: 'Personas' },
   { key: 'predicates', label: 'Predicates' },
   { key: 'seeds', label: 'Seeds' },
+  { key: 'research_template', label: 'Research template' },
+  { key: 'scoring', label: 'Scoring' },
+  { key: 'budget', label: 'Budget' },
 ];
 
 function display(value: unknown): string {
@@ -31,12 +34,12 @@ export function VersionDiff({ versions, vA, vB, briefId }:
       <div className="flex gap-3 items-center">
         <select value={vA?.version ?? ''} onChange={e => setVersions(Number(e.target.value), vB?.version ?? 1)}
           className="rounded border border-line bg-surface px-3 py-2 text-sm">
-          {versions.map(v => <option key={v.id} value={v.version}>v{v.version} — {new Date(v.published_at).toLocaleDateString()}</option>)}
+          {versions.map(v => <option key={v.id} value={v.version}>v{v.version} — {new Date(v.published_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })}</option>)}
         </select>
         <span className="text-ink-muted">vs</span>
         <select value={vB?.version ?? ''} onChange={e => setVersions(vA?.version ?? 1, Number(e.target.value))}
           className="rounded border border-line bg-surface px-3 py-2 text-sm">
-          {versions.map(v => <option key={v.id} value={v.version}>v{v.version} — {new Date(v.published_at).toLocaleDateString()}</option>)}
+          {versions.map(v => <option key={v.id} value={v.version}>v{v.version} — {new Date(v.published_at).toLocaleDateString('en-US', { year: 'numeric', month: 'short', day: 'numeric', timeZone: 'UTC' })}</option>)}
         </select>
       </div>
 

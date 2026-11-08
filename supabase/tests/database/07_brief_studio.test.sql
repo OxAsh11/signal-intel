@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(18);
+select plan(20);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 insert into auth.users (id, email, aud, role) values
@@ -275,6 +275,31 @@ select ok(
        and e.enumlabel = 'brief.intake_requested'
   ),
   '12. event_type enum includes brief.intake_requested'
+);
+
+-- ── 13. publish_brief on Active brief with draft_config creates version 2 ──────
+-- Save a new draft_config to the Active brief_a via save_brief_draft_ui (UI path, should not flip intake_status).
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000aa02","role":"authenticated"}', true);
+select public.save_brief_draft_ui(
+  (select v from ids where k = 'brief_a'),
+  '{"offer":"CAD Software Firms v2","hypothesis":"Firms using SolidWorks that are actively hiring v2",
+    "examples":{"positive":["Dassault Systemes","PTC Inc","Siemens NX"],"negative":["Microsoft","Google"]},
+    "sources":{"radar_types":["job_postings"]}}'::jsonb
+);
+insert into ids select 'vid2', public.publish_brief((select v from ids where k = 'brief_a'));
+reset role;
+
+select is(
+  (select bv.version from public.brief_version bv where bv.id = (select v from ids where k = 'vid2')),
+  2,
+  '13. re-publish on Active brief creates version 2'
+);
+
+select is(
+  (select current_version_id from public.brief where id = (select v from ids where k = 'brief_a')),
+  (select v from ids where k = 'vid2'),
+  '14. current_version_id points to new version after re-publish'
 );
 
 select * from finish();

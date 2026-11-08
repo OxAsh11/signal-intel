@@ -24,6 +24,15 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
   if (error || !brief) notFound();
   const canEdit = atLeast(ctx.workspaceRole, 'Editor');
 
+  const hasDraftChanges = !!brief.draft_config;
+  let seedConfig = brief.draft_config as import('@/lib/briefs').BriefConfig | null;
+  if (!seedConfig && brief.current_version_id) {
+    const { data: ver } = await supabase
+      .from('brief_version').select('config').eq('id', brief.current_version_id).single();
+    if (ver?.config) seedConfig = ver.config as import('@/lib/briefs').BriefConfig;
+  }
+  const briefForEditor = { ...brief, draft_config: seedConfig };
+
   return (
     <>
       <div className="flex items-start justify-between gap-4">
@@ -43,7 +52,7 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
 
       {brief.intake_status === 'pending'
         ? <BriefIntakeLoading briefId={id} />
-        : <BriefEditor brief={brief} canEdit={canEdit} workspaceId={ctx.workspace.id} />}
+        : <BriefEditor brief={briefForEditor} canEdit={canEdit} workspaceId={ctx.workspace.id} hasDraftChanges={hasDraftChanges} />}
 
       <Suspense fallback={null}>
         <Exclusions briefId={id} canEdit={canEdit} />

@@ -20,7 +20,7 @@ const RADAR_TYPES = ['news_publications', 'job_postings', 'public_registries', '
 function lines(arr: string[] | undefined) { return (arr ?? []).join('\n'); }
 function fromLines(s: string) { return s.split('\n').map(x => x.trim()).filter(Boolean); }
 
-export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { brief: Brief; canEdit: boolean; workspaceId: string }) {
+export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId, hasDraftChanges }: { brief: Brief; canEdit: boolean; workspaceId: string; hasDraftChanges: boolean }) {
   const cfg: BriefConfig = brief.draft_config ?? {};
   const [pubState, pubFormAction, pubPending] = useActionState(publishBrief, {});
   const canPublish = brief.state === 'Draft' && canEdit && isPublishable(cfg);
@@ -101,15 +101,15 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
         <ChipField briefId={brief.id} fieldName="icp" label="ICP" disabled={editorDisabled}
           currentConfig={cfg as Record<string, unknown>}
           renderValue={c => {
-            const icp = c.icp as { industry?: string[]; company_size?: string[]; geo?: string[]; signals?: string[] } | undefined;
-            const count = (icp?.industry?.length ?? 0) + (icp?.company_size?.length ?? 0) + (icp?.geo?.length ?? 0);
+            const icp = c.icp as BriefConfig['icp'];
+            const count = (icp?.verticals?.length ?? 0) + (icp?.geographies?.length ?? 0) + (icp?.size_bands?.length ?? 0) + (icp?.commercial_roles?.length ?? 0);
             return <span>{count} attributes</span>;
           }}
           renderEditor={(c, onChange) => {
-            const icp = (c.icp as { industry?: string[]; company_size?: string[]; geo?: string[]; signals?: string[] } | undefined) ?? {};
+            const icp = (c.icp as BriefConfig['icp'] | undefined) ?? {};
             return (
               <div className="flex flex-col gap-2">
-                {(['industry', 'company_size', 'geo', 'signals'] as const).map(field => (
+                {(['verticals', 'geographies', 'size_bands', 'commercial_roles'] as const).map(field => (
                   <label key={field} className="flex flex-col gap-1">
                     <span className="text-xs text-ink-muted capitalize">{field.replace('_', ' ')} (one per line)</span>
                     <textarea rows={2} defaultValue={lines(icp[field])}
@@ -123,15 +123,15 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
         <ChipField briefId={brief.id} fieldName="personas" label="Personas" disabled={editorDisabled}
           currentConfig={cfg as Record<string, unknown>}
           renderValue={c => {
-            const p = c.personas as { title?: string[]; seniority?: string[]; buying_role?: string[] } | undefined;
-            const count = (p?.title?.length ?? 0) + (p?.buying_role?.length ?? 0);
+            const p = c.personas as BriefConfig['personas'];
+            const count = (p?.buyer?.length ?? 0) + (p?.user?.length ?? 0) + (p?.influencer?.length ?? 0);
             return <span>{count} attributes</span>;
           }}
           renderEditor={(c, onChange) => {
-            const p = (c.personas as { title?: string[]; seniority?: string[]; buying_role?: string[] } | undefined) ?? {};
+            const p = (c.personas as BriefConfig['personas'] | undefined) ?? {};
             return (
               <div className="flex flex-col gap-2">
-                {(['title', 'seniority', 'buying_role'] as const).map(field => (
+                {(['buyer', 'user', 'influencer'] as const).map(field => (
                   <label key={field} className="flex flex-col gap-1">
                     <span className="text-xs text-ink-muted capitalize">{field.replace('_', ' ')} (one per line)</span>
                     <textarea rows={2} defaultValue={lines(p[field])}
@@ -152,6 +152,20 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
               Publish Brief
             </Button>
             {!canPublish && (
+              <p className="mt-1 text-xs text-ink-muted">Fill in all required fields before publishing.</p>
+            )}
+            {pubState?.error && <p className="text-xs text-danger mt-1">{pubState.error}</p>}
+          </fieldset>
+        </form>
+      )}
+      {(brief.state === 'Active' || brief.state === 'Paused') && canEdit && hasDraftChanges && (
+        <form action={pubFormAction} className="pt-2">
+          <fieldset disabled={pubPending} className="contents">
+            <input type="hidden" name="brief" value={brief.id} />
+            <Button type="submit" variant="primary" disabled={!isPublishable(cfg)}>
+              Publish new version
+            </Button>
+            {!isPublishable(cfg) && (
               <p className="mt-1 text-xs text-ink-muted">Fill in all required fields before publishing.</p>
             )}
             {pubState?.error && <p className="text-xs text-danger mt-1">{pubState.error}</p>}

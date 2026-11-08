@@ -91,7 +91,7 @@ export async function addExclusion(_: ActionState, form: FormData): Promise<Acti
     p_brief: text(form, 'brief'),
     p_value_type: valType,
     p_entity_id: valType === 'entity' ? (text(form, 'entity_id') || null) : null,
-    p_pattern: text(form, 'pattern') || null,
+    p_pattern: valType !== 'entity' ? (text(form, 'pattern') || null) : null,
     p_reason: text(form, 'reason') || null,
   });
   if (error) return { error };

@@ -1,6 +1,6 @@
 import { createClient } from '@/lib/supabase/server';
-import { removeExclusion } from '@/app/actions/briefs';
 import { ExclusionAddForm } from './exclusion-add-form';
+import { ExclusionRemoveButton } from './exclusion-remove-button';
 
 type Exclusion = {
   id: string;
@@ -9,11 +9,6 @@ type Exclusion = {
   pattern: string | null;
   reason: string | null;
 };
-
-async function doRemove(fd: FormData): Promise<void> {
-  'use server';
-  await removeExclusion({}, fd);
-}
 
 export async function Exclusions({ briefId, canEdit }: { briefId: string; canEdit: boolean }) {
   const supabase = await createClient();
@@ -43,12 +38,7 @@ export async function Exclusions({ briefId, canEdit }: { briefId: string; canEdi
                 {exc.pattern ?? exc.entity_id}
                 {exc.reason && <span className="ml-2 text-ink-muted">— {exc.reason}</span>}
               </span>
-              {canEdit && (
-                <form action={doRemove}>
-                  <input type="hidden" name="id" value={exc.id} />
-                  <button type="submit" className="text-xs text-danger hover:underline">Remove</button>
-                </form>
-              )}
+              {canEdit && <ExclusionRemoveButton exclusionId={exc.id} />}
             </li>
           ))}
         </ul>

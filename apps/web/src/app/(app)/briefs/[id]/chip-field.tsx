@@ -25,6 +25,10 @@ export function ChipField({ briefId, fieldName, label, required, disabled, isEmp
     if (!open) setDraft(currentConfig);
   }, [currentConfig, open]);
 
+  useEffect(() => {
+    if ((state as { ok?: boolean }).ok) setOpen(false);
+  }, [state]);
+
   const isEmpty = isEmptyFn
     ? isEmptyFn(currentConfig)
     : !currentConfig[fieldName] ||
@@ -46,7 +50,7 @@ export function ChipField({ briefId, fieldName, label, required, disabled, isEmp
         <form action={formAction} className="border-t border-line p-4 flex flex-col gap-3">
           <fieldset disabled={isPending} className="contents">
             <input type="hidden" name="brief" value={briefId} />
-            <input type="hidden" name="config" value={JSON.stringify(draft)} />
+            <input type="hidden" name="config" value={JSON.stringify({ ...currentConfig, [fieldName]: (draft as Record<string, unknown>)[fieldName] })} />
             {renderEditor(draft, patch => setDraft(d => ({ ...d, ...patch })))}
             <div className="flex gap-2">
               <Button type="submit" variant="primary" size="sm">Save</Button>
