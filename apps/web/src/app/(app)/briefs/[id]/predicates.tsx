@@ -1,10 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
-import { createWorkspacePredicate } from '@/app/actions/briefs';
-
-async function doCreate(fd: FormData): Promise<void> {
-  'use server';
-  await createWorkspacePredicate({}, fd);
-}
+import { PredicateAddForm } from './predicate-add-form';
 
 type Predicate = {
   id: string;
@@ -16,7 +11,6 @@ type Predicate = {
 };
 
 export async function Predicates({
-  briefId: _briefId,
   workspaceId,
   canEdit,
 }: {
@@ -44,10 +38,8 @@ export async function Predicates({
       ) : (
         <ul className="flex flex-col gap-2">
           {rows.map(pred => (
-            <li
-              key={pred.id}
-              className="flex items-center gap-3 rounded border border-line px-3 py-2 text-sm"
-            >
+            <li key={pred.id}
+              className="flex items-center gap-3 rounded border border-line px-3 py-2 text-sm">
               <span className="font-mono text-xs">{pred.key}</span>
               <span className="font-medium">{pred.label}</span>
               <span className="text-xs text-ink-muted">{pred.value_type}</span>
@@ -64,67 +56,7 @@ export async function Predicates({
         </ul>
       )}
 
-      {canEdit && (
-        <form action={doCreate} className="flex flex-col gap-2">
-          <input type="hidden" name="workspace" value={workspaceId} />
-          <div className="flex flex-wrap items-end gap-2">
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">Key</span>
-              <input
-                name="key"
-                required
-                placeholder="e.g. employees"
-                className="rounded border border-line bg-surface px-2 py-1 font-mono text-sm"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">Label</span>
-              <input
-                name="label"
-                required
-                placeholder="e.g. Employee count"
-                className="rounded border border-line bg-surface px-2 py-1 text-sm"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">Type</span>
-              <select
-                name="value_type"
-                required
-                className="rounded border border-line bg-surface px-2 py-1 text-sm"
-              >
-                <option value="text">text</option>
-                <option value="number">number</option>
-                <option value="boolean">boolean</option>
-                <option value="enum">enum</option>
-                <option value="date">date</option>
-              </select>
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">Allowed values (enum, JSON)</span>
-              <input
-                name="allowed_values"
-                placeholder='["a","b"]'
-                className="rounded border border-line bg-surface px-2 py-1 font-mono text-sm"
-              />
-            </label>
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">Extraction hint</span>
-              <input
-                name="extraction_hint"
-                placeholder="How to detect this…"
-                className="rounded border border-line bg-surface px-2 py-1 text-sm"
-              />
-            </label>
-            <button
-              type="submit"
-              className="rounded bg-accent px-3 py-1 text-sm font-medium text-white hover:bg-accent/90"
-            >
-              Add column
-            </button>
-          </div>
-        </form>
-      )}
+      {canEdit && <PredicateAddForm workspaceId={workspaceId} />}
     </section>
   );
 }
