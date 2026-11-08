@@ -17,15 +17,19 @@ function isPublishable(cfg: BriefConfig | null): boolean {
 
 const RADAR_TYPES = ['news_publications', 'job_postings', 'public_registries', 'tenders_procurement', 'events', 'directories', 'company_websites'];
 
+function lines(arr: string[] | undefined) { return (arr ?? []).join('\n'); }
+function fromLines(s: string) { return s.split('\n').map(x => x.trim()).filter(Boolean); }
+
 export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { brief: Brief; canEdit: boolean; workspaceId: string }) {
   const cfg: BriefConfig = brief.draft_config ?? {};
   const [pubState, pubFormAction, pubPending] = useActionState(publishBrief, {});
   const canPublish = brief.state === 'Draft' && canEdit && isPublishable(cfg);
+  const editorDisabled = !canEdit;
 
   return (
     <div className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
-        <ChipField briefId={brief.id} fieldName="offer" label="Offer" required
+        <ChipField briefId={brief.id} fieldName="offer" label="Offer" required disabled={editorDisabled}
           currentConfig={cfg as Record<string, unknown>}
           renderValue={c => <span className="line-clamp-1">{String(c.offer ?? '')}</span>}
           renderEditor={(c, onChange) => (
@@ -36,7 +40,7 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
                 className="rounded border border-line bg-surface-raised px-3 py-2 text-sm" />
             </label>
           )} />
-        <ChipField briefId={brief.id} fieldName="hypothesis" label="Hypothesis" required
+        <ChipField briefId={brief.id} fieldName="hypothesis" label="Hypothesis" required disabled={editorDisabled}
           currentConfig={cfg as Record<string, unknown>}
           renderValue={c => <span className="line-clamp-1">{String(c.hypothesis ?? '')}</span>}
           renderEditor={(c, onChange) => (
@@ -47,8 +51,7 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
                 className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y" />
             </label>
           )} />
-        {/* Examples chip: renders two text-areas, one for positive (comma-separated) and one for negative */}
-        <ChipField briefId={brief.id} fieldName="examples" label="Examples" required
+        <ChipField briefId={brief.id} fieldName="examples" label="Examples" required disabled={editorDisabled}
           currentConfig={cfg as Record<string, unknown>}
           renderValue={c => {
             const ex = c.examples as { positive?: string[]; negative?: string[] } | undefined;
@@ -60,21 +63,21 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
               <div className="flex flex-col gap-2">
                 <label className="flex flex-col gap-1">
                   <span className="text-xs text-ink-muted">Positive examples (≥ 3, one per line)</span>
-                  <textarea rows={4} defaultValue={(ex.positive ?? []).join('\n')}
-                    onChange={e => onChange({ ...c, examples: { ...ex, positive: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) } })}
+                  <textarea rows={4} defaultValue={lines(ex.positive)}
+                    onChange={e => onChange({ ...c, examples: { ...ex, positive: fromLines(e.target.value) } })}
                     className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
                 </label>
                 <label className="flex flex-col gap-1">
                   <span className="text-xs text-ink-muted">Negative examples (≥ 2, one per line)</span>
-                  <textarea rows={3} defaultValue={(ex.negative ?? []).join('\n')}
-                    onChange={e => onChange({ ...c, examples: { ...ex, negative: e.target.value.split('\n').map(s => s.trim()).filter(Boolean) } })}
+                  <textarea rows={3} defaultValue={lines(ex.negative)}
+                    onChange={e => onChange({ ...c, examples: { ...ex, negative: fromLines(e.target.value) } })}
                     className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
                 </label>
               </div>
             );
           }} />
-        {/* Sources chip */}
-        <ChipField briefId={brief.id} fieldName="sources" label="Sources" required
+        <ChipField briefId={brief.id} fieldName="sources" label="Sources" required disabled={editorDisabled}
+          isEmpty={c => ((c.sources as { radar_types?: string[] } | undefined)?.radar_types?.length ?? 0) === 0}
           currentConfig={cfg as Record<string, unknown>}
           renderValue={c => <span>{((c.sources as { radar_types?: string[] } | undefined)?.radar_types ?? []).join(', ') || 'None'}</span>}
           renderEditor={(c, onChange) => {
@@ -93,6 +96,50 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { bri
                   </label>
                 ))}
               </fieldset>
+            );
+          }} />
+        <ChipField briefId={brief.id} fieldName="icp" label="ICP" disabled={editorDisabled}
+          currentConfig={cfg as Record<string, unknown>}
+          renderValue={c => {
+            const icp = c.icp as { industry?: string[]; company_size?: string[]; geo?: string[]; signals?: string[] } | undefined;
+            const count = (icp?.industry?.length ?? 0) + (icp?.company_size?.length ?? 0) + (icp?.geo?.length ?? 0);
+            return <span>{count} attributes</span>;
+          }}
+          renderEditor={(c, onChange) => {
+            const icp = (c.icp as { industry?: string[]; company_size?: string[]; geo?: string[]; signals?: string[] } | undefined) ?? {};
+            return (
+              <div className="flex flex-col gap-2">
+                {(['industry', 'company_size', 'geo', 'signals'] as const).map(field => (
+                  <label key={field} className="flex flex-col gap-1">
+                    <span className="text-xs text-ink-muted capitalize">{field.replace('_', ' ')} (one per line)</span>
+                    <textarea rows={2} defaultValue={lines(icp[field])}
+                      onChange={e => onChange({ ...c, icp: { ...icp, [field]: fromLines(e.target.value) } })}
+                      className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
+                  </label>
+                ))}
+              </div>
+            );
+          }} />
+        <ChipField briefId={brief.id} fieldName="personas" label="Personas" disabled={editorDisabled}
+          currentConfig={cfg as Record<string, unknown>}
+          renderValue={c => {
+            const p = c.personas as { title?: string[]; seniority?: string[]; buying_role?: string[] } | undefined;
+            const count = (p?.title?.length ?? 0) + (p?.buying_role?.length ?? 0);
+            return <span>{count} attributes</span>;
+          }}
+          renderEditor={(c, onChange) => {
+            const p = (c.personas as { title?: string[]; seniority?: string[]; buying_role?: string[] } | undefined) ?? {};
+            return (
+              <div className="flex flex-col gap-2">
+                {(['title', 'seniority', 'buying_role'] as const).map(field => (
+                  <label key={field} className="flex flex-col gap-1">
+                    <span className="text-xs text-ink-muted capitalize">{field.replace('_', ' ')} (one per line)</span>
+                    <textarea rows={2} defaultValue={lines(p[field])}
+                      onChange={e => onChange({ ...c, personas: { ...p, [field]: fromLines(e.target.value) } })}
+                      className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
+                  </label>
+                ))}
+              </div>
             );
           }} />
       </div>
