@@ -27,13 +27,15 @@ export async function BriefList() {
     </p>
   );
 
-  // Group by state: Draft, Active, Paused, Archived
-  const groups = ['Draft', 'Active', 'Paused', 'Archived'] as const;
-  const byState = Object.fromEntries(groups.map(s => [s, data.filter(b => b.state === s)]));
+  // Group by state; include Pilot for forward-compat and an Other bucket for unexpected values
+  const groups = ['Draft', 'Active', 'Pilot', 'Paused', 'Archived'] as const;
+  const knownStates = new Set<string>(groups);
+  const byState: Record<string, BriefRow[]> = Object.fromEntries(groups.map(s => [s, data.filter(b => b.state === s)]));
+  byState['Other'] = data.filter(b => !knownStates.has(b.state));
 
   return (
     <div className="flex flex-col gap-6">
-      {groups.filter(s => byState[s].length > 0).map(state => (
+      {([...groups, 'Other'] as const).filter(s => (byState[s]?.length ?? 0) > 0).map(state => (
         <section key={state}>
           <h2 className="mb-2 text-sm font-medium text-ink-muted uppercase tracking-wide">{state}</h2>
           <ul className="flex flex-col gap-2">
@@ -43,7 +45,8 @@ export async function BriefList() {
                   className="flex items-center justify-between rounded-md border border-line bg-surface px-4 py-3 hover:bg-surface-raised transition-colors">
                   <span className="font-medium">{b.name}</span>
                   <span className="text-xs text-ink-muted tabular-nums">
-                    {b.intake_status === 'pending' ? '⏳ drafting…' :
+                    {b.intake_status === 'pending' ? 'drafting…' :
+                     b.intake_status === 'failed' ? 'intake failed' :
                      b.version_count ? `v${b.current_version}` : 'draft'}
                   </span>
                 </Link>

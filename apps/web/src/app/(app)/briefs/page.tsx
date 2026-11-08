@@ -1,7 +1,6 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import Link from 'next/link';
-import { Button } from '@signal/ui';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { BriefList } from './brief-list';
 
@@ -20,8 +19,9 @@ export default async function BriefStudioPage() {
           </p>
         </div>
         {canEdit && (
-          <Link href="/briefs/new">
-            <Button variant="primary">New Brief</Button>
+          <Link href="/briefs/new"
+            className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 transition-colors">
+            New Brief
           </Link>
         )}
       </div>
