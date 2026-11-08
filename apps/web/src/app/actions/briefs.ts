@@ -64,12 +64,20 @@ export async function updateBriefState(_: ActionState, form: FormData): Promise<
 
 export async function createWorkspacePredicate(_: ActionState, form: FormData): Promise<ActionState> {
   const allowedRaw = text(form, 'allowed_values');
+  let allowedValues: unknown = null;
+  if (allowedRaw) {
+    try {
+      allowedValues = JSON.parse(allowedRaw);
+    } catch {
+      return { error: 'Invalid allowed_values JSON.' };
+    }
+  }
   const { error } = await rpc('create_workspace_predicate', {
     p_ws: text(form, 'workspace'),
     p_key: text(form, 'key'),
     p_label: text(form, 'label'),
     p_value_type: text(form, 'value_type'),
-    p_allowed_values: allowedRaw ? (JSON.parse(allowedRaw) as unknown) : null,
+    p_allowed_values: allowedValues,
     p_extraction_hint: text(form, 'extraction_hint') || null,
   });
   if (error) return { error };
@@ -78,10 +86,11 @@ export async function createWorkspacePredicate(_: ActionState, form: FormData): 
 }
 
 export async function addExclusion(_: ActionState, form: FormData): Promise<ActionState> {
+  const valType = text(form, 'value_type');
   const { error } = await rpc('add_exclusion', {
     p_brief: text(form, 'brief'),
-    p_value_type: text(form, 'value_type'),
-    p_entity_id: text(form, 'entity_id') || null,
+    p_value_type: valType,
+    p_entity_id: valType === 'entity' ? (text(form, 'entity_id') || null) : null,
     p_pattern: text(form, 'pattern') || null,
     p_reason: text(form, 'reason') || null,
   });
