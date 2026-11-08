@@ -3,15 +3,19 @@
 import contextlib
 from collections.abc import Callable
 from typing import Any, Literal
+from uuid import UUID
 
 import procrastinate
 from procrastinate.exceptions import AlreadyEnqueued
+from psycopg_pool import AsyncConnectionPool
 
+from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.events import DISPATCH_TASK
 from signal_core.health import HealthStore
 from signal_core.jobs import KillSwitch, job
 from signal_core.logging import get_logger
 from signal_core.metering import ApprovalStore
+from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
 from worker.health import HealthState
 
 log = get_logger(__name__)
@@ -30,6 +34,8 @@ def build_app(
     *,
     ai_configured: Callable[[], dict[str, bool]],
     approvals: ApprovalStore,
+    gateway: AiGateway,
+    pool: AsyncConnectionPool,
 ) -> procrastinate.App:
     app = procrastinate.App(connector=connector)
 
@@ -110,10 +116,32 @@ def build_app(
         log.info("budget.release_stale", **counts)
         return counts
 
+    @job(app, type="brief.intake", kill_switch=kill_switch, queue="briefs", retry=1)
+    async def brief_intake(
+        brief_id: str, description: str, org_id: str, workspace_id: str, **_: Any
+    ) -> None:
+        inp = BriefIntakeInput(
+            brief_id=UUID(brief_id),
+            description=description,
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
+        )
+        await run_brief_intake(inp, gateway, pool)
+        log.info("brief.intake.done", brief_id=brief_id)
+
     @job(app, type=DISPATCH_TASK, kill_switch=kill_switch, queue="events")
     async def dispatch(**event: Any) -> None:
         # Consumers (derivation S5, webhooks M13, notifications, indexer S9, health M17)
         # register here as their modules land. Each must be idempotent by event_id.
-        log.info("outbox.dispatched", event_id=event.get("event_id"), event_type=event.get("event"))
+        evt = event.get("event", "")
+        payload = event.get("payload") or {}
+        if evt == "brief.intake_requested":
+            await brief_intake.defer_async(
+                brief_id=payload["brief_id"],
+                description=payload.get("description", payload.get("name", "")),
+                org_id=payload["org_id"],
+                workspace_id=payload["workspace_id"],
+            )
+        log.info("outbox.dispatched", event_id=event.get("event_id"), event_type=evt)
 
     return app
