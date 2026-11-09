@@ -24,19 +24,21 @@ async def create_source_records(
     new_count = 0
     async with pool.connection() as conn:
         for payload in payloads:
-            row = await conn.fetchrow(
-                "select app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s)",
-                (
-                    str(org_id),
-                    str(workspace_id),
-                    connector_id,
-                    payload.url,
-                    payload.fetched_at,
-                    payload.content_hash,
-                    payload.payload_ref,
-                    payload.language,
-                ),
-            )
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "select app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s)",
+                    (
+                        str(org_id),
+                        str(workspace_id),
+                        connector_id,
+                        payload.url,
+                        payload.fetched_at,
+                        payload.content_hash,
+                        payload.payload_ref,
+                        payload.language,
+                    ),
+                )
+                row = await cur.fetchone()
             if row is not None and row[0] is not None:
                 new_count += 1
     return new_count

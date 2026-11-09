@@ -113,3 +113,5 @@ def test_content_hash_stable():
 
     assert content_hash(b"hello") == content_hash(b"hello")
     assert content_hash(b"hello") != content_hash(b"world")
+    # Pin the exact SHA-256 so algorithm regressions are caught.
+    assert content_hash(b"hello") == "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
