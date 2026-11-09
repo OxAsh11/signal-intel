@@ -14,6 +14,7 @@ swap this for real object-storage retrieval once payload_ref is fully wired).
 from __future__ import annotations
 
 import json
+from typing import Any
 from uuid import UUID
 
 from pydantic import BaseModel
@@ -26,6 +27,10 @@ from signal_core.logging import get_logger
 from signal_core.metering import CallContext
 
 log = get_logger(__name__)
+
+# Deferrable handle wired by worker/app.py (like m04_identity.identity_resolve_job).
+# None until the worker app calls: m03_extraction.extract_relevance_judge_job = <task>
+extract_relevance_judge_job: Any = None
 
 RELEVANCE_PROMPT_NAME = "relevance_judge"
 RELEVANCE_PROMPT_VERSION = 1
@@ -299,3 +304,37 @@ async def extract_structured(
         claims=len(extraction.claims),
     )
     return extraction
+
+
+async def extract_backfill(
+    pool: AsyncConnectionPool,
+    brief_id: UUID,
+    workspace_id: UUID,
+) -> int:
+    """Re-queue all pending source_records for relevance judging (up to 500).
+
+    Called when a brief version is published so that any source_records already
+    ingested but not yet processed are picked up under the new brief context.
+
+    Returns the number of records queued.
+    """
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT id FROM public.source_record"
+                " WHERE workspace_id = %s AND extraction_status = 'pending'"
+                " LIMIT 500",
+                (str(workspace_id),),
+            )
+            rows = await cur.fetchall()
+
+    for (sr_id,) in rows:
+        await extract_relevance_judge_job.defer_async(source_record_id=str(sr_id))
+
+    log.info(
+        "extraction.backfill",
+        brief_id=str(brief_id),
+        workspace_id=str(workspace_id),
+        queued=len(rows),
+    )
+    return len(rows)

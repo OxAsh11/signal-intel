@@ -29,6 +29,7 @@ from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
 from signal_core.modules.m02_radar import create_source_records, upsert_radar_queries
 from signal_core.modules.m02_radar_ai import generate_radar_queries
 from signal_core.modules.m03_extraction import extract_structured, judge_relevance
+import signal_core.modules.m03_extraction as _m03_extraction
 from signal_core.modules.m04_identity import duplicate_sweep, resolve_mention
 import signal_core.modules.m04_identity as _m04_identity
 from worker.health import HealthState
@@ -438,6 +439,17 @@ def build_app(
         )
         await extract_structured(pool, gateway, _UUID(source_record_id), ctx)
 
+    @job(app, type="extract.backfill", kill_switch=kill_switch, queue="extract", retry=1)
+    async def extract_backfill_job(*, brief_id: str, workspace_id: str, **_: Any) -> None:
+        """Re-queue pending source_records for extraction when a brief version is published."""
+        assert pool is not None, "pool required for extract.backfill"
+        from signal_core.modules.m03_extraction import extract_backfill
+
+        await extract_backfill(pool, UUID(brief_id), UUID(workspace_id))
+
+    # Wire the deferrable handle so extract_backfill can call defer_async via the module attr.
+    _m03_extraction.extract_relevance_judge_job = extract_relevance_judge_job
+
     # ------------------------------------------------------------------
     # Identity resolution jobs (Phase 1d)
     # ------------------------------------------------------------------
@@ -541,6 +553,16 @@ def build_app(
                             radar_id=str(r[0]),
                             org_id=str(r[1]),
                             workspace_id=str(r[2]),
+                        )
+                # Re-queue any pending source_records so they are processed under the new version.
+                workspace_id = payload.get("workspace_id")
+                if workspace_id:
+                    with contextlib.suppress(AlreadyEnqueued):
+                        await app.tasks["extract.backfill"].configure(
+                            queueing_lock=f"backfill:{brief_id}"
+                        ).defer_async(
+                            brief_id=brief_id,
+                            workspace_id=workspace_id,
                         )
         log.info("outbox.dispatched", event_id=event.get("event_id"), event_type=evt)
 

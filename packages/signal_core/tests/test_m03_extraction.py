@@ -15,8 +15,10 @@ from signal_core.ai_gateway.providers.fake import FakeProvider
 from signal_core.config import Settings
 from signal_core.contracts.enums import UsageUnit
 from signal_core.metering import CallContext, MemoryBudgetGuard, MemoryPriceBook
+import signal_core.modules.m03_extraction as _m03_extraction
 from signal_core.modules.m03_extraction import (
     ExtractionResult,
+    extract_backfill,
     judge_relevance,
     extract_structured,
 )
@@ -359,3 +361,94 @@ async def test_extract_structured_skips_oob_mention_index() -> None:
     assert len(result.mentions) == 1
     claim_calls = [sql for sql, _ in pool.conn.calls if "create_claim" in sql]
     assert claim_calls == []
+
+
+# ---------------------------------------------------------------------------
+# Tests: extract_backfill
+# ---------------------------------------------------------------------------
+
+
+class _FakeBackfillCursor:
+    """Cursor for backfill pool — returns pending source_record ids."""
+
+    def __init__(self, ids: list[tuple]) -> None:
+        self._ids = ids
+        self._rows: list[tuple] = []
+
+    async def execute(self, sql: str, args: Any = None) -> None:
+        if "source_record" in sql.lower():
+            self._rows = self._ids
+
+    async def fetchall(self) -> list[tuple]:
+        return self._rows
+
+    async def __aenter__(self) -> "_FakeBackfillCursor":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        pass
+
+
+class _FakeBackfillConn:
+    def __init__(self, ids: list[tuple]) -> None:
+        self._ids = ids
+
+    def cursor(self) -> _FakeBackfillCursor:
+        return _FakeBackfillCursor(self._ids)
+
+    async def __aenter__(self) -> "_FakeBackfillConn":
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        pass
+
+
+class _FakeBackfillConnCtx:
+    def __init__(self, ids: list[tuple]) -> None:
+        self._ids = ids
+
+    async def __aenter__(self) -> _FakeBackfillConn:
+        return _FakeBackfillConn(self._ids)
+
+    async def __aexit__(self, *_: Any) -> None:
+        pass
+
+
+class FakeBackfillPool:
+    """Pool that returns N pending source_record ids for the backfill query."""
+
+    def __init__(self, pending_ids: list[UUID]) -> None:
+        self._rows = [(str(id_),) for id_ in pending_ids]
+
+    def connection(self) -> _FakeBackfillConnCtx:
+        return _FakeBackfillConnCtx(self._rows)
+
+
+class _FakeJob:
+    """Fake procrastinate task handle that records defer_async calls."""
+
+    def __init__(self) -> None:
+        self.deferred: list[dict] = []
+
+    async def defer_async(self, **kwargs: Any) -> None:
+        self.deferred.append(kwargs)
+
+
+async def test_extract_backfill_queues_pending_records() -> None:
+    """extract_backfill returns count=N and defers one job per pending record."""
+    pending_ids = [uuid4(), uuid4(), uuid4()]
+    pool = FakeBackfillPool(pending_ids)
+    fake_job = _FakeJob()
+
+    # Patch the module-level handle so defer_async works without a real Procrastinate app.
+    original = _m03_extraction.extract_relevance_judge_job
+    _m03_extraction.extract_relevance_judge_job = fake_job
+    try:
+        count = await extract_backfill(pool, uuid4(), WORKSPACE_ID)
+    finally:
+        _m03_extraction.extract_relevance_judge_job = original
+
+    assert count == 3
+    assert len(fake_job.deferred) == 3
+    deferred_ids = {call["source_record_id"] for call in fake_job.deferred}
+    assert deferred_ids == {str(id_) for id_ in pending_ids}
