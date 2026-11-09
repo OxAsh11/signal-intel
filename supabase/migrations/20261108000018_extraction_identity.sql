@@ -239,9 +239,19 @@ begin
   select org_id into v_org from public.entity where id = p_winner;
   select org_id into v_loser_org from public.entity where id = p_loser;
 
-  -- Reject cross-org merges.
-  if v_org <> v_loser_org then
-    raise exception 'entities from different orgs cannot be merged' using errcode = '23503';
+  -- Self-merge guard.
+  if p_winner = p_loser then
+    raise exception 'cannot merge entity with itself' using errcode = '22023';
+  end if;
+
+  -- Reject cross-org merges (IS DISTINCT FROM handles NULL safely).
+  if v_org is distinct from v_loser_org then
+    raise exception 'entities from different orgs cannot be merged' using errcode = '22023';
+  end if;
+
+  -- Winner must not already be merged.
+  if (select status from public.entity where id = p_winner) = 'merged' then
+    raise exception 'winner entity is already merged' using errcode = '22023';
   end if;
 
   -- Re-point all mentions of the loser to the winner.
@@ -370,14 +380,29 @@ begin
   v_ws := r.workspace_id;
 
   if p_action = 'merge' then
-    perform app.resolve_mention(r.mention_id, r.candidate_entity, r.match_method, r.match_confidence);
-    perform app.create_account(v_org, v_ws, r.candidate_entity);
+    declare v_provisional uuid;
+    begin
+      -- Capture provisional entity before re-pointing.
+      select entity_id into v_provisional from public.mention where id = r.mention_id;
+      perform app.resolve_mention(r.mention_id, r.candidate_entity, r.match_method, r.match_confidence);
+      perform app.create_account(v_org, v_ws, r.candidate_entity);
+      -- Merge provisional into winner so claims transfer.
+      if v_provisional is not null and v_provisional is distinct from r.candidate_entity then
+        perform app.merge_entities(r.candidate_entity, v_provisional, app.current_member_id(v_org));
+      end if;
+    end;
   elsif p_action = 'create_new' then
     declare
       v_mention_entity_type public.entity_type;
     begin
       select entity_type into v_mention_entity_type from public.mention where id = r.mention_id;
-      v_entity := app.create_entity(v_org, v_mention_entity_type, coalesce(p_new_entity_name, ''), 'tenant');
+      -- Reuse provisional entity M3 already created; fall back to new entity if none.
+      select entity_id into v_entity from public.mention where id = r.mention_id;
+      if v_entity is null then
+        v_entity := app.create_entity(v_org, v_mention_entity_type, coalesce(p_new_entity_name, ''), 'tenant');
+      elsif p_new_entity_name is not null and p_new_entity_name <> '' then
+        update public.entity set display_name = p_new_entity_name, updated_at = now() where id = v_entity;
+      end if;
     end;
     perform app.resolve_mention(r.mention_id, v_entity, 'manual_create', 100);
     perform app.create_account(v_org, v_ws, v_entity);

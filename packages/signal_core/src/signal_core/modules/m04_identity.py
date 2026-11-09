@@ -59,7 +59,7 @@ async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT id, org_id, source_record_id, entity_type,"
-                " raw_name, raw_domain, raw_country, raw_attributes, entity_id"
+                " raw_name, raw_domain, raw_country, raw_attributes, entity_id, match_method"
                 " FROM public.mention WHERE id = %s",
                 (str(mention_id),),
             )
@@ -76,6 +76,7 @@ async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict:
         "raw_country": row[6],
         "raw_attributes": row[7] or {},
         "entity_id": str(row[8]) if row[8] is not None else None,
+        "match_method": row[9],
     }
 
 
@@ -171,7 +172,7 @@ async def _ai_tiebreak(
                 " array_agg(ea.alias_type || ':' || ea.value_normalised) FILTER (WHERE ea.id IS NOT NULL) as aliases"
                 " FROM public.entity e"
                 " LEFT JOIN public.entity_alias ea ON ea.entity_id = e.id"
-                " WHERE e.id = ANY(%s)"
+                " WHERE e.id = ANY(%s::uuid[])"
                 " GROUP BY e.id, e.display_name",
                 (candidate_ids,),
             )
@@ -279,6 +280,8 @@ async def resolve_mention(
         alias_type = by_entity[entity_id][0]
 
     if confidence >= 90:
+        # Capture provisional before re-pointing (mention.entity_id = provisional from M3).
+        provisional_id = mention.get("entity_id")
         async with pool.connection() as conn:
             await conn.execute(
                 "SELECT app.resolve_mention(%s, %s, %s, %s::smallint)",
@@ -288,28 +291,36 @@ async def resolve_mention(
                 "SELECT app.create_account(%s, %s, %s)",
                 (str(org_id), str(workspace_id), entity_id),
             )
-        log.info(
-            "identity.attached",
-            mention_id=str(mention_id),
-            entity_id=entity_id,
-            alias_type=alias_type,
-            confidence=confidence,
-        )
+            # Merge provisional entity into winner so claims transfer.
+            if provisional_id and str(provisional_id) != entity_id:
+                await conn.execute(
+                    "SELECT app.merge_entities(%s, %s, NULL)",
+                    (entity_id, str(provisional_id)),
+                )
+        log.info("identity.attached", mention_id=str(mention_id), entity_id=entity_id, alias_type=alias_type, confidence=confidence)
         return "attached"
 
     if confidence >= 40:
         async with pool.connection() as conn:
-            await conn.execute(
-                "SELECT app.create_review_item(%s, %s, %s, %s, %s, %s::smallint)",
-                (
-                    str(org_id),
-                    str(workspace_id),
-                    str(mention_id),
-                    entity_id,
-                    alias_type,
-                    confidence,
-                ),
-            )
+            async with conn.cursor() as cur:
+                # Check for existing pending review item (idempotency).
+                await cur.execute(
+                    "SELECT id FROM public.review_item WHERE mention_id = %s AND status = 'pending' LIMIT 1",
+                    (str(mention_id),),
+                )
+                existing = await cur.fetchone()
+            if existing is None:
+                await conn.execute(
+                    "SELECT app.create_review_item(%s, %s, %s, %s, %s, %s::smallint)",
+                    (
+                        str(org_id),
+                        str(workspace_id),
+                        str(mention_id),
+                        entity_id,
+                        alias_type,
+                        confidence,
+                    ),
+                )
         log.info(
             "identity.queued",
             mention_id=str(mention_id),
@@ -338,8 +349,11 @@ async def _create_new(
     display_name = mention.get("raw_name") or "unknown"
 
     # Reuse the provisional entity M3 already created for this mention (avoids double-entity).
+    # Only reuse when match_method is 'provisional' — other methods (e.g. 'manual_create') mean
+    # the entity_id is already a confirmed entity, not a provisional placeholder.
     provisional_entity_id = mention.get("entity_id")
-    if provisional_entity_id:
+    provisional_match = mention.get("match_method")
+    if provisional_entity_id and provisional_match == "provisional":
         entity_id = provisional_entity_id
         log.debug("identity.reuse_provisional", mention_id=str(mention_id), entity_id=entity_id)
     else:
@@ -408,7 +422,7 @@ async def duplicate_sweep(
                 "SELECT m.id, sr.workspace_id"
                 " FROM public.mention m"
                 " JOIN public.source_record sr ON sr.id = m.source_record_id"
-                " WHERE m.org_id = %s AND m.entity_id IS NULL"
+                " WHERE m.org_id = %s AND (m.entity_id IS NULL OR m.match_method = 'provisional')"
                 " AND EXISTS (SELECT 1 FROM public.workspace WHERE id = sr.workspace_id)"
                 " AND NOT EXISTS (SELECT 1 FROM public.review_item WHERE mention_id = m.id AND status = 'pending')"
                 " ORDER BY m.id",

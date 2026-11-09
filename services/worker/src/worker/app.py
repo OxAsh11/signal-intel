@@ -494,7 +494,7 @@ def build_app(
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT DISTINCT org_id FROM public.mention WHERE entity_id IS NULL"
+                    "SELECT DISTINCT org_id FROM public.mention WHERE entity_id IS NULL OR match_method = 'provisional'"
                 )
                 org_rows = await cur.fetchall()
 
