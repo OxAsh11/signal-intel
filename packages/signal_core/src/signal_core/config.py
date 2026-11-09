@@ -27,6 +27,11 @@ class Settings(BaseSettings):
 
     sentry_dsn: SecretStr | None = None
 
+    # Supabase project URL (same as NEXT_PUBLIC_SUPABASE_URL) and service key —
+    # used by the worker to download uploaded files from Supabase Storage.
+    supabase_url: str | None = None
+    supabase_service_role_key: SecretStr | None = None
+
     outbox_poll_seconds: float = Field(default=5.0, gt=0)
     outbox_batch_size: int = Field(default=100, gt=0, le=1000)
 

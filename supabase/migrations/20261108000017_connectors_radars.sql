@@ -51,7 +51,7 @@ insert into public.job_type_config (job_type, enabled) values
   ('source.fetch_csv',       true),
   ('source.fetch_website',   true),
   ('source.fetch_news',      true),
-  ('source.fetch_jobs',      true),
+  ('source.fetch_job_post',  true),
   ('radar.generate_queries', true),
   ('radar.health_check',     true);
 
@@ -180,6 +180,17 @@ begin
     jsonb_build_object('radar_id', p_radar, 'name', v_name), 'M17');
 end $$;
 
+-- Revoke the built-in PUBLIC execute grant before re-granting to specific roles.
+revoke execute on function
+  app.create_radar(uuid, uuid, text, text, jsonb),
+  app.remove_radar(uuid),
+  app.update_radar_cursor(uuid, jsonb, int, int),
+  app.upsert_radar_queries(uuid, jsonb),
+  app.create_source_record(uuid, uuid, text, text, text, timestamptz, text, text, text),
+  app.mark_radar_error(uuid, text),
+  app.mark_radar_silent(uuid)
+from public, anon, authenticated;
+
 -- Grant to service_role (the Python worker), not to authenticated.
 grant execute on function
   app.create_radar(uuid, uuid, text, text, jsonb),
@@ -200,5 +211,10 @@ create function public.remove_radar(p_radar uuid)
   returns void language sql security definer set search_path = '' as $$
   select app.remove_radar(p_radar)
 $$;
+revoke execute on function
+  public.create_radar(uuid, uuid, text, text, jsonb),
+  public.remove_radar(uuid)
+from public, anon;
+
 grant execute on function public.create_radar(uuid, uuid, text, text, jsonb),
                           public.remove_radar(uuid) to authenticated;

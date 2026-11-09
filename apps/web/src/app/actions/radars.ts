@@ -73,50 +73,43 @@ export async function removeRadar(_: ActionState, form: FormData): Promise<Actio
 /**
  * Upload a CSV file to Supabase Storage and create a csv_upload radar for it.
  * Expects FormData with: `brief`, `workspace`, `name`, `file` (File).
- * Uploads to `uploads/{workspace}/{radarId}/{filename}` after creating the radar.
+ * Uploads to `uploads/{workspace}/{timestamp}_{filename}` before creating the radar,
+ * then passes storage_path in the radar config so the worker can find the file immediately.
  */
 export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<ActionState> {
   const brief = text(form, 'brief');
   const workspace = text(form, 'workspace');
   const name = text(form, 'name');
-  const file = form.get('file') as File | null;
+  const file = form.get('file');
 
   if (!brief) return { error: 'Missing brief ID.' };
   if (!workspace) return { error: 'Missing workspace ID.' };
   if (!name) return { error: 'Enter a name for the radar.' };
-  if (!file || file.size === 0) return { error: 'Select a CSV file to upload.' };
+  if (!(file instanceof File) || file.size === 0) return { error: 'Select a CSV file to upload.' };
 
-  // Step 1: create the radar with an empty config to obtain the radar UUID.
+  // Step 1: Upload the CSV to Supabase Storage first (before creating the radar).
+  const supabase = await createClient();
+  if (!supabase) return { error: 'Supabase is not configured.' };
+
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = `uploads/${workspace}/${Date.now()}_${safeName}`;
+  const fileBuffer = await file.arrayBuffer();
+  const { error: uploadError } = await supabase.storage
+    .from('signal-uploads')
+    .upload(storagePath, fileBuffer, { contentType: 'text/csv', upsert: false });
+
+  if (uploadError) return { error: friendlyError(uploadError.message) };
+
+  // Step 2: Create the radar with the storage path already in config so the
+  // worker can find the file immediately when radar.fetch_queued fires.
   const { data: radarId, error: createError } = await rpc('create_radar', {
     p_ws: workspace,
     p_brief: brief,
     p_connector_type: 'csv_upload',
     p_name: name,
-    p_config: {},
+    p_config: { storage_path: storagePath },
   });
   if (createError) return { error: createError };
-
-  // Step 2: upload the CSV file to Supabase Storage.
-  const supabase = await createClient();
-  if (!supabase) return { error: 'Supabase is not configured.' };
-
-  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
-  const storagePath = `uploads/${workspace}/${String(radarId)}/${safeName}`;
-  const fileBuffer = await file.arrayBuffer();
-  const { error: uploadError } = await supabase.storage
-    .from('signal-uploads')
-    .upload(storagePath, fileBuffer, { contentType: 'text/csv', upsert: true });
-
-  if (uploadError) return { error: friendlyError(uploadError.message) };
-
-  // Step 3: store the storage path in the radar's cursor so the fetch worker can find it.
-  const { error: cursorError } = await rpc('update_radar_cursor', {
-    p_radar: String(radarId),
-    p_cursor_state: { storage_path: storagePath },
-    p_fetched: 0,
-    p_yield: 0,
-  });
-  if (cursorError) return { error: cursorError };
 
   revalidatePath(`/briefs/${brief}`);
   redirect(`/briefs/${brief}`);

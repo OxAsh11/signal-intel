@@ -107,7 +107,7 @@ select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000
 select throws_ok(
   format($q$select app.update_radar_cursor(%L::uuid, '{}'::jsonb, 0, 0)$q$,
     (select v from radar_ids where k = 'r1')),
-  null, null,
+  '42501', null,
   '6. authenticated role cannot call app.update_radar_cursor directly'
 );
 reset role;
@@ -152,10 +152,9 @@ select lives_ok(
 );
 reset role;
 select is(
-  (select count(*)::int from public.radar where id = (select v from radar_ids where k = 'r2')
-   and status <> 'paused'),
-  0,
-  '9b. removed radar is no longer active'
+  (select status from public.radar where id = (select v from radar_ids where k = 'r2')),
+  'paused',
+  '9b. removed radar has status paused'
 );
 
 -- ── 10. Viewer can SELECT radar (RLS allows reads) ───────────────────────────

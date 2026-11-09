@@ -27,6 +27,7 @@ async def create_source_records(
     org_id: UUID,
     workspace_id: UUID,
     connector_id: str,
+    source_type: str,
     payloads: list[SourcePayload],
 ) -> int:
     """Persist *payloads* by calling ``app.create_source_record`` for each one.
@@ -39,11 +40,12 @@ async def create_source_records(
         for payload in payloads:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "select app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s)",
+                    "select app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         str(org_id),
                         str(workspace_id),
                         connector_id,
+                        source_type,          # NEW — p_source_type
                         payload.url,
                         payload.fetched_at,
                         payload.content_hash,

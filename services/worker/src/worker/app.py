@@ -2,15 +2,19 @@
 
 import contextlib
 import json
+import os
+import tempfile
 from collections.abc import Callable
 from typing import Any, Literal
 from uuid import UUID
 
+import aiohttp
 import procrastinate
 from procrastinate.exceptions import AlreadyEnqueued
 from psycopg_pool import AsyncConnectionPool
 
 from signal_core.ai_gateway.gateway import AiGateway
+from signal_core.config import get_settings
 from signal_core.connectors.base import FetchGuard
 from signal_core.connectors.csv_upload import CsvConnector
 from signal_core.connectors.job_posts import JobPostConnector
@@ -204,17 +208,44 @@ def build_app(
         assert pool is not None, "pool required for source.fetch_csv"
         r = await _load_radar(pool, UUID(radar_id))
         queries = await _load_radar_queries(pool, UUID(radar_id))
+
+        # Resolve the CSV path: may be a Supabase Storage path ("uploads/...") or local.
+        config = dict(r["config"])
+        storage_path: str = config.get("storage_path", "")
+        local_path: str | None = None
+        if storage_path.startswith("uploads/"):
+            settings = get_settings()
+            if not settings.supabase_url or not settings.supabase_service_role_key:
+                raise RuntimeError(
+                    "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for csv_upload radars"
+                )
+            url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/signal-uploads/{storage_path}"
+            svc_key = settings.supabase_service_role_key.get_secret_value()
+            async with aiohttp.ClientSession() as session:
+                async with session.get(url, headers={"Authorization": f"Bearer {svc_key}"}) as resp:
+                    resp.raise_for_status()
+                    content = await resp.read()
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+            tmp.write(content)
+            tmp.close()
+            local_path = tmp.name
+            config = {**config, "storage_path": local_path}
+
         conn_obj = CsvConnector()
         guard = FetchGuard()
-        payloads, next_cursor = await conn_obj.fetch(
-            config=r["config"],
-            queries=[q["query_text"] for q in queries],
-            cursor=r["cursor_state"],
-            guard=guard,
-            limit=500,
-        )
+        try:
+            payloads, next_cursor = await conn_obj.fetch(
+                config=config,
+                queries=[q["query_text"] for q in queries],
+                cursor=r["cursor_state"],
+                guard=guard,
+                limit=500,
+            )
+        finally:
+            if local_path:
+                os.unlink(local_path)
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", payloads
+            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -236,7 +267,7 @@ def build_app(
             limit=500,
         )
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", payloads
+            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -258,7 +289,7 @@ def build_app(
             limit=500,
         )
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", payloads
+            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -280,7 +311,7 @@ def build_app(
             limit=500,
         )
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", payloads
+            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -295,15 +326,16 @@ def build_app(
     ) -> dict:
         assert pool is not None and gateway is not None, "pool and gateway required"
         r = await _load_radar(pool, UUID(radar_id))
-        # Load hypotheses and ICP summary from the brief
+        # Load hypothesis and offer from the brief's draft_config jsonb.
         async with pool.connection() as db_conn:
             async with db_conn.cursor() as cur:
                 await cur.execute(
-                    "select hypotheses, icp_summary from public.brief where id = %s",
+                    "select draft_config->>'hypothesis', draft_config->>'offer' from public.brief where id = %s",
                     (str(r["brief_id"]),),
                 )
                 brief_row = await cur.fetchone()
-        hypotheses: list[str] = (brief_row[0] or []) if brief_row else []
+        raw_hypothesis = (brief_row[0] or "") if brief_row else ""
+        hypotheses: list[str] = [raw_hypothesis] if raw_hypothesis else []
         icp_summary: str = (brief_row[1] or "") if brief_row else ""
         ctx = CallContext(UUID(org_id), UUID(workspace_id), None, "worker", "radar.generate_queries", {})
         query_set = await generate_radar_queries(
