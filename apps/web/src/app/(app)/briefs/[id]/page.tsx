@@ -49,6 +49,9 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
       <Link href={`/briefs/${id}/versions`} className="text-sm text-ink-muted hover:text-ink">
         Version history →
       </Link>
+      <Link href={`/briefs/${id}/radars`} className="text-sm text-ink-muted hover:text-ink">
+        Radars →
+      </Link>
 
       {brief.intake_status === 'pending'
         ? <BriefIntakeLoading briefId={id} />
