@@ -28,6 +28,7 @@ from signal_core.metering import ApprovalStore, CallContext
 from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
 from signal_core.modules.m02_radar import create_source_records, upsert_radar_queries
 from signal_core.modules.m02_radar_ai import generate_radar_queries
+from signal_core.modules.m03_extraction import extract_structured, judge_relevance
 from worker.health import HealthState
 
 log = get_logger(__name__)
@@ -365,6 +366,74 @@ def build_app(
                 await db_conn.execute("select app.mark_radar_silent(%s)", (radar_id,))
             log.warning("radar.silent", radar_id=str(radar_id))
         return {"silent": len(stale)}
+
+    # ------------------------------------------------------------------
+    # Extraction jobs (Phase 1d)
+    # ------------------------------------------------------------------
+
+    @job(app, type="extract.relevance_judge", kill_switch=kill_switch, queue="extract", retry=2)
+    async def extract_relevance_judge_job(*, source_record_id: str, **_: Any) -> None:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+
+        ctx = CallContext(
+            org_id=_UUID(int=0),  # loaded from source_record inside judge_relevance
+            workspace_id=_UUID(int=0),
+            brief_id=None,
+            job_id=None,
+            job_type="extract.relevance_judge",
+            job_args={"source_record_id": source_record_id},
+        )
+        # Load org/workspace from DB for the real context
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
+                    (source_record_id,),
+                )
+                row = await cur.fetchone()
+        if row is None:
+            log.warning("extract.source_record_not_found", source_record_id=source_record_id)
+            return
+        ctx = CallContext(
+            org_id=_UUID(str(row[0])),
+            workspace_id=_UUID(str(row[1])),
+            brief_id=None,
+            job_id=None,
+            job_type="extract.relevance_judge",
+            job_args={"source_record_id": source_record_id},
+        )
+        relevant = await judge_relevance(pool, gateway, _UUID(source_record_id), ctx)
+        if relevant:
+            with contextlib.suppress(AlreadyEnqueued):
+                await app.tasks["extract.structured"].configure(
+                    queueing_lock=source_record_id
+                ).defer_async(source_record_id=source_record_id)
+
+    @job(app, type="extract.structured", kill_switch=kill_switch, queue="extract", retry=2)
+    async def extract_structured_job(*, source_record_id: str, **_: Any) -> None:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
+                    (source_record_id,),
+                )
+                row = await cur.fetchone()
+        if row is None:
+            log.warning("extract.source_record_not_found", source_record_id=source_record_id)
+            return
+        ctx = CallContext(
+            org_id=_UUID(str(row[0])),
+            workspace_id=_UUID(str(row[1])),
+            brief_id=None,
+            job_id=None,
+            job_type="extract.structured",
+            job_args={"source_record_id": source_record_id},
+        )
+        await extract_structured(pool, gateway, _UUID(source_record_id), ctx)
 
     # ------------------------------------------------------------------
     # Dispatch router (updated for Phase 1c events)
