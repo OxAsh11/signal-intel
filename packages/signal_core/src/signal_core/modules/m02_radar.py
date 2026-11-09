@@ -1,12 +1,25 @@
-"""M2 Radar — Python side: source record persistence."""
+"""M2 Radar — Python side: source record persistence and query management."""
 
 from __future__ import annotations
 
+import json
+from typing import Literal
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel
 
 from signal_core.connectors import SourcePayload
+
+
+class RadarQuery(BaseModel):
+    query_text: str
+    language: str = "en"
+    source: Literal["hypothesis", "icp", "user"] = "hypothesis"
+
+
+class RadarQuerySet(BaseModel):
+    queries: list[RadarQuery]
 
 
 async def create_source_records(
@@ -42,3 +55,24 @@ async def create_source_records(
             if row is not None and row[0] is not None:
                 new_count += 1
     return new_count
+
+
+async def upsert_radar_queries(
+    pool: AsyncConnectionPool,
+    radar_id: UUID,
+    query_set: RadarQuerySet,
+) -> None:
+    """Persist *query_set* by calling ``app.upsert_radar_queries`` (service-role RPC).
+
+    Deletes any non-user-sourced rows for the radar, then re-inserts all
+    queries in *query_set*.
+    """
+    queries_json = json.dumps(
+        [q.model_dump() for q in query_set.queries]
+    )
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "select app.upsert_radar_queries(%s, %s)",
+                (str(radar_id), queries_json),
+            )

@@ -168,3 +168,58 @@ async def test_jobs_fake_returns_two_payloads():
         limit=10,
     )
     assert payloads[0].content_hash == payloads2[0].content_hash
+
+
+# ---------------------------------------------------------------------------
+# Task 5: RadarQuerySet model and generate_radar_queries
+# ---------------------------------------------------------------------------
+
+
+def test_radar_query_set_model_validates():
+    """RadarQuerySet validates correctly with all source types."""
+    from signal_core.modules.m02_radar import RadarQuery, RadarQuerySet
+
+    qs = RadarQuerySet(queries=[
+        RadarQuery(query_text="SolidWorks hiring", language="en", source="hypothesis"),
+        RadarQuery(query_text="CAD software engineer", source="icp"),
+    ])
+    assert len(qs.queries) == 2
+    assert qs.queries[0].source == "hypothesis"
+    assert qs.queries[1].source == "icp"
+    assert qs.queries[1].language == "en"
+
+
+@pytest.mark.asyncio
+async def test_generate_radar_queries_calls_gateway():
+    """generate_radar_queries passes variables to the gateway and returns RadarQuerySet."""
+    from decimal import Decimal
+    from uuid import uuid4
+
+    from signal_core.ai_gateway.gateway import Result
+    from signal_core.metering import CallContext
+    from signal_core.modules.m02_radar import RadarQuery, RadarQuerySet
+    from signal_core.modules.m02_radar_ai import generate_radar_queries
+
+    expected_qs = RadarQuerySet(queries=[
+        RadarQuery(query_text="SolidWorks hiring", source="hypothesis"),
+        RadarQuery(query_text="CAD engineer ICP", source="icp"),
+    ])
+
+    class _FakeGateway:
+        async def run(self, *args, **kwargs):
+            return Result(value=expected_qs, extractor_version_id=uuid4(), cost_usd=Decimal("0.001"))
+
+    ctx = CallContext(
+        org_id=uuid4(), workspace_id=uuid4(), brief_id=uuid4(),
+        job_id=None, job_type="test", job_args={},
+    )
+    result = await generate_radar_queries(
+        gateway=_FakeGateway(),
+        hypotheses=["firms using SolidWorks that are hiring"],
+        icp_summary="Mid-market engineering firms",
+        connector_type="job_post",
+        ctx=ctx,
+        limit=5,
+    )
+    assert len(result.queries) == 2
+    assert result.queries[0].query_text == "SolidWorks hiring"
