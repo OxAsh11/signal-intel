@@ -323,7 +323,7 @@ async def extract_backfill(
             await cur.execute(
                 "SELECT id FROM public.source_record"
                 " WHERE workspace_id = %s AND extraction_status = 'pending'"
-                " LIMIT 500",
+                " ORDER BY created_at LIMIT 500",
                 (str(workspace_id),),
             )
             rows = await cur.fetchall()

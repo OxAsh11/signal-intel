@@ -537,7 +537,19 @@ def build_app(
                     )
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")
+            version = payload.get("version")
             if brief_id:
+                # Fetch workspace_id from the brief table — the payload only carries
+                # {brief_id, version} and does NOT include workspace_id.
+                async with pool.connection() as db_conn:
+                    async with db_conn.cursor() as wcur:
+                        await wcur.execute(
+                            "select workspace_id from public.brief where id = %s",
+                            (brief_id,),
+                        )
+                        brief_row = await wcur.fetchone()
+                workspace_id = str(brief_row[0]) if brief_row else None
+
                 async with pool.connection() as db_conn:
                     cur = await db_conn.execute(
                         "select id, org_id, workspace_id from public.radar"
@@ -554,12 +566,11 @@ def build_app(
                             org_id=str(r[1]),
                             workspace_id=str(r[2]),
                         )
-                # Re-queue any pending source_records so they are processed under the new version.
-                workspace_id = payload.get("workspace_id")
+                # Re-queue pending source_records so they are processed under the new brief version.
                 if workspace_id:
                     with contextlib.suppress(AlreadyEnqueued):
                         await app.tasks["extract.backfill"].configure(
-                            queueing_lock=f"backfill:{brief_id}"
+                            queueing_lock=f"backfill:{brief_id}:{version}"
                         ).defer_async(
                             brief_id=brief_id,
                             workspace_id=workspace_id,
