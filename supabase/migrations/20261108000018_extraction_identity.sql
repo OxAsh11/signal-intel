@@ -39,7 +39,11 @@ create policy review_item_read on public.review_item
   for select to authenticated
   using (app.has_workspace_role(workspace_id, 'Viewer'));
 
-grant select on public.review_item to authenticated;
+create policy review_item_write on public.review_item
+  for insert to authenticated
+  with check (app.has_workspace_role(workspace_id, 'Editor'));
+
+grant select, insert on public.review_item to authenticated;
 
 -- ── 2. app.update_extraction_status ─────────────────────────────────────────
 create function app.update_extraction_status(
@@ -341,7 +345,11 @@ begin
   -- 'skip': no entity action needed.
 
   update public.review_item
-  set status      = p_action,
+  set status      = case p_action
+                      when 'merge'      then 'merged'
+                      when 'skip'       then 'skipped'
+                      when 'create_new' then 'created_new'
+                    end,
       resolved_by = app.current_member_id(v_org),
       resolved_at = now()
   where id = p_id;
@@ -349,7 +357,7 @@ end $$;
 
 revoke execute on function
   app.resolve_review_item(uuid, text, text)
-  from public, anon;
+  from public, anon, authenticated;
 grant execute on function
   app.resolve_review_item(uuid, text, text)
   to authenticated;
@@ -359,7 +367,7 @@ create function public.resolve_review_item(p_id uuid, p_action text, p_new_entit
   returns void language sql security definer set search_path = '' as $$
   select app.resolve_review_item(p_id, p_action, p_new_entity_name)
 $$;
-revoke execute on function public.resolve_review_item(uuid, text, text) from public, anon;
+revoke execute on function public.resolve_review_item(uuid, text, text) from public, anon, authenticated;
 grant execute on function public.resolve_review_item(uuid, text, text) to authenticated;
 
 -- ── 12. Kill-switch seeds ────────────────────────────────────────────────────
