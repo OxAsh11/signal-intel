@@ -158,8 +158,7 @@ async def compute_verdict(
 
     # 10. Build quotes list from supporting claims with non-null quote
     quotes = [
-        {"claim_id": str(claims[i]["id"] if hasattr(claims[i], "__getitem__") else claims[i][0]),
-         "quote": claims[i][3]}
+        {"claim_id": str(claims[i][0]), "quote": claims[i][3]}
         for i in result.value.supporting_claim_indices
         if 0 <= i < len(claims) and claims[i][3]
     ]
