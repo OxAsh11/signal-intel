@@ -277,6 +277,41 @@ class FlakyUnclaimStore(MemoryApprovalStore):
         raise RuntimeError("db down")
 
 
+@pytest.mark.parametrize(
+    "connector_type,expected_job",
+    [
+        ("news", "source.fetch_news"),
+        ("website", "source.fetch_website"),
+        ("csv_upload", "source.fetch_csv"),
+        ("job_post", "source.fetch_job_post"),
+    ],
+)
+async def test_dispatch_routes_radar_fetch_queued_to_correct_job(
+    connector_type: str, expected_job: str
+) -> None:
+    connector = InMemoryConnector()
+    app = make_app(connector=connector)
+    radar_id = str(uuid4())
+    async with app.open_async():
+        await app.tasks[DISPATCH_TASK].defer_async(
+            event="radar.fetch_queued",
+            event_id=str(uuid4()),
+            payload={
+                "radar_id": radar_id,
+                "org_id": str(uuid4()),
+                "workspace_id": str(uuid4()),
+                "brief_id": str(uuid4()),
+                "connector_type": connector_type,
+            },
+        )
+        await app.run_worker_async(queues=["events"], wait=False, install_signal_handlers=False)
+    deferred_names = [j["task_name"] for j in connector.jobs.values()]
+    assert expected_job in deferred_names, (
+        f"Expected {expected_job!r} to be deferred for connector_type={connector_type!r}, "
+        f"got: {deferred_names}"
+    )
+
+
 async def test_unclaim_failure_does_not_lose_the_batch() -> None:
     first, second = approved(), approved()
     store = FlakyUnclaimStore([first, second])

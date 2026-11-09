@@ -101,7 +101,7 @@ async def amain() -> None:
         )
         worker = asyncio.create_task(
             app.run_worker_async(
-                queues=["system", "events", "briefs", "default"], install_signal_handlers=False
+                queues=["system", "events", "briefs", "fetch", "default"], install_signal_handlers=False
             )
         )
         waiter = asyncio.create_task(stop.wait())
