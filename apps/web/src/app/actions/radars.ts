@@ -100,7 +100,8 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
   const supabase = await createClient();
   if (!supabase) return { error: 'Supabase is not configured.' };
 
-  const storagePath = `uploads/${workspace}/${String(radarId)}/${file.name}`;
+  const safeName = file.name.replace(/[^a-zA-Z0-9._-]/g, '_');
+  const storagePath = `uploads/${workspace}/${String(radarId)}/${safeName}`;
   const fileBuffer = await file.arrayBuffer();
   const { error: uploadError } = await supabase.storage
     .from('signal-uploads')

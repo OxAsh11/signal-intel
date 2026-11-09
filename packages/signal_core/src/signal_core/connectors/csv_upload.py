@@ -65,6 +65,9 @@ class CsvConnector:
                     continue
                 seen_hashes.add(chash)
 
+                if len(payloads) >= limit:
+                    break
+
                 url = f"csv:{storage_path}:{row_index}"
                 payloads.append(
                     SourcePayload(
