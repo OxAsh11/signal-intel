@@ -32,9 +32,9 @@ create index review_item_ws_status_idx on public.review_item (workspace_id, stat
 
 alter table public.review_item enable row level security;
 
--- Viewer may read; INSERT is only via app.create_review_item (service_role) and
--- app.resolve_review_item does its own Editor check — direct INSERT is never exercised
--- by authenticated clients, but we grant SELECT so Viewers can list the queue.
+-- Viewer may read; Editors may insert (review_item_write policy enforces the role check).
+-- Service-role workers insert via app.create_review_item; authenticated Editors call
+-- app.resolve_review_item to change status.
 create policy review_item_read on public.review_item
   for select to authenticated
   using (app.has_workspace_role(workspace_id, 'Viewer'));
