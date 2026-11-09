@@ -32,18 +32,14 @@ create index review_item_ws_status_idx on public.review_item (workspace_id, stat
 
 alter table public.review_item enable row level security;
 
--- Viewer may read; Editors may insert (review_item_write policy enforces the role check).
--- Service-role workers insert via app.create_review_item; authenticated Editors call
--- app.resolve_review_item to change status.
+-- Viewer may read; service-role workers insert via app.create_review_item;
+-- authenticated Editors call app.resolve_review_item to change status.
+-- Direct INSERT by authenticated role is intentionally not permitted.
 create policy review_item_read on public.review_item
   for select to authenticated
   using (app.has_workspace_role(workspace_id, 'Viewer'));
 
-create policy review_item_write on public.review_item
-  for insert to authenticated
-  with check (app.has_workspace_role(workspace_id, 'Editor'));
-
-grant select, insert on public.review_item to authenticated;
+grant select on public.review_item to authenticated;
 
 -- ── 2. app.update_extraction_status ─────────────────────────────────────────
 create function app.update_extraction_status(
@@ -237,15 +233,43 @@ create function app.merge_entities(
 ) returns void
 language plpgsql security definer set search_path = '' as $$
 declare
-  v_org uuid;
+  v_org      uuid;
+  v_loser_org uuid;
 begin
   select org_id into v_org from public.entity where id = p_winner;
+  select org_id into v_loser_org from public.entity where id = p_loser;
+
+  -- Reject cross-org merges.
+  if v_org <> v_loser_org then
+    raise exception 'entities from different orgs cannot be merged' using errcode = '23503';
+  end if;
 
   -- Re-point all mentions of the loser to the winner.
   update public.mention set entity_id = p_winner where entity_id = p_loser;
 
-  -- Re-point all aliases of the loser to the winner.
-  update public.entity_alias set entity_id = p_winner where entity_id = p_loser;
+  -- Re-point aliases; skip if winner already has an identical alias.
+  update public.entity_alias set entity_id = p_winner
+  where entity_id = p_loser
+    and not exists (
+      select 1 from public.entity_alias ea2
+      where ea2.entity_id = p_winner
+        and ea2.org_id = entity_alias.org_id
+        and ea2.alias_type = entity_alias.alias_type
+        and ea2.value_normalised = entity_alias.value_normalised
+    );
+  -- Delete duplicates that couldn't be re-pointed.
+  delete from public.entity_alias where entity_id = p_loser;
+
+  -- Re-point claims.
+  update public.claim set entity_id = p_winner where entity_id = p_loser;
+
+  -- Re-point accounts (skip workspace+entity duplicates).
+  update public.account set entity_id = p_winner where entity_id = p_loser
+    and not exists (
+      select 1 from public.account a2
+      where a2.entity_id = p_winner and a2.workspace_id = account.workspace_id
+    );
+  delete from public.account where entity_id = p_loser;
 
   -- Mark the loser as merged.
   update public.entity
@@ -321,6 +345,22 @@ begin
 
   if p_action not in ('merge', 'skip', 'create_new') then
     raise exception 'invalid action: %', p_action using errcode = '22023';
+  end if;
+
+  -- Verify mention belongs to the same org.
+  if not exists (select 1 from public.mention where id = r.mention_id and org_id = r.org_id) then
+    raise exception 'mention does not belong to this org' using errcode = '42501';
+  end if;
+  -- Verify candidate_entity (if set) belongs to the same org.
+  if r.candidate_entity is not null and not exists (
+    select 1 from public.entity where id = r.candidate_entity and org_id = r.org_id
+  ) then
+    raise exception 'candidate entity does not belong to this org' using errcode = '42501';
+  end if;
+
+  -- Merge requires a candidate entity to be set.
+  if p_action = 'merge' and r.candidate_entity is null then
+    raise exception 'cannot merge: no candidate entity on this review item' using errcode = '22023';
   end if;
 
   -- Fetch context.
