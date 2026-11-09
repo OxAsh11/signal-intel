@@ -14,10 +14,10 @@ swap this for real object-storage retrieval once payload_ref is fully wired).
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from psycopg_pool import AsyncConnectionPool
 
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
@@ -49,7 +49,7 @@ class RelevanceJudgement(BaseModel):
 
 
 class MentionExtract(BaseModel):
-    entity_type: str  # 'company' | 'person'
+    entity_type: Literal["company", "person"]
     raw_name: str | None = None
     raw_domain: str | None = None
     raw_country: str | None = None
@@ -59,11 +59,20 @@ class MentionExtract(BaseModel):
 class ClaimExtract(BaseModel):
     mention_index: int  # 0-based index into the mentions list this claim references
     predicate_key: str
-    value: str  # JSON string
+    value: str  # JSON string — validated below
     quote: str | None = None
     quote_original: str | None = None
     quote_language: str | None = None
     confidence: int  # 0-100
+
+    @field_validator("value")
+    @classmethod
+    def value_must_be_json(cls, v: str) -> str:
+        try:
+            json.loads(v)
+        except (json.JSONDecodeError, TypeError) as exc:
+            raise ValueError(f"claim.value must be valid JSON: {exc}") from exc
+        return v
 
 
 class ExtractionResult(BaseModel):
@@ -139,6 +148,22 @@ async def judge_relevance(
     On False, persists extraction_status = 'irrelevant'.
     On AI error, persists extraction_status = 'failed' and re-raises.
     """
+    # Gate: skip if already processed or missing.
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT extraction_status FROM public.source_record WHERE id = %s",
+                (str(source_record_id),),
+            )
+            sr_row = await cur.fetchone()
+    if sr_row is None or sr_row[0] != "pending":
+        log.info(
+            "extraction.skipped_not_pending",
+            source_record_id=str(source_record_id),
+            status=sr_row[0] if sr_row else "missing",
+        )
+        return False
+
     prompt = load_prompt(RELEVANCE_PROMPT_NAME, RELEVANCE_PROMPT_VERSION)
     source_record = await _load_source_record(pool, source_record_id)
     text = _content_text(source_record)
@@ -190,7 +215,7 @@ async def extract_structured(
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT id, key, extraction_hint"
-                " FROM public.predicate WHERE workspace_id = %s",
+                " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
                 (str(workspace_id),),
             )
             pred_rows = await cur.fetchall()
@@ -217,46 +242,58 @@ async def extract_structured(
 
     # ── Create provisional entities and mentions ──────────────────────────────
     for mention in extraction.mentions:
-        # Provisional entity: M4 identity resolution will resolve/merge this later.
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
-                    (str(org_id), mention.entity_type, mention.raw_name or "unknown"),
-                )
-                ent_row = await cur.fetchone()
-        entity_ids.append(UUID(str(ent_row[0])))
-
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT app.create_mention(%s, %s, %s::public.entity_type,"
-                    " %s, %s, %s, %s::jsonb)",
-                    (
-                        str(org_id),
-                        str(source_record_id),
-                        mention.entity_type,
-                        mention.raw_name,
-                        mention.raw_domain,
-                        mention.raw_country,
-                        json.dumps(mention.raw_attributes),
-                    ),
-                )
-                men_row = await cur.fetchone()
-        mention_id = UUID(str(men_row[0]))
-        mention_ids.append(mention_id)
-
-        # Dispatch identity resolution (lazy import avoids circular dep; M4 may not exist yet).
         try:
+            # Provisional entity: M4 identity resolution will resolve/merge this later.
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
+                        (str(org_id), mention.entity_type, mention.raw_name or "unknown"),
+                    )
+                    ent_row = await cur.fetchone()
+            provisional_entity_id = UUID(str(ent_row[0]))
+            entity_ids.append(provisional_entity_id)
+
+            async with pool.connection() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        "SELECT app.create_mention(%s, %s, %s::public.entity_type,"
+                        " %s, %s, %s, %s::jsonb)",
+                        (
+                            str(org_id),
+                            str(source_record_id),
+                            mention.entity_type,
+                            mention.raw_name,
+                            mention.raw_domain,
+                            mention.raw_country,
+                            json.dumps(mention.raw_attributes),
+                        ),
+                    )
+                    men_row = await cur.fetchone()
+            mention_id = UUID(str(men_row[0]))
+            mention_ids.append(mention_id)
+
+            # Link provisional entity to mention so M4 can reuse it instead of creating a second one.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "SELECT app.resolve_mention(%s, %s, %s, %s::smallint)",
+                    (str(mention_id), str(provisional_entity_id), "provisional", 0),
+                )
+
+            # Dispatch identity resolution (M4 is wired — log warning if handle is missing).
             from signal_core.modules import m04_identity  # noqa: PLC0415
 
-            await m04_identity.identity_resolve_job.defer_async(
-                mention_id=str(mention_id),
-                workspace_id=str(workspace_id),
-            )
-        except (ImportError, AttributeError):
-            # M4 not yet deployed — identity dispatch skipped.
-            pass
+            if m04_identity.identity_resolve_job is not None:
+                await m04_identity.identity_resolve_job.defer_async(
+                    mention_id=str(mention_id),
+                    workspace_id=str(workspace_id),
+                )
+            else:
+                log.warning("extraction.m4_not_wired", mention_id=str(mention_id))
+
+        except Exception as exc:
+            await _update_status(pool, source_record_id, "failed", str(exc))
+            raise
 
     # ── Create claims ─────────────────────────────────────────────────────────
     for claim in extraction.claims:
@@ -277,22 +314,26 @@ async def extract_structured(
             )
             continue
         entity_id = entity_ids[claim.mention_index]
-        async with pool.connection() as conn:
-            await conn.execute(
-                "SELECT app.create_claim(%s, %s, %s, %s::jsonb, %s, %s, %s, %s, now(), %s, %s)",
-                (
-                    str(org_id),
-                    str(entity_id),
-                    str(predicate_id),
-                    claim.value,
-                    claim.quote,
-                    claim.quote_original,
-                    claim.quote_language,
-                    str(source_record_id),
-                    str(result.extractor_version_id),
-                    claim.confidence,
-                ),
-            )
+        try:
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "SELECT app.create_claim(%s, %s, %s, %s::jsonb, %s, %s, %s, %s, now(), %s, %s)",
+                    (
+                        str(org_id),
+                        str(entity_id),
+                        str(predicate_id),
+                        claim.value,
+                        claim.quote,
+                        claim.quote_original,
+                        claim.quote_language,
+                        str(source_record_id),
+                        str(result.extractor_version_id),
+                        claim.confidence,
+                    ),
+                )
+        except Exception as exc:
+            await _update_status(pool, source_record_id, "failed", str(exc))
+            raise
 
     # ── Mark done ─────────────────────────────────────────────────────────────
     await _update_status(pool, source_record_id, "extracted")

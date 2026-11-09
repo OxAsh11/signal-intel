@@ -459,8 +459,19 @@ def build_app(
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
 
+        # Load org_id from the mention so CallContext carries a real org.
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT org_id FROM public.mention WHERE id = %s",
+                    (mention_id,),
+                )
+                m_row = await cur.fetchone()
+        if m_row is None:
+            log.warning("identity.mention_not_found", mention_id=mention_id)
+            return "skipped"
         ctx = CallContext(
-            org_id=_UUID(int=0),
+            org_id=_UUID(str(m_row[0])),
             workspace_id=_UUID(workspace_id),
             brief_id=None,
             job_id=None,

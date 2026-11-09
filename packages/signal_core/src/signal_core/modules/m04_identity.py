@@ -59,7 +59,7 @@ async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT id, org_id, source_record_id, entity_type,"
-                " raw_name, raw_domain, raw_country, raw_attributes"
+                " raw_name, raw_domain, raw_country, raw_attributes, entity_id"
                 " FROM public.mention WHERE id = %s",
                 (str(mention_id),),
             )
@@ -75,6 +75,7 @@ async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict:
         "raw_domain": row[5],
         "raw_country": row[6],
         "raw_attributes": row[7] or {},
+        "entity_id": str(row[8]) if row[8] is not None else None,
     }
 
 
@@ -139,6 +140,7 @@ async def _lookup_aliases(
 
 
 async def _ai_tiebreak(
+    pool: AsyncConnectionPool,
     gateway: AiGateway,
     mention: dict,
     candidates: list[tuple[str, str, int]],
@@ -158,9 +160,38 @@ async def _ai_tiebreak(
         },
         default=str,
     )
+
+    # Enrich candidates with display_name and aliases for context.
+    candidate_ids = [c[0] for c in candidates]
+    enriched: dict[str, dict] = {}
+    async with pool.connection() as conn:
+        async with conn.cursor() as cur:
+            await cur.execute(
+                "SELECT e.id, e.display_name,"
+                " array_agg(ea.alias_type || ':' || ea.value_normalised) FILTER (WHERE ea.id IS NOT NULL) as aliases"
+                " FROM public.entity e"
+                " LEFT JOIN public.entity_alias ea ON ea.entity_id = e.id"
+                " WHERE e.id = ANY(%s)"
+                " GROUP BY e.id, e.display_name",
+                (candidate_ids,),
+            )
+            ent_rows = await cur.fetchall()
+    for row in ent_rows:
+        enriched[str(row[0])] = {
+            "display_name": row[1],
+            "aliases": row[2] or [],
+        }
+
     candidates_text = json.dumps(
         [
-            {"index": i, "entity_id": c[0], "alias_type": c[1], "confidence": c[2]}
+            {
+                "index": i,
+                "entity_id": c[0],
+                "alias_type": c[1],
+                "confidence": c[2],
+                "display_name": enriched.get(c[0], {}).get("display_name"),
+                "aliases": enriched.get(c[0], {}).get("aliases", [])[:5],
+            }
             for i, c in enumerate(candidates)
         ]
     )
@@ -225,12 +256,26 @@ async def resolve_mention(
         tiebreak_candidates = [
             (eid, at, c) for eid, (at, c) in by_entity.items()
         ]
-        entity_id, confidence = await _ai_tiebreak(gateway, mention, tiebreak_candidates, ctx)
+        entity_id, confidence = await _ai_tiebreak(pool, gateway, mention, tiebreak_candidates, ctx)
         if entity_id is None:
-            # AI couldn't decide — create new.
-            return await _create_new(
-                pool, org_id, workspace_id, mention_id, source_record_id, entity_type, mention
+            # AI couldn't decide — queue for human review without a candidate entity.
+            async with pool.connection() as conn:
+                await conn.execute(
+                    "SELECT app.create_review_item(%s, %s, %s, %s, %s, %s::smallint)",
+                    (
+                        str(org_id),
+                        str(workspace_id),
+                        str(mention_id),
+                        None,  # no candidate entity
+                        "tiebreak_failed",
+                        0,
+                    ),
+                )
+            log.info(
+                "identity.tiebreak_queued",
+                mention_id=str(mention_id),
             )
+            return "queued"
         alias_type = by_entity[entity_id][0]
 
     if confidence >= 90:
@@ -289,17 +334,23 @@ async def _create_new(
     entity_type: str,
     mention: dict,
 ) -> str:
-    """Create a new entity, alias, resolve the mention, and create an account."""
+    """Create (or reuse provisional) entity, alias, resolve the mention, and create an account."""
     display_name = mention.get("raw_name") or "unknown"
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
-                (str(org_id), entity_type, display_name),
-            )
-            ent_row = await cur.fetchone()
-    entity_id = str(ent_row[0])
+    # Reuse the provisional entity M3 already created for this mention (avoids double-entity).
+    provisional_entity_id = mention.get("entity_id")
+    if provisional_entity_id:
+        entity_id = provisional_entity_id
+        log.debug("identity.reuse_provisional", mention_id=str(mention_id), entity_id=entity_id)
+    else:
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
+                    (str(org_id), entity_type, display_name),
+                )
+                ent_row = await cur.fetchone()
+        entity_id = str(ent_row[0])
 
     # Create name_country alias so future mentions can find this entity.
     raw_name = mention.get("raw_name")
@@ -354,10 +405,12 @@ async def duplicate_sweep(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT m.id, m.workspace_id"
+                "SELECT m.id, sr.workspace_id"
                 " FROM public.mention m"
                 " JOIN public.source_record sr ON sr.id = m.source_record_id"
                 " WHERE m.org_id = %s AND m.entity_id IS NULL"
+                " AND EXISTS (SELECT 1 FROM public.workspace WHERE id = sr.workspace_id)"
+                " AND NOT EXISTS (SELECT 1 FROM public.review_item WHERE mention_id = m.id AND status = 'pending')"
                 " ORDER BY m.id",
                 (str(org_id),),
             )
