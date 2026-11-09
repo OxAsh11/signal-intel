@@ -215,6 +215,30 @@ async def _ai_tiebreak(
 
 
 # ---------------------------------------------------------------------------
+# Private helper: defer verdict computation
+# ---------------------------------------------------------------------------
+
+
+async def _defer_verdict(entity_id_str: str, org_id: UUID, workspace_id: UUID) -> None:
+    """Defer verdict computation after a mention is resolved to an entity."""
+    import signal_core.modules.m05_verdict as _m05_verdict
+    import contextlib
+    from procrastinate.exceptions import AlreadyEnqueued
+    try:
+        if _m05_verdict.verdict_compute_job is not None:
+            with contextlib.suppress(AlreadyEnqueued):
+                await _m05_verdict.verdict_compute_job.configure(
+                    queueing_lock=f"verdict:{entity_id_str}:{workspace_id}"
+                ).defer_async(
+                    entity_id=entity_id_str,
+                    workspace_id=str(workspace_id),
+                    org_id=str(org_id),
+                )
+    except (ImportError, AttributeError):
+        pass
+
+
+# ---------------------------------------------------------------------------
 # Public API
 # ---------------------------------------------------------------------------
 
@@ -298,6 +322,7 @@ async def resolve_mention(
                     (entity_id, str(provisional_id)),
                 )
         log.info("identity.attached", mention_id=str(mention_id), entity_id=entity_id, alias_type=alias_type, confidence=confidence)
+        await _defer_verdict(entity_id, org_id, workspace_id)
         return "attached"
 
     if confidence >= 40:
@@ -401,6 +426,7 @@ async def _create_new(
         entity_id=entity_id,
         display_name=display_name,
     )
+    await _defer_verdict(entity_id, org_id, workspace_id)
     return "created"
 
 

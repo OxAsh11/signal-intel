@@ -403,6 +403,19 @@ async def test_dispatch_brief_version_published_queues_backfill() -> None:
     assert backfill_job["queueing_lock"] == f"backfill:{brief_id}:{version}"
 
 
+@pytest.fixture
+def app_fixture():
+    return make_app()
+
+
+def test_build_app_registers_verdict_compute(app_fixture):
+    assert "verdict.compute" in app_fixture.tasks
+
+
+def test_build_app_registers_index_chunk_embed(app_fixture):
+    assert "index.chunk_embed" in app_fixture.tasks
+
+
 async def test_unclaim_failure_does_not_lose_the_batch() -> None:
     first, second = approved(), approved()
     store = FlakyUnclaimStore([first, second])

@@ -25,6 +25,7 @@ from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
+import signal_core.modules.m05_index as _m05_index
 
 log = get_logger(__name__)
 
@@ -337,6 +338,18 @@ async def extract_structured(
 
     # ── Mark done ─────────────────────────────────────────────────────────────
     await _update_status(pool, source_record_id, "extracted")
+
+    # Defer indexing — silently skip if job handle not yet wired
+    try:
+        if _m05_index.index_chunk_embed_job is not None:
+            import contextlib
+            from procrastinate.exceptions import AlreadyEnqueued
+            with contextlib.suppress(AlreadyEnqueued):
+                await _m05_index.index_chunk_embed_job.configure(
+                    queueing_lock=str(source_record_id)
+                ).defer_async(source_record_id=str(source_record_id))
+    except (ImportError, AttributeError):
+        pass
 
     log.info(
         "extraction.done",

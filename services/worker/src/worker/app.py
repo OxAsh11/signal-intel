@@ -516,6 +516,60 @@ def build_app(
     _m04_identity.identity_duplicate_sweep_job = identity_duplicate_sweep_task
 
     # ------------------------------------------------------------------
+    # Verdict computation job (Phase 1e / M5)
+    # ------------------------------------------------------------------
+
+    @job(app, type="verdict.compute", kill_switch=kill_switch, queue="derive", retry=2)
+    async def verdict_compute_task(*, entity_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m05_verdict as _m05_verdict
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="verdict.compute",
+            job_args={"entity_id": entity_id, "workspace_id": workspace_id},
+        )
+        return await _m05_verdict.compute_verdict(pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx)
+
+    # ------------------------------------------------------------------
+    # Indexer job (Phase 1e / S9)
+    # ------------------------------------------------------------------
+
+    @job(app, type="index.chunk_embed", kill_switch=kill_switch, queue="derive", retry=2)
+    async def index_chunk_embed_task(*, source_record_id: str, **_: Any) -> int:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m05_index as _m05_index
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
+                    (source_record_id,),
+                )
+                row = await cur.fetchone()
+        if row is None:
+            log.warning("index.source_record_not_found", source_record_id=source_record_id)
+            return 0
+        ctx = CallContext(
+            org_id=_UUID(str(row[0])),
+            workspace_id=_UUID(str(row[1])),
+            brief_id=None,
+            job_id=None,
+            job_type="index.chunk_embed",
+            job_args={"source_record_id": source_record_id},
+        )
+        return await _m05_index.index_source_record(pool, gateway, _UUID(source_record_id), _UUID(str(row[1])), ctx)
+
+    # Wire module handles so m05_verdict and m05_index can defer via the job objects.
+    import signal_core.modules.m05_verdict as _m05_verdict
+    import signal_core.modules.m05_index as _m05_index
+    _m05_verdict.verdict_compute_job = verdict_compute_task
+    _m05_index.index_chunk_embed_job = index_chunk_embed_task
+
+    # ------------------------------------------------------------------
     # Dispatch router (updated for Phase 1c events)
     # ------------------------------------------------------------------
 
