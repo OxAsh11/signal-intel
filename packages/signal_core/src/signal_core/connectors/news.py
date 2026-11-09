@@ -91,7 +91,7 @@ class NewsConnector:
         for query in queries:
             if len(payloads) >= limit:
                 break
-            items = await _fetch_gdelt(query, last_datetime, limit - len(payloads))
+            items = await _fetch_gdelt(query, last_datetime, limit - len(payloads), guard)
             for item in items:
                 raw = json.dumps(item, sort_keys=True).encode("utf-8")
                 payloads.append(
@@ -154,7 +154,7 @@ def _build_payloads(items: list[dict]) -> list[SourcePayload]:
     return result
 
 
-async def _fetch_gdelt(query: str, last_datetime: str, max_records: int) -> list[dict]:
+async def _fetch_gdelt(query: str, last_datetime: str, max_records: int, guard: "FetchGuard") -> list[dict]:
     """Call GDELT DOC 2.0 and return a list of article dicts."""
     params = (
         f"query={quote_plus(query)}"
@@ -165,6 +165,7 @@ async def _fetch_gdelt(query: str, last_datetime: str, max_records: int) -> list
     if last_datetime:
         params += f"&startdatetime={last_datetime}"
     url = f"{_GDELT_BASE}?{params}"
+    await guard.check(url)
     try:
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
             async with session.get(url) as resp:

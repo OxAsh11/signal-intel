@@ -97,7 +97,7 @@ class JobPostConnector:
             board_key = f"{source}:{token}"
             max_updated_at: str = cursor.get(board_key, "")
 
-            jobs, latest = await _fetch_board(source, token, max_updated_at, limit - len(payloads))
+            jobs, latest = await _fetch_board(source, token, max_updated_at, limit - len(payloads), guard)
             if latest:
                 new_cursor[board_key] = latest
 
@@ -142,20 +142,21 @@ def _build_payloads(jobs: list[dict]) -> list[SourcePayload]:
 
 
 async def _fetch_board(
-    source: str, token: str, max_updated_at: str, limit: int
+    source: str, token: str, max_updated_at: str, limit: int, guard: "FetchGuard"
 ) -> tuple[list[dict], str]:
     """Dispatch to the right board API and return ``(jobs, latest_updated_at)``."""
     if source == "greenhouse":
-        return await _fetch_greenhouse(token, limit)
+        return await _fetch_greenhouse(token, max_updated_at, limit, guard)
     if source == "lever":
-        return await _fetch_lever(token, limit)
+        return await _fetch_lever(token, max_updated_at, limit, guard)
     if source == "ashby":
-        return await _fetch_ashby(token, limit)
+        return await _fetch_ashby(token, max_updated_at, limit, guard)
     return [], ""
 
 
-async def _fetch_greenhouse(token: str, limit: int) -> tuple[list[dict], str]:
+async def _fetch_greenhouse(token: str, since: str, limit: int, guard: "FetchGuard") -> tuple[list[dict], str]:
     url = f"https://api.greenhouse.io/v1/boards/{token}/jobs"
+    await guard.check(url)
     try:
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
             async with session.get(url) as resp:
@@ -168,8 +169,12 @@ async def _fetch_greenhouse(token: str, limit: int) -> tuple[list[dict], str]:
     jobs_raw: list[dict] = data.get("jobs", []) if isinstance(data, dict) else []
     jobs: list[dict] = []
     latest = ""
-    for j in jobs_raw[:limit]:
+    for j in jobs_raw:
         updated_at: str = j.get("updated_at", "")
+        if since and updated_at and updated_at <= since:
+            continue
+        if len(jobs) >= limit:
+            break
         if updated_at > latest:
             latest = updated_at
         jobs.append(
@@ -185,8 +190,9 @@ async def _fetch_greenhouse(token: str, limit: int) -> tuple[list[dict], str]:
     return jobs, latest
 
 
-async def _fetch_lever(company: str, limit: int) -> tuple[list[dict], str]:
+async def _fetch_lever(company: str, since: str, limit: int, guard: "FetchGuard") -> tuple[list[dict], str]:
     url = f"https://api.lever.co/v0/postings/{company}"
+    await guard.check(url)
     try:
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
             async with session.get(url) as resp:
@@ -199,8 +205,12 @@ async def _fetch_lever(company: str, limit: int) -> tuple[list[dict], str]:
     jobs_raw: list[dict] = data if isinstance(data, list) else []
     jobs: list[dict] = []
     latest = ""
-    for j in jobs_raw[:limit]:
+    for j in jobs_raw:
         created_at: str = str(j.get("createdAt", ""))
+        if since and created_at and created_at <= since:
+            continue
+        if len(jobs) >= limit:
+            break
         if created_at > latest:
             latest = created_at
         jobs.append(
@@ -216,8 +226,9 @@ async def _fetch_lever(company: str, limit: int) -> tuple[list[dict], str]:
     return jobs, latest
 
 
-async def _fetch_ashby(name: str, limit: int) -> tuple[list[dict], str]:
+async def _fetch_ashby(name: str, since: str, limit: int, guard: "FetchGuard") -> tuple[list[dict], str]:
     url = f"https://api.ashbyhq.com/posting-api/job-board/{name}"
+    await guard.check(url)
     try:
         async with aiohttp.ClientSession(timeout=_TIMEOUT) as session:
             async with session.get(url) as resp:
@@ -230,8 +241,12 @@ async def _fetch_ashby(name: str, limit: int) -> tuple[list[dict], str]:
     jobs_raw: list[dict] = data.get("jobPostings", []) if isinstance(data, dict) else []
     jobs: list[dict] = []
     latest = ""
-    for j in jobs_raw[:limit]:
+    for j in jobs_raw:
         updated_at: str = j.get("updatedAt", "")
+        if since and updated_at and updated_at <= since:
+            continue
+        if len(jobs) >= limit:
+            break
         if updated_at > latest:
             latest = updated_at
         jobs.append(
