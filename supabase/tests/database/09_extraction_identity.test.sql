@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(22);
+select plan(23);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 insert into auth.users (id, email, aud, role) values
@@ -374,6 +374,19 @@ select ok(
   (select count(*)::int from public.source_record
    where id = (select v from ids where k = 'src')) = 1,
   '12. authenticated Viewer can SELECT source_record from own org'
+);
+reset role;
+
+-- ── Extra: authenticated cannot INSERT directly into review_item ─────────────
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000d02","role":"authenticated"}', true);
+select throws_ok(
+  $$ insert into public.review_item (org_id, workspace_id, mention_id, status)
+     values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+             (select v from ids where k = 'mention_ri'), 'pending') $$,
+  '42501',
+  null,
+  'Extra: authenticated cannot INSERT directly into review_item'
 );
 reset role;
 
