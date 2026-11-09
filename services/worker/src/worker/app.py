@@ -29,6 +29,8 @@ from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
 from signal_core.modules.m02_radar import create_source_records, upsert_radar_queries
 from signal_core.modules.m02_radar_ai import generate_radar_queries
 from signal_core.modules.m03_extraction import extract_structured, judge_relevance
+from signal_core.modules.m04_identity import duplicate_sweep, resolve_mention
+import signal_core.modules.m04_identity as _m04_identity
 from worker.health import HealthState
 
 log = get_logger(__name__)
@@ -37,6 +39,7 @@ CANARY_CRON = "17 3 * * *"  # daily, 03:17 UTC
 AI_STATUS_CRON = "*/10 * * * *"
 RELEASE_STALE_CRON = "*/5 * * * *"
 RADAR_HEALTH_CRON = "30 * * * *"  # every hour at :30
+IDENTITY_SWEEP_CRON = "0 2 * * *"  # daily, 02:00 UTC
 RESUME_BATCH = 50
 
 
@@ -434,6 +437,60 @@ def build_app(
             job_args={"source_record_id": source_record_id},
         )
         await extract_structured(pool, gateway, _UUID(source_record_id), ctx)
+
+    # ------------------------------------------------------------------
+    # Identity resolution jobs (Phase 1d)
+    # ------------------------------------------------------------------
+
+    @job(app, type="identity.resolve", kill_switch=kill_switch, queue="identity", retry=2)
+    async def identity_resolve_task(*, mention_id: str, workspace_id: str, **_: Any) -> str:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+
+        ctx = CallContext(
+            org_id=_UUID(int=0),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="identity.resolve",
+            job_args={"mention_id": mention_id, "workspace_id": workspace_id},
+        )
+        return await resolve_mention(pool, gateway, _UUID(mention_id), _UUID(workspace_id), ctx)
+
+    # Wire the deferrable handle so m04_identity.identity_resolve_job.defer_async() works.
+    _m04_identity.identity_resolve_job = identity_resolve_task
+
+    @app.periodic(cron=IDENTITY_SWEEP_CRON, periodic_id="identity.duplicate_sweep")
+    @job(app, type="identity.duplicate_sweep", kill_switch=kill_switch, queue="identity", retry=1)
+    async def identity_duplicate_sweep_task(timestamp: int) -> int:
+        """Sweep all orgs with unresolved mentions daily at 02:00 UTC."""
+        if pool is None or gateway is None:
+            return 0
+        from uuid import UUID as _UUID
+
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT DISTINCT org_id FROM public.mention WHERE entity_id IS NULL"
+                )
+                org_rows = await cur.fetchall()
+
+        total = 0
+        for row in org_rows:
+            org_id = _UUID(str(row[0]))
+            ctx = CallContext(
+                org_id=org_id,
+                workspace_id=_UUID(int=0),
+                brief_id=None,
+                job_id=None,
+                job_type="identity.duplicate_sweep",
+                job_args={},
+            )
+            total += await duplicate_sweep(pool, gateway, org_id, ctx)
+        return total
+
+    # Wire the deferrable handle.
+    _m04_identity.identity_duplicate_sweep_job = identity_duplicate_sweep_task
 
     # ------------------------------------------------------------------
     # Dispatch router (updated for Phase 1c events)
