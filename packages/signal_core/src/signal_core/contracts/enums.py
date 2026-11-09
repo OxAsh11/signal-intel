@@ -197,6 +197,7 @@ class EventType(StrEnum):
     TASK_CREATED = "task.created"
     HEALTH_INCIDENT_OPENED = "health.incident_opened"
     HEALTH_INCIDENT_RESOLVED = "health.incident_resolved"
+    RADAR_FETCH_QUEUED = "radar.fetch_queued"
 
 
 class UsageUnit(StrEnum):
