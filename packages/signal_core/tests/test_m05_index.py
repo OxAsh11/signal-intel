@@ -96,16 +96,16 @@ async def test_index_source_record_chunks_and_embeds(monkeypatch):
     """Chunks content, calls embed, and upserts each chunk."""
     org_id = uuid4()
     ws_id = uuid4()
-    ent_id = uuid4()
     source_id = uuid4()
 
-    # Build row: (org_id, workspace_id, entity_id, brief_id, content, scope, created_at)
-    row = (org_id, ws_id, ent_id, None, "Hello world " * 200, "org", datetime.now())
+    # Build row: (org_id, url, scope, created_at) — matches fixed query
+    content = "Hello world " * 200
+    row = (org_id, content, "tenant", datetime.now())
 
     # Count chunks to match embed return value
     from signal_core.modules.m05_index import chunk_text
 
-    num_chunks = len(chunk_text(row[4]))
+    num_chunks = len(chunk_text(row[1]))
     assert num_chunks >= 1
 
     pool = _make_pool(fetchone_return=row)

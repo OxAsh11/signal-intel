@@ -25,7 +25,7 @@ async def upsert_verdict(
     """Call app.upsert_verdict RPC and return the verdict UUID."""
     sql = (
         "SELECT app.upsert_verdict("
-        "$1, $2, $3::public.verdict_value, $4::uuid[], $5::jsonb, $6::jsonb"
+        "%s, %s, %s::public.verdict_value, %s::uuid[], %s::jsonb, %s::jsonb"
         ")"
     )
     params = (
@@ -60,8 +60,8 @@ async def upsert_memory_chunk(
     """Call app.upsert_memory_chunk RPC and return the chunk UUID."""
     sql = (
         "SELECT app.upsert_memory_chunk("
-        "$1, $2, $3, $4, $5, $6, $7, $8, $9::text::extensions.vector, $10, "
-        "$11::public.data_scope, $12"
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s::text::extensions.vector, %s, "
+        "%s::public.data_scope, %s"
         ")"
     )
     params = (

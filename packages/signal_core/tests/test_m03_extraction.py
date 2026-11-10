@@ -79,6 +79,8 @@ class FakeConn:
         sql_lower = sql.lower()
         if "public.source_record" in sql_lower:
             sr = self._source_record
+            if "extraction_status" in sql_lower:
+                return [(sr.get("extraction_status", "pending"),)]
             return [
                 (
                     str(sr["id"]),

@@ -4,5 +4,6 @@
   "extraction/v1": "4fbbecd8ee93833fe9321f7e8ef5b94e70ec64ee62d7fb78b3fb3e4a3a317b9e",
   "identity_tiebreak/v1": "7fa3e89d2c0aa6cd253e6349cd8a5eb8f5943969a33b6556b5bb918b758d8643",
   "radar_queries/v1": "36e01ba2abaaada2f95b76be3ba14c93f00c45b79e74bec2fbd502352ccd5bc5",
-  "relevance_judge/v1": "f7f19e230c7a5f8692eea58835f400bae9e820c4ebb5ae895e3169e70c3b687d"
+  "relevance_judge/v1": "f7f19e230c7a5f8692eea58835f400bae9e820c4ebb5ae895e3169e70c3b687d",
+  "verdict/v1": "eef638ca9de42c93e066b5e6ef74f063a6a0d8737e9f083564bc6e70f08a3ce3"
 }

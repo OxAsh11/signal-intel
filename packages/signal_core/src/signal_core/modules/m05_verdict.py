@@ -50,9 +50,8 @@ async def compute_verdict(
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT bv.id, b.draft_config->>'hypothesis'
+                SELECT bv.id, bv.config->>'hypothesis'
                 FROM public.brief_version bv
-                JOIN public.brief b ON b.id = bv.brief_id
                 WHERE bv.workspace_id = %s
                 ORDER BY bv.created_at DESC
                 LIMIT 1
@@ -84,12 +83,12 @@ async def compute_verdict(
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT c.id, c.predicate_key, c.value, c.quote, c.confidence
+                SELECT c.id, p.key, c.value, c.quote, c.confidence
                 FROM public.claim c
-                JOIN public.mention m ON m.id = c.mention_id
-                WHERE m.entity_id = %s AND c.workspace_id = %s AND c.status = 'active'
+                JOIN public.predicate p ON p.id = c.predicate_id
+                WHERE c.entity_id = %s AND c.status = 'active'
                 """,
-                (str(entity_id), str(workspace_id)),
+                (str(entity_id),),
             )
             claims = await cur.fetchall()
 

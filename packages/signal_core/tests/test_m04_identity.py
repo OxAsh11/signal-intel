@@ -88,15 +88,20 @@ class FakeConn:
                     "acme.com",
                     "US",
                     {},
+                    None,       # entity_id (not yet resolved)
+                    None,       # match_method
                 )
             ]
-        if "public.entity_alias" in sql_lower:
+        if "public.entity_alias" in sql_lower or "public.entity e" in sql_lower:
+            if "group by" in sql_lower:
+                # Enrichment query: SELECT e.id, e.display_name, array_agg(aliases)
+                # Build 3-column tuples from candidate entity IDs.
+                return [(r[0], "Acme Corp", []) for r in self._alias_rows]
             if "similarity" in sql_lower:
                 # Fuzzy name_country query → return fuzzy alias rows.
                 return self._alias_rows
-            else:
-                # Exact alias query → return exact alias rows (or empty).
-                return self._exact_rows
+            # Exact alias query → return exact alias rows (or empty).
+            return self._exact_rows
         if "app.create_entity(" in sql_lower and "alias" not in sql_lower:
             return [(str(self._entity_id),)]
         # Everything else (resolve_mention, create_account, create_review_item,
@@ -291,8 +296,12 @@ async def test_resolve_mention_tiebreak_queues_on_mid_confidence() -> None:
     assert result == "queued"
 
 
-async def test_resolve_mention_tiebreak_no_winner_creates() -> None:
-    """AI tiebreak returns winner_index=None → new entity created."""
+async def test_resolve_mention_tiebreak_no_winner_queues() -> None:
+    """AI tiebreak returns winner_index=None → queued for human review (not created).
+
+    When two exact-match candidates exist but the AI cannot choose, we queue rather
+    than creating a potential duplicate entity.
+    """
     entity_a = uuid4()
     entity_b = uuid4()
     alias_rows = [(str(entity_a),), (str(entity_b),)]
@@ -304,4 +313,4 @@ async def test_resolve_mention_tiebreak_no_winner_creates() -> None:
 
     result = await resolve_mention(pool, gw, MENTION_ID, WORKSPACE_ID, _ctx())
 
-    assert result == "created"
+    assert result == "queued"

@@ -48,11 +48,8 @@ async def index_source_record(
     async with pool.connection() as conn:  # type: ignore[union-attr]
         async with conn.cursor() as cur:
             await cur.execute(
-                """
-                SELECT org_id, workspace_id, entity_id, brief_id, content, scope, created_at
-                FROM public.source_record
-                WHERE id = %s
-                """,
+                "SELECT org_id, url, scope, created_at"
+                " FROM public.source_record WHERE id = %s",
                 (str(source_id),),
             )
             row = await cur.fetchone()
@@ -63,12 +60,11 @@ async def index_source_record(
         return 0
 
     org_id = row[0]
-    # workspace_id from row (row[1]) — use the passed workspace_id parameter
-    entity_id = row[2]
-    brief_id = row[3]
-    content = row[4]
-    scope = row[5]
-    occurred_at = row[6]
+    content = row[1] or ""  # url as Phase 1 text proxy (matches m03._content_text)
+    scope = row[2]
+    occurred_at = row[3]
+    entity_id = None  # source_record has no entity_id
+    brief_id = None  # source_record has no brief_id
 
     # 3. Early return if content is empty
     if not content:

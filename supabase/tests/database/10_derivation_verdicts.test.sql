@@ -137,7 +137,7 @@ select throws_ok(
       'test content guard',
       ('[' || repeat('0.1,', 1023) || '0.1]')::extensions.vector,
       'test-model',
-      'org'::public.data_scope
+      'tenant'::public.data_scope
     )
   $q$,
   '42501', null,
@@ -222,7 +222,7 @@ select isnt_empty(
       'test content first',
       ('[' || repeat('0.1,', 1023) || '0.1]')::extensions.vector,
       'test-model',
-      'org'::public.data_scope,
+      'tenant'::public.data_scope,
       now()
     )
   $q$,
@@ -244,7 +244,7 @@ select isnt_empty(
       'test content updated',
       ('[' || repeat('0.2,', 1023) || '0.2]')::extensions.vector,
       'test-model',
-      'org'::public.data_scope,
+      'tenant'::public.data_scope,
       now()
     )
   $q$,
