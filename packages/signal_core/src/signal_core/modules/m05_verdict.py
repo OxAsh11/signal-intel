@@ -127,23 +127,25 @@ async def compute_verdict(
             VerdictOutput,
             ctx,
         )
-    except (AiOutputInvalid, AiProviderError) as exc:
+    except AiProviderError as exc:
+        # Transient failure — let Procrastinate retry; never write a verdict.
         log.warning(
-            "verdict.ai_error",
+            "verdict.provider_error",
             entity_id=str(entity_id),
             workspace_id=str(workspace_id),
             error=str(exc),
         )
-        await upsert_verdict(
-            pool,  # type: ignore[arg-type]
-            brief_version_id,
-            entity_id,
-            "Unverified",
-            [],
-            [],
-            {"reason": "ai_error", "error": str(exc)},
+        raise
+
+    except AiOutputInvalid as exc:
+        # Permanent AI failure — re-raise so we never downgrade an existing verdict.
+        log.warning(
+            "verdict.output_invalid",
+            entity_id=str(entity_id),
+            workspace_id=str(workspace_id),
+            error=str(exc),
         )
-        return "Unverified"
+        raise
 
     # 8. Map supporting_claim_indices to claim_ids
     supporting_claim_rows = [
