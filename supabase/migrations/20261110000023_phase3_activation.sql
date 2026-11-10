@@ -644,9 +644,9 @@ CREATE OR REPLACE FUNCTION app.create_task(
   p_workspace_id    uuid,
   p_account_id      uuid,
   p_owner_member_id uuid DEFAULT NULL,
-  p_title           text DEFAULT NULL,
+  p_title           text,
   p_due_date        date DEFAULT NULL,
-  p_origin          text DEFAULT NULL
+  p_origin          text
 ) RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
