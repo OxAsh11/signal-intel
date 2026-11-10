@@ -520,17 +520,20 @@ def build_app(
     # ------------------------------------------------------------------
 
     @job(app, type="verdict.compute", kill_switch=kill_switch, queue="derive", retry=2)
-    async def verdict_compute_task(*, entity_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+    async def verdict_compute_task(*, entity_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_: Any) -> str | None:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
         import signal_core.modules.m05_verdict as _m05_verdict
+        job_args: dict[str, Any] = {"entity_id": entity_id, "workspace_id": workspace_id, "org_id": org_id}
+        if approval_id is not None:
+            job_args["approval_id"] = approval_id
         ctx = CallContext(
             org_id=_UUID(org_id),
             workspace_id=_UUID(workspace_id),
             brief_id=None,
             job_id=None,
             job_type="verdict.compute",
-            job_args={"entity_id": entity_id, "workspace_id": workspace_id, "org_id": org_id},
+            job_args=job_args,
         )
         return await _m05_verdict.compute_verdict(pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx)
 
@@ -539,7 +542,7 @@ def build_app(
     # ------------------------------------------------------------------
 
     @job(app, type="index.chunk_embed", kill_switch=kill_switch, queue="derive", retry=2)
-    async def index_chunk_embed_task(*, source_record_id: str, **_: Any) -> int:
+    async def index_chunk_embed_task(*, source_record_id: str, approval_id: str | None = None, **_: Any) -> int:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
         import signal_core.modules.m05_index as _m05_index
@@ -553,13 +556,16 @@ def build_app(
         if row is None:
             log.warning("index.source_record_not_found", source_record_id=source_record_id)
             return 0
+        job_args: dict[str, Any] = {"source_record_id": source_record_id}
+        if approval_id is not None:
+            job_args["approval_id"] = approval_id
         ctx = CallContext(
             org_id=_UUID(str(row[0])),
             workspace_id=_UUID(str(row[1])),
             brief_id=None,
             job_id=None,
             job_type="index.chunk_embed",
-            job_args={"source_record_id": source_record_id},
+            job_args=job_args,
         )
         return await _m05_index.index_source_record(pool, gateway, _UUID(source_record_id), _UUID(str(row[1])), ctx)
 

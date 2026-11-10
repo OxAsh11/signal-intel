@@ -90,7 +90,7 @@ insert into ids select 'ent_b', app.create_entity(
 -- A fixed doc_id for memory_chunk conflict-key tests (assertions 9 + 10)
 insert into ids select 'doc1', gen_random_uuid();
 
--- A predicate, source record, and loser entity for assertion 14 (claim merge).
+-- A predicate, source record, loser entity, and extractor version for assertion 14 (claim merge).
 insert into public.predicate (key, label, value_type)
   values ('revenue.d10', 'Revenue D10', 'number');
 insert into ids select 'pred10', id from public.predicate where key = 'revenue.d10';
@@ -106,15 +106,22 @@ insert into ids select 'loser', app.create_entity(
   (select v from ids where k = 'org'), 'company', 'Loser Corp D10', 'tenant'
 );
 
+-- extractor_version required by create_claim (NOT NULL).
+insert into public.extractor_version (capability, prompt_version, model, parser_version)
+  values ('extract.d10test', '0.1.0', 'claude-test', '0.1.0');
+insert into ids select 'extver10', id from public.extractor_version
+  where capability = 'extract.d10test';
+
 -- Claim on the loser entity (will be re-pointed to winner by merge).
+-- value is a JSON number (predicate value_type = 'number'); confidence cast to smallint.
 insert into ids select 'claim10', app.create_claim(
   (select v from ids where k = 'org'),
   (select v from ids where k = 'loser'),
   (select v from ids where k = 'pred10'),
-  '"100M"'::jsonb,
+  '100'::jsonb,
   null, null, null,
   (select v from ids where k = 'src10'),
-  now(), null, 80
+  now(), (select v from ids where k = 'extver10'), 80::smallint
 );
 
 -- ── 1. app.upsert_verdict exists ─────────────────────────────────────────────
@@ -317,8 +324,14 @@ select is(
 );
 
 -- ── 14. app.merge_entities re-points claims to winner (migration 0021 bypass) ─
--- Merges loser into ent (the winner from earlier assertions).
--- Verifies claim10's entity_id is now ent, not loser.
+-- Run merge first (its own statement so the UPDATE is visible to the next read).
+select app.merge_entities(
+  (select v from ids where k = 'ent'),
+  (select v from ids where k = 'loser'),
+  null
+);
+
+-- Now assert: claim10's entity_id must be ent, not loser.
 select is(
   (
     select entity_id from public.claim
@@ -326,11 +339,7 @@ select is(
   ),
   (select v from ids where k = 'ent'),
   'merge_entities re-points claims to winner entity'
-) from (select app.merge_entities(
-  (select v from ids where k = 'ent'),
-  (select v from ids where k = 'loser'),
-  null
-)) t;
+);
 
 select * from finish();
 rollback;

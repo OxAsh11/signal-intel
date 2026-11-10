@@ -11,9 +11,13 @@
 
 -- ── 1. is_merging() helper ────────────────────────────────────────────────────
 create function app.is_merging() returns boolean
-language sql stable security definer set search_path = '' as $$
+language sql stable set search_path = '' as $$
   select coalesce(current_setting('app.merging', true), '') = 'true'
 $$;
+
+revoke execute on function app.is_merging() from public, anon, authenticated;
+-- authenticated needs execute so claim_guard (invoked on authenticated UPDATE) can call it.
+grant execute on function app.is_merging() to postgres, service_role, authenticated;
 
 -- ── 2. Replace claim_immutable trigger ───────────────────────────────────────
 drop trigger claim_immutable on public.claim;
@@ -43,6 +47,9 @@ end $$;
 
 create trigger claim_immutable before update on public.claim
   for each row execute function app.claim_guard();
+
+revoke execute on function app.claim_guard() from public, anon, authenticated;
+grant execute on function app.claim_guard() to postgres, service_role;
 
 -- ── 3. Replace app.merge_entities with merge-flag ────────────────────────────
 create or replace function app.merge_entities(
