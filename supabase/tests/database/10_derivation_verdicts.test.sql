@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(13);
+select plan(14);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Users for auth
@@ -89,6 +89,33 @@ insert into ids select 'ent_b', app.create_entity(
 
 -- A fixed doc_id for memory_chunk conflict-key tests (assertions 9 + 10)
 insert into ids select 'doc1', gen_random_uuid();
+
+-- A predicate, source record, and loser entity for assertion 14 (claim merge).
+insert into public.predicate (key, label, value_type)
+  values ('revenue.d10', 'Revenue D10', 'number');
+insert into ids select 'pred10', id from public.predicate where key = 'revenue.d10';
+
+insert into ids select 'src10', app.create_source_record(
+  (select v from ids where k = 'org'),
+  (select v from ids where k = 'ws'),
+  'test-connector', 'news', 'https://deriv-test.example.com/article1',
+  now(), 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb10', null, 'en'
+);
+
+insert into ids select 'loser', app.create_entity(
+  (select v from ids where k = 'org'), 'company', 'Loser Corp D10', 'tenant'
+);
+
+-- Claim on the loser entity (will be re-pointed to winner by merge).
+insert into ids select 'claim10', app.create_claim(
+  (select v from ids where k = 'org'),
+  (select v from ids where k = 'loser'),
+  (select v from ids where k = 'pred10'),
+  '"100M"'::jsonb,
+  null, null, null,
+  (select v from ids where k = 'src10'),
+  now(), null, 80
+);
 
 -- ── 1. app.upsert_verdict exists ─────────────────────────────────────────────
 select has_function(
@@ -288,6 +315,22 @@ select is(
   1,
   'upsert_verdict ON CONFLICT updated not duplicated — count is 1'
 );
+
+-- ── 14. app.merge_entities re-points claims to winner (migration 0021 bypass) ─
+-- Merges loser into ent (the winner from earlier assertions).
+-- Verifies claim10's entity_id is now ent, not loser.
+select is(
+  (
+    select entity_id from public.claim
+    where id = (select v from ids where k = 'claim10')
+  ),
+  (select v from ids where k = 'ent'),
+  'merge_entities re-points claims to winner entity'
+) from (select app.merge_entities(
+  (select v from ids where k = 'ent'),
+  (select v from ids where k = 'loser'),
+  null
+)) t;
 
 select * from finish();
 rollback;

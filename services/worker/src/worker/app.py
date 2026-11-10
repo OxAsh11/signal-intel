@@ -530,7 +530,7 @@ def build_app(
             brief_id=None,
             job_id=None,
             job_type="verdict.compute",
-            job_args={"entity_id": entity_id, "workspace_id": workspace_id},
+            job_args={"entity_id": entity_id, "workspace_id": workspace_id, "org_id": org_id},
         )
         return await _m05_verdict.compute_verdict(pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx)
 
