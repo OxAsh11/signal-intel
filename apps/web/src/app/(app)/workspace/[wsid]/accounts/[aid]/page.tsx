@@ -15,7 +15,7 @@ export default async function AccountDetailPage({
   // First fetch account to get entity_id
   const { data: account } = await supabase
     .from("account")
-    .select("id, stage, entity:entity_id(id, display_name, kind)")
+    .select("id, stage, entity:entity_id(id, display_name, entity_type)")
     .eq("id", aid)
     .eq("workspace_id", wsid)
     .single();
@@ -87,7 +87,7 @@ export default async function AccountDetailPage({
 
     supabase
       .from("activity")
-      .select("id, kind, occurred_at, entity:entity_id(display_name)")
+      .select("id, kind, occurred_at, person:person_entity_id(display_name)")
       .eq("account_id", aid)
       .order("occurred_at", { ascending: false })
       .limit(50),
@@ -113,8 +113,8 @@ export default async function AccountDetailPage({
         ) : (
           <p>No verdict yet</p>
         )}
-        {(latestVerdict?.quotes as string[] | null | undefined)?.map((q: string, i: number) => (
-          <blockquote key={i}>{q}</blockquote>
+        {(latestVerdict?.quotes as { quote?: string }[] | null | undefined)?.map((q, i: number) => (
+          <blockquote key={i}>{q.quote ?? ""}</blockquote>
         ))}
       </section>
 
@@ -134,7 +134,7 @@ export default async function AccountDetailPage({
             readiness={latestScore.readiness as number}
             gates={
               latestScore.gates
-                ? (latestScore.gates as { name: string; hit: boolean }[])
+                ? (latestScore.gates as { reason: string }[]).map((g) => ({ name: g.reason, hit: true }))
                 : undefined
             }
           />
@@ -209,9 +209,9 @@ export default async function AccountDetailPage({
               <li key={a.id}>
                 {a.occurred_at ? new Date(a.occurred_at).toLocaleString() : "—"} · {a.kind}
                 {" · "}
-                {(Array.isArray(a.entity)
-                  ? a.entity[0]?.display_name
-                  : (a.entity as { display_name?: string } | null)?.display_name) ?? ""}
+                {(Array.isArray(a.person)
+                  ? a.person[0]?.display_name
+                  : (a.person as { display_name?: string } | null)?.display_name) ?? ""}
               </li>
             ))}
           </ul>

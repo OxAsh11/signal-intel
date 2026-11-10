@@ -63,11 +63,19 @@ insert into public.account (id, org_id, workspace_id, entity_id, stage)
 insert into ids select 'acct', id from public.account where entity_id = (select v from ids where k = 'ent');
 reset role;
 
--- Pre-generate activity UUIDs for idempotency and progression tests
+-- Insert real activity rows (account_stage_event.activity_id FK → public.activity)
+set local role service_role;
 insert into ids select 'act1', gen_random_uuid();
 insert into ids select 'act2', gen_random_uuid();
 insert into ids select 'act3', gen_random_uuid();
 insert into ids select 'act4', gen_random_uuid();
+insert into public.activity (id, org_id, workspace_id, account_id, kind, occurred_at)
+  values
+    ((select v from ids where k = 'act1'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'acct'), 'note_added', now()),
+    ((select v from ids where k = 'act2'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'acct'), 'note_added', now()),
+    ((select v from ids where k = 'act3'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'acct'), 'note_added', now()),
+    ((select v from ids where k = 'act4'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'acct'), 'note_added', now());
+reset role;
 
 -- ── 1. app.upsert_account_stage exists ───────────────────────────────────────
 select ok(
@@ -171,7 +179,7 @@ select is(
 
 -- ── 8. Advance Queued → Contacted; account.stage updated ─────────────────────
 set local role service_role;
-perform app.upsert_account_stage(
+select app.upsert_account_stage(
   (select v from ids where k = 'acct'),
   'Contacted'::public.stage,
   (select v from ids where k = 'act2'),
@@ -188,7 +196,7 @@ select is(
 -- SQL imposes no hard stop after Disqualified; the transition table is enforced
 -- by the Python layer. The function must return a uuid without error.
 set local role service_role;
-perform app.upsert_account_stage(
+select app.upsert_account_stage(
   (select v from ids where k = 'acct'),
   'Disqualified'::public.stage,
   (select v from ids where k = 'act3'),

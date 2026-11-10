@@ -77,7 +77,7 @@ insert into public.account (id, org_id, workspace_id, entity_id, stage)
 insert into ids select 'acct2', id from public.account where entity_id = (select v from ids where k = 'ent2');
 
 -- Verdict = Unverified for ent2 + bv (gate will cap High → Low in assertion 7)
-perform app.upsert_verdict(
+select app.upsert_verdict(
   (select v from ids where k = 'bv'),
   (select v from ids where k = 'ent2'),
   'Unverified'::public.verdict_value,
@@ -183,7 +183,7 @@ reset role;
 -- ── 7. Band gate: upsert_score with High band + Unverified verdict → stored Low
 -- SQL gate checks latest verdict and forces High/Medium → Low when Unverified.
 set local role service_role;
-perform app.upsert_score(
+select app.upsert_score(
   (select v from ids where k = 'acct2'),
   (select v from ids where k = 'bv'),
   80::smallint, 70::smallint, 60::smallint, 50::smallint, 40::smallint,

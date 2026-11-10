@@ -131,13 +131,7 @@ ALTER TABLE public.segment ENABLE ROW LEVEL SECURITY;
 CREATE POLICY segment_read ON public.segment
   FOR SELECT TO authenticated
   USING (app.has_workspace_role(workspace_id, 'Viewer'));
-CREATE POLICY segment_write ON public.segment
-  FOR INSERT TO authenticated
-  WITH CHECK (app.has_workspace_role(workspace_id, 'Editor'));
-CREATE POLICY segment_delete ON public.segment
-  FOR DELETE TO authenticated
-  USING (app.has_workspace_role(workspace_id, 'Editor'));
-GRANT SELECT, INSERT, DELETE ON public.segment TO authenticated;
+GRANT SELECT ON public.segment TO authenticated;
 
 -- ── 7. public.data_completeness ───────────────────────────────────────────────
 CREATE TABLE public.data_completeness (

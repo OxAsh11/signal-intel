@@ -142,26 +142,8 @@ async def generate_research_doc(
             )
             return existing_doc_id
 
-    # 5. Fetch source material
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT sr.id, sr.content, sr.published_at
-                FROM public.source_record sr
-                WHERE sr.org_id = %s
-                ORDER BY sr.created_at DESC LIMIT 20
-                """,
-                (str(org_id),),
-            )
-            source_rows = await cur.fetchall()
-
-    # Build sources text
-    sources_text = "\n\n".join(
-        f"[{row[0]}] {row[1] or ''}" for row in source_rows
-    )
-    if not sources_text:
-        sources_text = "(no source material available)"
+    # 5. Source material — deferred to Phase 3 (requires memory_chunk / storage integration)
+    sources_text = "(no source material available)"
 
     # Build sections JSON for the prompt
     sections_json = json.dumps(sections_config) if sections_config else "[]"
@@ -185,34 +167,10 @@ async def generate_research_doc(
 
     research_output: ResearchOutput = result.value
 
-    # 8. Parse source citations and write-back claims
+    # 8. Parse source citations — claim write-back deferred to Phase 3
     all_source_ids: list[str] = []
     for section in research_output.sections:
-        source_ids_in_section = _SOURCE_RE.findall(section.content)
-        for source_record_id in source_ids_in_section:
-            all_source_ids.append(source_record_id)
-            # Write-back claim — ignore errors (may already exist)
-            try:
-                async with pool.connection() as conn:  # type: ignore[union-attr]
-                    async with conn.cursor() as cur:
-                        await cur.execute(
-                            "SELECT app.create_claim(%s, %s, %s, %s, %s, %s, %s)",
-                            (
-                                str(org_id),
-                                str(workspace_id),
-                                str(entity_id),
-                                str(source_record_id),
-                                "research.finding",
-                                section.content,
-                                0.5,
-                            ),
-                        )
-            except Exception as exc:
-                log.warning(
-                    "research.create_claim_failed",
-                    source_record_id=source_record_id,
-                    error=str(exc),
-                )
+        all_source_ids.extend(_SOURCE_RE.findall(section.content))
 
     # Deduplicate source ids
     unique_source_ids = list(dict.fromkeys(all_source_ids))

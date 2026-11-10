@@ -682,7 +682,7 @@ def build_app(
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT id, org_id FROM public.workspace WHERE deleted_at IS NULL"
+                    "SELECT id, org_id FROM public.workspace"
                 )
                 rows = await cur.fetchall()
         results: dict = {}

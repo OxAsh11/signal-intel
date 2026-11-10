@@ -95,11 +95,11 @@ async def enrich_account(
 
     display_name: str = (entity_row[0] if entity_row else None) or "unknown"
 
-    # 3. Fetch company domain from entity properties
+    # 3. Fetch company domain from entity_alias (alias_type = 'domain')
     async with pool.connection() as conn:  # type: ignore[union-attr]
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT e.properties->>'domain' FROM public.entity e WHERE e.id = %s",
+                "SELECT ea.value_normalised FROM public.entity_alias ea WHERE ea.entity_id = %s AND ea.alias_type = 'domain' LIMIT 1",
                 (str(entity_id),),
             )
             domain_row = await cur.fetchone()
@@ -199,7 +199,7 @@ async def enrich_account(
         #          status::contact_verification_status, verified_at, provider)
         cp_type = result.get("type", contact_type)
         cp_value = result.get("value_encrypted", "")
-        cp_status = result.get("status", "pending")
+        cp_status = result.get("status", "unknown")
         cp_verified_at = result.get("verified_at", None)
 
         try:
