@@ -41,6 +41,7 @@ AI_STATUS_CRON = "*/10 * * * *"
 RELEASE_STALE_CRON = "*/5 * * * *"
 RADAR_HEALTH_CRON = "30 * * * *"  # every hour at :30
 IDENTITY_SWEEP_CRON = "0 2 * * *"  # daily, 02:00 UTC
+HEALTH_CHECK_CRON = "0 6 * * *"  # daily at 06:00 UTC
 RESUME_BATCH = 50
 
 
@@ -574,6 +575,140 @@ def build_app(
     import signal_core.modules.m05_index as _m05_index
     _m05_verdict.verdict_compute_job = verdict_compute_task
     _m05_index.index_chunk_embed_job = index_chunk_embed_task
+
+    # ------------------------------------------------------------------
+    # Phase 2 compute jobs
+    # ------------------------------------------------------------------
+
+    @job(app, type="score.compute", kill_switch=kill_switch, queue="compute", retry=2)
+    async def score_compute_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+        assert pool is not None, "pool required for score.compute"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m08_scoring as _m08
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT entity_id FROM public.account WHERE id = %s AND workspace_id = %s",
+                    (account_id, workspace_id),
+                )
+                row = await cur.fetchone()
+        if row is None:
+            log.warning("score.account_not_found", account_id=account_id)
+            return None
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="score.compute",
+            job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
+        )
+        return await _m08.compute_score(pool, _UUID(str(row[0])), _UUID(workspace_id), ctx)
+
+    @job(app, type="research.generate", kill_switch=kill_switch, queue="compute", retry=1)
+    async def research_generate_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m06_research as _m06
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="research.generate",
+            job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
+        )
+        return await _m06.generate_research_doc(pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx)
+
+    @job(app, type="enrichment.run", kill_switch=kill_switch, queue="compute", retry=1)
+    async def enrichment_run_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> int:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m07_enrichment as _m07
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="enrichment.run",
+            job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
+        )
+        return await _m07.enrich_account(pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx)
+
+    @job(app, type="account.stage_advance", kill_switch=kill_switch, queue="compute", retry=1)
+    async def stage_advance_task(*, account_id: str, activity_id: str | None = None, activity_kind: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+        assert pool is not None, "pool required for account.stage_advance"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m11_stage as _m11
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="account.stage_advance",
+            job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
+        )
+        return await _m11.advance_stage(
+            pool,
+            _UUID(account_id),
+            _UUID(activity_id) if activity_id else None,
+            activity_kind,
+            _UUID(workspace_id),
+            ctx,
+        )
+
+    @job(app, type="account.card.generate", kill_switch=kill_switch, queue="compute", retry=1)
+    async def account_card_generate_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        import signal_core.modules.m15_account_card as _m15
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="account.card.generate",
+            job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
+        )
+        return await _m15.generate_account_card(pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx)
+
+    @app.periodic(cron=HEALTH_CHECK_CRON, periodic_id="health.check")
+    @job(app, type="health.check", kill_switch=kill_switch, queue="health", retry=0)
+    async def health_check_task(timestamp: int) -> dict:
+        if pool is None:
+            return {}
+        from uuid import UUID as _UUID
+        import signal_core.modules.m17_health as _m17
+        async with pool.connection() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT id, org_id FROM public.workspace WHERE deleted_at IS NULL"
+                )
+                rows = await cur.fetchall()
+        results: dict = {}
+        for row in rows:
+            ws_id = _UUID(str(row[0]))
+            org_id = _UUID(str(row[1]))
+            ctx = CallContext(
+                org_id=org_id,
+                workspace_id=ws_id,
+                brief_id=None,
+                job_id=None,
+                job_type="health.check",
+                job_args={},
+            )
+            result = await _m17.check_completeness(pool, ws_id, ctx)
+            results[str(ws_id)] = result
+            log.info("health.check.done", workspace_id=str(ws_id), pipelines=list(result.keys()))
+        return results
+
+    # Phase 2 module handle wiring
+    import signal_core.modules.m11_stage as _m11_stage
+    import signal_core.modules.m15_account_card as _m15_account_card
+    _m04_identity.stage_advance_job = stage_advance_task
+    _m11_stage.stage_advance_job = stage_advance_task
+    _m05_verdict.account_card_generate_job = account_card_generate_task
+    _m15_account_card.account_card_generate_job = account_card_generate_task
 
     # ------------------------------------------------------------------
     # Dispatch router (updated for Phase 1c events)
