@@ -16,7 +16,7 @@ language sql stable set search_path = '' as $$
 $$;
 
 revoke execute on function app.is_merging() from public, anon, authenticated;
--- authenticated needs execute so claim_guard (invoked on authenticated UPDATE) can call it.
+-- Grant to authenticated is harmless and mirrors the pattern from 0014 for visibility.
 grant execute on function app.is_merging() to postgres, service_role, authenticated;
 
 -- ── 2. Replace claim_immutable trigger ───────────────────────────────────────
