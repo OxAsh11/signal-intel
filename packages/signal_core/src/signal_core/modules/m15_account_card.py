@@ -118,7 +118,7 @@ async def generate_account_card(
 
         card_computed_at = existing_card[1]
         latest_verdict_at = verdict_at_row[0] if verdict_at_row else None
-        if latest_verdict_at is None or card_computed_at >= latest_verdict_at:
+        if latest_verdict_at is None or card_computed_at > latest_verdict_at:
             log.info(
                 "account_card.reuse_existing",
                 account_id=str(account_id),
