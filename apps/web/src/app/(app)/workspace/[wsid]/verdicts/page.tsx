@@ -32,9 +32,9 @@ export default async function VerdictsPage({ params }: { params: Promise<{ wsid:
           </tr>
         </thead>
         <tbody>
-          {verdicts.map((v: { id: string; entity_id: string; value: string; computed_at: string | null; brief_version_id: string; entity: { display_name: string }[] | null }) => (
+          {verdicts.map((v: { id: string; entity_id: string; value: string; computed_at: string | null; brief_version_id: string; entity: { display_name: string } | { display_name: string }[] | null }) => (
             <tr key={v.id}>
-              <td>{(Array.isArray(v.entity) ? v.entity[0]?.display_name : null) ?? v.entity_id}</td>
+              <td>{(Array.isArray(v.entity) ? v.entity[0]?.display_name : v.entity?.display_name) ?? v.entity_id}</td>
               <td>
                 <span data-verdict={v.value}>{v.value}</span>
               </td>

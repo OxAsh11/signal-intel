@@ -281,17 +281,6 @@ async def extract_structured(
                     (str(mention_id), str(provisional_entity_id), "provisional", 0),
                 )
 
-            # Dispatch identity resolution (M4 is wired — log warning if handle is missing).
-            from signal_core.modules import m04_identity  # noqa: PLC0415
-
-            if m04_identity.identity_resolve_job is not None:
-                await m04_identity.identity_resolve_job.defer_async(
-                    mention_id=str(mention_id),
-                    workspace_id=str(workspace_id),
-                )
-            else:
-                log.warning("extraction.m4_not_wired", mention_id=str(mention_id))
-
         except Exception as exc:
             await _update_status(pool, source_record_id, "failed", str(exc))
             raise
@@ -336,6 +325,22 @@ async def extract_structured(
             await _update_status(pool, source_record_id, "failed", str(exc))
             raise
 
+    # ── Dispatch identity resolution — after all claims are written ──────────
+    # Deferring here (not inside the mention loop) guarantees claims exist when
+    # verdict.compute runs: identity and derive queues are concurrent, and an
+    # early dispatch would let compute_verdict see zero claims and write Unverified.
+    from signal_core.modules import m04_identity  # noqa: PLC0415
+
+    if m04_identity.identity_resolve_job is not None:
+        for mid in mention_ids:
+            await m04_identity.identity_resolve_job.defer_async(
+                mention_id=str(mid),
+                workspace_id=str(workspace_id),
+            )
+    else:
+        for mid in mention_ids:
+            log.warning("extraction.m4_not_wired", mention_id=str(mid))
+
     # ── Mark done ─────────────────────────────────────────────────────────────
     await _update_status(pool, source_record_id, "extracted")
 
@@ -346,7 +351,7 @@ async def extract_structured(
             from procrastinate.exceptions import AlreadyEnqueued
             with contextlib.suppress(AlreadyEnqueued):
                 await _m05_index.index_chunk_embed_job.configure(
-                    queueing_lock=str(source_record_id)
+                    queueing_lock=f"index:{source_record_id}"
                 ).defer_async(source_record_id=str(source_record_id))
     except (ImportError, AttributeError):
         pass

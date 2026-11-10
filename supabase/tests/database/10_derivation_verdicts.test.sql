@@ -5,13 +5,14 @@ select plan(13);
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Users for auth
 insert into auth.users (id, email, aud, role) values
+  ('00000000-0000-4000-8000-000000000e00', 'owner@deriv.test',  'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-000000000e01', 'editor@deriv.test', 'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-000000000e02', 'viewer@deriv.test', 'authenticated', 'authenticated'),
   ('00000000-0000-4000-8000-000000000e03', 'ob2@deriv.test',    'authenticated', 'authenticated');
 
 -- Create EI Deriv Alpha and EI Deriv Beta organisations.
 set local role authenticated;
-select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000e01","role":"authenticated"}', true);
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000e00","role":"authenticated"}', true);
 select public.create_organisation('EI Deriv Alpha');
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-000000000e03","role":"authenticated"}', true);
 select public.create_organisation('EI Deriv Beta');
