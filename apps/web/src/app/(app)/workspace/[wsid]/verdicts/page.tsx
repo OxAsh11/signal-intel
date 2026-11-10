@@ -3,8 +3,8 @@ import { createClient } from "@/lib/supabase/server";
 export default async function VerdictsPage({ params }: { params: Promise<{ wsid: string }> }) {
   const { wsid } = await params;
   const supabase = await createClient();
+  if (!supabase) return null;
 
-  // @ts-expect-error supabase types pending — verdict table not yet in generated types
   const { data: verdicts } = await supabase
     .from("verdict")
     .select("id, entity_id, value, computed_at, brief_version_id, entity:entity_id(display_name)")

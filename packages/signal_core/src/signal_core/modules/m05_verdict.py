@@ -53,7 +53,7 @@ async def compute_verdict(
                 SELECT bv.id, bv.config->>'hypothesis'
                 FROM public.brief_version bv
                 WHERE bv.workspace_id = %s
-                ORDER BY bv.created_at DESC
+                ORDER BY bv.published_at DESC
                 LIMIT 1
                 """,
                 (str(workspace_id),),
