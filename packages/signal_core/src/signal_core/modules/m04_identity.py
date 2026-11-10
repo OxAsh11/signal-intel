@@ -306,15 +306,20 @@ async def resolve_mention(
     if confidence >= 90:
         # Capture provisional before re-pointing (mention.entity_id = provisional from M3).
         provisional_id = mention.get("entity_id")
+        account_id_attached: str | None = None
         async with pool.connection() as conn:
             await conn.execute(
                 "SELECT app.resolve_mention(%s, %s, %s, %s::smallint)",
                 (str(mention_id), entity_id, alias_type, confidence),
             )
-            await conn.execute(
-                "SELECT app.create_account(%s, %s, %s)",
-                (str(org_id), str(workspace_id), entity_id),
-            )
+            async with conn.cursor() as _acur:
+                await _acur.execute(
+                    "SELECT app.create_account(%s, %s, %s)",
+                    (str(org_id), str(workspace_id), entity_id),
+                )
+                _acrow = await _acur.fetchone()
+                if _acrow is not None:
+                    account_id_attached = str(_acrow[0])
             # Merge provisional entity into winner so claims transfer.
             if provisional_id and str(provisional_id) != entity_id:
                 await conn.execute(
@@ -323,6 +328,14 @@ async def resolve_mention(
                 )
         log.info("identity.attached", mention_id=str(mention_id), entity_id=entity_id, alias_type=alias_type, confidence=confidence)
         await _defer_verdict(entity_id, org_id, workspace_id)
+        if stage_advance_job is not None and account_id_attached is not None:
+            await stage_advance_job.defer_async(
+                account_id=account_id_attached,
+                activity_id=None,
+                activity_kind="account_created",
+                workspace_id=str(workspace_id),
+                org_id=str(org_id),
+            )
         return "attached"
 
     if confidence >= 40:
@@ -410,15 +423,20 @@ async def _create_new(
                 ),
             )
 
+    account_id_created: str | None = None
     async with pool.connection() as conn:
         await conn.execute(
             "SELECT app.resolve_mention(%s, %s, %s, %s::smallint)",
             (str(mention_id), entity_id, "new_entity", 100),
         )
-        await conn.execute(
-            "SELECT app.create_account(%s, %s, %s)",
-            (str(org_id), str(workspace_id), entity_id),
-        )
+        async with conn.cursor() as _acur2:
+            await _acur2.execute(
+                "SELECT app.create_account(%s, %s, %s)",
+                (str(org_id), str(workspace_id), entity_id),
+            )
+            _acrow2 = await _acur2.fetchone()
+            if _acrow2 is not None:
+                account_id_created = str(_acrow2[0])
 
     log.info(
         "identity.created",
@@ -427,6 +445,14 @@ async def _create_new(
         display_name=display_name,
     )
     await _defer_verdict(entity_id, org_id, workspace_id)
+    if stage_advance_job is not None and account_id_created is not None:
+        await stage_advance_job.defer_async(
+            account_id=account_id_created,
+            activity_id=None,
+            activity_kind="account_created",
+            workspace_id=str(workspace_id),
+            org_id=str(org_id),
+        )
     return "created"
 
 
@@ -481,3 +507,4 @@ async def duplicate_sweep(
 
 identity_resolve_job: object | None = None
 identity_duplicate_sweep_job: object | None = None
+stage_advance_job: object | None = None
