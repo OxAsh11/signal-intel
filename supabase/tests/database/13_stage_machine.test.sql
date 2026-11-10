@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(9);
+select plan(10);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Users for auth
@@ -138,6 +138,15 @@ select is(
   'second upsert_account_stage with same activity_id returns same uuid (idempotent)'
 );
 reset role;
+
+-- ── 5b. Only one event row exists for act1 after idempotent call ─────────────
+select is(
+  (select count(*)::int from public.account_stage_event
+   where account_id  = (select v from ids where k = 'acct')
+     and activity_id = (select v from ids where k = 'act1')),
+  1,
+  'only one account_stage_event row for act1 after idempotent second call'
+);
 
 -- ── 6. Direct UPDATE to account.stage blocked for authenticated (42501) ───────
 set local role authenticated;
