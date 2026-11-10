@@ -42,6 +42,76 @@ async def upsert_verdict(
     return UUID(str(row[0]))
 
 
+async def upsert_score(
+    pool: AsyncConnectionPool,
+    account_id: UUID,
+    brief_version_id: UUID,
+    fit: int,
+    evidence: int,
+    scale: int,
+    timing: int,
+    reachability: int,
+    priority: float,
+    readiness: int,
+    band: str,
+    gates: list,
+    explanation: dict,
+    inputs: dict,
+) -> UUID:
+    """Call app.upsert_score RPC and return the score UUID."""
+    sql = (
+        "SELECT app.upsert_score("
+        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::public.band, %s::jsonb, %s::jsonb, %s::jsonb"
+        ")"
+    )
+    params = (
+        str(account_id),
+        str(brief_version_id),
+        fit,
+        evidence,
+        scale,
+        timing,
+        reachability,
+        priority,
+        readiness,
+        band,
+        json.dumps(gates),
+        json.dumps(explanation),
+        json.dumps(inputs),
+    )
+    async with pool.connection() as conn:
+        cur = await conn.execute(sql, params)
+        row = await cur.fetchone()
+    return UUID(str(row[0]))
+
+
+async def upsert_label(
+    pool: AsyncConnectionPool,
+    account_id: UUID,
+    brief_version_id: UUID,
+    kind: str,
+    value: str,
+    inputs: dict,
+) -> UUID:
+    """Call app.upsert_label RPC and return the label UUID."""
+    sql = (
+        "SELECT app.upsert_label("
+        "%s, %s, %s, %s, %s::jsonb"
+        ")"
+    )
+    params = (
+        str(account_id),
+        str(brief_version_id),
+        kind,
+        value,
+        json.dumps(inputs),
+    )
+    async with pool.connection() as conn:
+        cur = await conn.execute(sql, params)
+        row = await cur.fetchone()
+    return UUID(str(row[0]))
+
+
 async def upsert_memory_chunk(
     pool: AsyncConnectionPool,
     org_id: UUID,
