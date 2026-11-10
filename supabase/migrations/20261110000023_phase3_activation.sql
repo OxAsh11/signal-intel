@@ -643,10 +643,10 @@ CREATE OR REPLACE FUNCTION app.create_task(
   p_org_id          uuid,
   p_workspace_id    uuid,
   p_account_id      uuid,
-  p_owner_member_id uuid DEFAULT NULL,
   p_title           text,
-  p_due_date        date DEFAULT NULL,
-  p_origin          text
+  p_origin          text,
+  p_owner_member_id uuid DEFAULT NULL,
+  p_due_date        date DEFAULT NULL
 ) RETURNS uuid
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = '' AS $$
 DECLARE
@@ -674,7 +674,7 @@ BEGIN
   RETURN v_task_id;
 END $$;
 
-REVOKE EXECUTE ON FUNCTION app.create_task(uuid, uuid, uuid, uuid, text, date, text)
+REVOKE EXECUTE ON FUNCTION app.create_task(uuid, uuid, uuid, text, text, uuid, date)
   FROM public, anon, authenticated;
 -- NO GRANT to authenticated — called via service_role only
 
