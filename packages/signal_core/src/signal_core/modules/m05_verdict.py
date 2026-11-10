@@ -6,14 +6,18 @@ Flow:
   3. If no claims → Unverified without AI call.
   4. Otherwise run AI (Capability.JUDGE) with the verdict prompt.
   5. Write verdict via app.upsert_verdict (through derivation writer).
+  6. Defer account_card_generate_job if wired.
 """
 
 from __future__ import annotations
 
+import contextlib
 from typing import Literal
 from uuid import UUID
 
 from pydantic import BaseModel
+
+import signal_core.modules.m15_account_card as _m15
 
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
@@ -24,8 +28,9 @@ from signal_core.metering import CallContext
 
 log = get_logger(__name__)
 
-# Module-level handle wired by build_app()
+# Module-level handles wired by build_app()
 verdict_compute_job: object | None = None
+account_card_generate_job: object | None = None
 
 
 class VerdictOutput(BaseModel):
@@ -103,6 +108,8 @@ async def compute_verdict(
             [],
             {"reason": "no_claims"},
         )
+        # Defer account card generation if job handle is wired
+        await _defer_account_card(pool, entity_id, workspace_id)
         return "Unverified"
 
     # 5. Build claims_text
@@ -183,4 +190,47 @@ async def compute_verdict(
         inputs,
     )
 
+    # 13. Defer account card generation if job handle is wired
+    await _defer_account_card(pool, entity_id, workspace_id)
+
     return final_value
+
+
+async def _defer_account_card(
+    pool: object,
+    entity_id: UUID,
+    workspace_id: UUID,
+) -> None:
+    """Resolve account_id from entity_id + workspace_id and defer account card job."""
+    if _m15.account_card_generate_job is None:
+        return
+
+    # Resolve account_id from entity_id + workspace_id
+    account_id: UUID | None = None
+    org_id: UUID | None = None
+    with contextlib.suppress(Exception):
+        async with pool.connection() as conn:  # type: ignore[union-attr]
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT a.id, a.org_id FROM public.account a WHERE a.entity_id = %s AND a.workspace_id = %s LIMIT 1",
+                    (str(entity_id), str(workspace_id)),
+                )
+                row = await cur.fetchone()
+        if row is not None:
+            account_id = UUID(str(row[0]))
+            org_id = UUID(str(row[1]))
+
+    if account_id is None:
+        log.info(
+            "verdict.no_account_for_entity",
+            entity_id=str(entity_id),
+            workspace_id=str(workspace_id),
+        )
+        return
+
+    with contextlib.suppress(Exception):
+        await _m15.account_card_generate_job.defer_async(  # type: ignore[union-attr]
+            account_id=str(account_id),
+            workspace_id=str(workspace_id),
+            org_id=str(org_id),
+        )
