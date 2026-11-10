@@ -80,7 +80,7 @@ CREATE TABLE public.contact_point (
   status           public.contact_verification_status NOT NULL DEFAULT 'unknown',
   verified_at      timestamptz,
   provider         text,
-  scope            public.data_scope NOT NULL DEFAULT 'tenant',
+  scope            public.data_scope NOT NULL DEFAULT 'tenant' CHECK (scope = 'tenant'),
   created_at       timestamptz NOT NULL DEFAULT now(),
   CONSTRAINT contact_point_unique UNIQUE (entity_id, type, value_encrypted)
 );
@@ -137,7 +137,7 @@ CREATE POLICY segment_write ON public.segment
 CREATE POLICY segment_delete ON public.segment
   FOR DELETE TO authenticated
   USING (app.has_workspace_role(workspace_id, 'Editor'));
-GRANT SELECT ON public.segment TO authenticated;
+GRANT SELECT, INSERT, DELETE ON public.segment TO authenticated;
 
 -- ── 7. public.data_completeness ───────────────────────────────────────────────
 CREATE TABLE public.data_completeness (
@@ -236,23 +236,23 @@ BEGIN
       p_account_id, p_brief_version_id USING ERRCODE = '42501';
   END IF;
 
-  -- Band gate: if band is High or Medium, check entity's latest verdict for this brief_version.
-  -- Look up the entity linked to this account for this brief_version via verdict.
-  IF v_band IN ('High', 'Medium') THEN
-    -- Find the entity_id for this account; use the account's primary entity if available,
-    -- otherwise find any verdict for account's entity + brief_version.
-    SELECT a.entity_id INTO v_entity_id
-      FROM public.account a WHERE a.id = p_account_id;
+  -- Band gate: check entity's latest verdict and enforce rules regardless of input band.
+  -- Contradicted always forces Excluded; Unverified caps High/Medium at Low.
+  SELECT a.entity_id INTO v_entity_id
+    FROM public.account a WHERE a.id = p_account_id;
 
-    IF v_entity_id IS NOT NULL THEN
-      SELECT v.value INTO v_verdict_value
-        FROM public.verdict v
-       WHERE v.entity_id = v_entity_id AND v.brief_version_id = p_brief_version_id;
+  IF v_entity_id IS NOT NULL THEN
+    SELECT v.value INTO v_verdict_value
+      FROM public.verdict v
+     WHERE v.entity_id = v_entity_id AND v.brief_version_id = p_brief_version_id
+     ORDER BY v.computed_at DESC LIMIT 1;
 
-      IF v_verdict_value = 'Unverified' THEN
-        v_band  := 'Low';
-        v_gates := v_gates || '[{"reason":"verdict_unverified"}]'::jsonb;
-      END IF;
+    IF v_verdict_value = 'Contradicted' THEN
+      v_band  := 'Excluded';
+      v_gates := v_gates || '[{"reason":"verdict_contradicted"}]'::jsonb;
+    ELSIF v_verdict_value = 'Unverified' AND v_band IN ('High', 'Medium') THEN
+      v_band  := 'Low';
+      v_gates := v_gates || '[{"reason":"verdict_unverified"}]'::jsonb;
     END IF;
   END IF;
 
