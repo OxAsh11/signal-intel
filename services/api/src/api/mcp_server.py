@@ -50,7 +50,7 @@ class BearerAuthMiddleware:
         self._get_pool = get_pool_fn
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
-        if scope["type"] == "http":
+        if scope["type"] in ("http", "websocket"):
             headers = {k.lower(): v for k, v in scope.get("headers", [])}
             auth = headers.get(b"authorization", b"").decode()
             if not auth.startswith("Bearer "):
@@ -151,33 +151,43 @@ async def search_account(query: str, workspace_id: str, limit: int = 10) -> list
 
 
 @mcp.tool()
-async def get_claims(entity_id: str, predicate_key: str | None = None) -> list[dict]:
-    """Return active claims for an entity, optionally filtered by predicate key."""
+async def get_claims(
+    entity_id: str, workspace_id: str, predicate_key: str | None = None
+) -> list[dict]:
+    """Return active claims for an entity in a workspace, optionally filtered by predicate key."""
     pool = get_pool()
     async with pool.connection() as conn:
         await conn.execute("SET app.channel = 'mcp'")
         async with conn.cursor() as cur:
+            workspace_check = (
+                "AND EXISTS ("
+                "SELECT 1 FROM public.account a "
+                "WHERE a.entity_id = c.entity_id AND a.workspace_id = %s"
+                ")"
+            )
             if predicate_key is not None:
                 await cur.execute(
-                    """
+                    f"""
                     SELECT c.id, p.key, c.value, c.quote, c.source_record_id
                     FROM public.claim c
                     JOIN public.predicate p ON p.id = c.predicate_id
                     WHERE c.entity_id = %s AND p.key = %s AND c.status = 'active'
+                      {workspace_check}
                     ORDER BY c.created_at DESC
                     """,
-                    (entity_id, predicate_key),
+                    (entity_id, predicate_key, workspace_id),
                 )
             else:
                 await cur.execute(
-                    """
+                    f"""
                     SELECT c.id, p.key, c.value, c.quote, c.source_record_id
                     FROM public.claim c
                     JOIN public.predicate p ON p.id = c.predicate_id
                     WHERE c.entity_id = %s AND c.status = 'active'
+                      {workspace_check}
                     ORDER BY p.key, c.created_at DESC
                     """,
-                    (entity_id,),
+                    (entity_id, workspace_id),
                 )
             rows = await cur.fetchall()
     return [
@@ -207,7 +217,7 @@ async def find_accounts(
             where = "a.workspace_id = %s"
             params: list = [workspace_id]
             if band is not None:
-                where += " AND s.band = %s"
+                where += " AND latest_s.band = %s"
                 params.append(band)
             if stage is not None:
                 where += " AND a.stage = %s"
@@ -215,10 +225,15 @@ async def find_accounts(
             params.append(limit)
             await cur.execute(
                 f"""
-                SELECT a.id, e.display_name, a.stage, s.band
+                WITH latest_s AS (
+                    SELECT DISTINCT ON (account_id) account_id, band
+                    FROM public.score
+                    ORDER BY account_id, computed_at DESC
+                )
+                SELECT a.id, e.display_name, a.stage, latest_s.band
                 FROM public.account a
                 JOIN public.entity e ON e.id = a.entity_id
-                LEFT JOIN public.score s ON s.account_id = a.id
+                LEFT JOIN latest_s ON latest_s.account_id = a.id
                 WHERE {where}
                 ORDER BY e.display_name
                 LIMIT %s
