@@ -69,7 +69,7 @@ insert into ids select 'men_loser',
     (select v from ids where k = 'sr'),
     'company'::public.entity_type,
     'Acme Duplicate', null, null, '{}'::jsonb);
-perform app.resolve_mention((select v from ids where k = 'men_loser'), (select v from ids where k = 'ent_loser'), 'provisional', 0);
+select app.resolve_mention((select v from ids where k = 'men_loser'), (select v from ids where k = 'ent_loser'), 'provisional', 0);
 
 -- Review item for resolve tests (service_role; mention 'men' + candidate entity 'ent')
 insert into ids select 'rev',
@@ -133,11 +133,11 @@ declare
   v_conf smallint;
 begin
   v_id1 := app.create_entity_alias(
-    (select v from public.organisation where name = 'EI Alpha'),
+    (select v from ids where k = 'org'),
     (select v from ids where k = 'ent'),
     'domain'::public.alias_type, 'acme.com', 60, (select v from ids where k = 'sr'));
   v_id2 := app.create_entity_alias(
-    (select v from public.organisation where name = 'EI Alpha'),
+    (select v from ids where k = 'org'),
     (select v from ids where k = 'ent'),
     'domain'::public.alias_type, 'acme.com', 90, (select v from ids where k = 'sr'));
   -- Second insert should upsert (same entity+type+value_normalised) → confidence updated.
@@ -172,16 +172,16 @@ begin
     (select v from ids where k = 'org'),
     (select v from ids where k = 'ws'),
     (select v from ids where k = 'ent'));
-  -- Second call returns null (ON CONFLICT DO NOTHING → no row to RETURN)
-  if v_id2 is not null then
-    raise exception 'expected null on duplicate, got %', v_id2;
+  -- Second call returns existing id (ON CONFLICT DO NOTHING → fallback SELECT)
+  if v_id2 is null or v_id2 <> v_id1 then
+    raise exception 'expected existing id on duplicate, got %', v_id2;
   end if;
 end;
 $$;
-select pass('7. create_account returns null on duplicate workspace+entity');
+select pass('7. create_account returns existing id on duplicate workspace+entity');
 
 -- ── Test 8: merge_entities moves loser mentions to winner; loser = merged ─────
-perform app.merge_entities(
+select app.merge_entities(
   (select v from ids where k = 'ent'),
   (select v from ids where k = 'ent_loser'),
   null);
