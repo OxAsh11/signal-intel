@@ -50,7 +50,9 @@ BEGIN
     VALUES (p_org_id, p_workspace_id, p_brief_version_id, jsonb_build_array(p_example))
     ON CONFLICT (brief_version_id) DO UPDATE
         SET examples    = evaluation_set.examples || jsonb_build_array(p_example),
-            updated_at  = now();
+            updated_at  = now()
+        WHERE evaluation_set.org_id = p_org_id
+          AND evaluation_set.workspace_id = p_workspace_id;
 END;
 $$;
 

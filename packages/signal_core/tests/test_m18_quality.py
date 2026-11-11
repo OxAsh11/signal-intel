@@ -134,6 +134,8 @@ async def test_is_suppressed_true():
     cur.execute.assert_called_once()
     call_args = cur.execute.call_args[0]
     assert "suppression_list" in call_args[0]
+    assert str(org_id) in call_args[1]
+    assert str(person_id) in call_args[1]
 
 
 @pytest.mark.asyncio
