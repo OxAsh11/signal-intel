@@ -51,19 +51,21 @@ export default async function ReportsPage({ params }: { params: Promise<{ wsid: 
     <div>
       <h1>Reports</h1>
 
-      {!briefId && <p>No brief published yet — metrics unavailable.</p>}
-
-      <section>
-        <h2>Key metrics</h2>
-        <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
-          {metricKeys.map((key) => (
-            <div className="metric-tile" key={key}>
-              <span className="metric-label">{key}</span>
-              <span className="metric-value">{metrics[key] ?? "—"}</span>
-            </div>
-          ))}
-        </div>
-      </section>
+      {!briefId ? (
+        <p>No brief published yet — metrics unavailable.</p>
+      ) : (
+        <section>
+          <h2>Key metrics</h2>
+          <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
+            {metricKeys.map((key) => (
+              <div className="metric-tile" key={key}>
+                <span className="metric-label">{key}</span>
+                <span className="metric-value">{metrics[key] ?? "—"}</span>
+              </div>
+            ))}
+          </div>
+        </section>
+      )}
 
       <section>
         <h2>Stage funnel</h2>
