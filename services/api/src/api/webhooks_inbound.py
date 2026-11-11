@@ -77,6 +77,8 @@ async def ingest_webhook(integration_id: UUID, request: Request) -> dict[str, An
                 raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
 
             external_id: str | None = event.get("external_id")
+            if not external_id:
+                raise HTTPException(status_code=400, detail="external_id is required")
 
             # Step 5: deduplication — return 200 immediately if already stored
             await cur.execute(

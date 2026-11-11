@@ -212,6 +212,29 @@ async def test_valid_inbound_webhook_stores_activity(valid_client: AsyncClient) 
     assert resp.status_code == 200
     assert resp.json() == {"ok": True}
 
+    # Verify create_activity was called with the expected kind.
+    cursor = valid_client._transport.app.state.pool._cursor
+    create_activity_calls = [
+        params for sql, params in cursor._executed if "create_activity" in sql
+    ]
+    assert len(create_activity_calls) == 1
+    _org, _ws, _acct, kind, _occ, _int, ext_id = create_activity_calls[0]
+    assert kind == "reply_received"
+    assert ext_id == "evt-001"
+
+
+async def test_missing_external_id_returns_400(bad_sig_client: AsyncClient) -> None:
+    """Payload without external_id → 400 Bad Request."""
+    body = json.dumps({"type": "email_replied"}).encode()
+    sig = _compute_sig(body)
+
+    resp = await bad_sig_client.post(
+        f"/v1/webhooks/{INTEGRATION_ID}",
+        content=body,
+        headers={"X-Signal-Signature": f"sha256={sig}"},
+    )
+    assert resp.status_code == 400
+
 
 async def test_invalid_signature_returns_401(bad_sig_client: AsyncClient) -> None:
     """Wrong HMAC → 401 Unauthorized."""
