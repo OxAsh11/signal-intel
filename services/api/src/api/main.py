@@ -12,7 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 import api.mcp_server as mcp_module
-from api.mcp_server import mcp
+from api.mcp_server import BearerAuthMiddleware, mcp
 from api.routes import accounts, activity, briefs, campaigns, claims, entities, meetings, tasks
 from api.webhooks_inbound import router as webhooks_router
 
@@ -94,8 +94,8 @@ def build_app() -> FastAPI:
     # Inbound webhook ingestion (no Bearer auth — HMAC-signed per integration)
     app.include_router(webhooks_router, prefix="/v1")
 
-    # MCP server — SSE sub-app at /mcp
-    app.mount("/mcp", mcp.sse_app())
+    # MCP server — SSE sub-app at /mcp, Bearer-auth gated
+    app.mount("/mcp", BearerAuthMiddleware(mcp.sse_app(), mcp_module.get_pool))
 
     return app
 
