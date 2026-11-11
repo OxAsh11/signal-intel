@@ -11,6 +11,8 @@ import uvicorn
 from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
+import api.mcp_server as mcp_module
+from api.mcp_server import mcp
 from api.routes import accounts, activity, briefs, campaigns, claims, entities, meetings, tasks
 from api.webhooks_inbound import router as webhooks_router
 
@@ -34,6 +36,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             )
             await pool.open()
             app.state.pool = pool
+            mcp_module._pool = pool
         except Exception:
             app.state.pool = None
     else:
@@ -90,6 +93,9 @@ def build_app() -> FastAPI:
 
     # Inbound webhook ingestion (no Bearer auth — HMAC-signed per integration)
     app.include_router(webhooks_router, prefix="/v1")
+
+    # MCP server — SSE sub-app at /mcp
+    app.mount("/mcp", mcp.sse_app())
 
     return app
 
