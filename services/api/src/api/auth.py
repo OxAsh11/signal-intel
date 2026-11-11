@@ -61,12 +61,8 @@ async def get_token(
                 scopes=row[3] if row[3] is not None else [],
             )
 
-            # Update last_used_at via service_role (direct update on api_token is allowed
-            # for the service_role key since we own the token table housekeeping).
-            await cur.execute(
-                "UPDATE public.api_token SET last_used_at = now() WHERE id = %s",
-                (str(token.id),),
-            )
+            # Update last_used_at via SECURITY DEFINER RPC (S8 write discipline).
+            await cur.execute("SELECT app.touch_api_token(%s)", (str(token.id),))
 
     return token
 
