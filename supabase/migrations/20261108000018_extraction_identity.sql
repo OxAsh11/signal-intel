@@ -277,7 +277,7 @@ BEGIN
   END IF;
   -- 'skip' falls through — just updates status below
 
-  IF p_action NOT IN ('merge', 'skip', 'create_new') THEN
+  IF p_action IS NULL OR p_action NOT IN ('merge', 'skip', 'create_new') THEN
     RAISE EXCEPTION 'invalid action: %', p_action USING ERRCODE = '22023';
   END IF;
 
@@ -285,7 +285,7 @@ BEGIN
   SET status = CASE p_action
                  WHEN 'merge'      THEN 'merged'
                  WHEN 'skip'       THEN 'skipped'
-                 ELSE 'created_new'
+                 WHEN 'create_new' THEN 'created_new'
                END,
       resolved_by = auth.uid(),
       resolved_at = now()
