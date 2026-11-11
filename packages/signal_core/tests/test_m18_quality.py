@@ -51,7 +51,7 @@ def _make_pool(fetchone_return=None, fetchall_return=None):
 @pytest.mark.asyncio
 async def test_submit_dsr_deletion_calls_rpc():
     """submit_dsr with type_='deletion' calls the RPC and returns a UUID."""
-    pool, conn, cur = _make_pool(fetchone_return=(str(_DSR_ID),))
+    pool, _conn, cur = _make_pool(fetchone_return=(str(_DSR_ID),))
 
     result = await submit_dsr(pool, org_id, person_id, "deletion", "test@example.com")
 
@@ -66,7 +66,7 @@ async def test_submit_dsr_deletion_calls_rpc():
 @pytest.mark.asyncio
 async def test_submit_dsr_access_calls_rpc():
     """submit_dsr with type_='access' calls the RPC and returns a UUID."""
-    pool, conn, cur = _make_pool(fetchone_return=(str(_DSR_ID),))
+    pool, _conn, cur = _make_pool(fetchone_return=(str(_DSR_ID),))
 
     result = await submit_dsr(pool, org_id, person_id, "access", "requester@example.com")
 
@@ -86,7 +86,7 @@ async def test_submit_dsr_access_calls_rpc():
 @pytest.mark.asyncio
 async def test_record_lawful_basis_returns_uuid():
     """record_lawful_basis calls the RPC and returns a UUID."""
-    pool, conn, cur = _make_pool(fetchone_return=(str(_BASIS_ID),))
+    pool, _conn, cur = _make_pool(fetchone_return=(str(_BASIS_ID),))
 
     result = await record_lawful_basis(pool, org_id, "email_outreach", "legitimate_interest")
 
@@ -105,7 +105,7 @@ async def test_record_lawful_basis_returns_uuid():
 @pytest.mark.asyncio
 async def test_add_evaluation_example_calls_rpc():
     """add_evaluation_example calls the RPC with correct params."""
-    pool, conn, cur = _make_pool(fetchone_return=None)
+    pool, _conn, cur = _make_pool(fetchone_return=None)
 
     example = {"input": "Who is the CEO?", "expected": "Jane Doe"}
     await add_evaluation_example(pool, org_id, ws_id, brief_ver_id, example)
@@ -115,6 +115,7 @@ async def test_add_evaluation_example_calls_rpc():
     assert "app.add_evaluation_example" in call_args[0]
     # The example JSON must appear in the params
     import json
+
     assert json.dumps(example) in call_args[1]
 
 
@@ -126,7 +127,7 @@ async def test_add_evaluation_example_calls_rpc():
 @pytest.mark.asyncio
 async def test_is_suppressed_true():
     """is_suppressed returns True when a matching row exists."""
-    pool, conn, cur = _make_pool(fetchone_return=(True,))
+    pool, _conn, cur = _make_pool(fetchone_return=(True,))
 
     result = await is_suppressed(pool, org_id, person_id)
 
@@ -141,7 +142,7 @@ async def test_is_suppressed_true():
 @pytest.mark.asyncio
 async def test_is_suppressed_false():
     """is_suppressed returns False when no matching row exists."""
-    pool, conn, cur = _make_pool(fetchone_return=(False,))
+    pool, _conn, _cur = _make_pool(fetchone_return=(False,))
 
     result = await is_suppressed(pool, org_id, person_id)
 

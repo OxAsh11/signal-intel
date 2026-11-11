@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import pytest
-from unittest.mock import AsyncMock, MagicMock, call
-from uuid import UUID, uuid4
+from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
-from signal_core.derivation.writer import upsert_verdict, upsert_memory_chunk
+import pytest
+
+from signal_core.derivation.writer import upsert_memory_chunk, upsert_verdict
 
 
 @pytest.mark.asyncio
@@ -44,8 +45,19 @@ async def test_upsert_memory_chunk_calls_rpc():
     pool = MagicMock()
     pool.connection = MagicMock(return_value=conn_cm)
     result = await upsert_memory_chunk(
-        pool, uuid4(), uuid4(), None, None,
-        "source_record", uuid4(), 0, "hello", [0.1] * 1024, "voyage-3", "tenant", None
+        pool,
+        uuid4(),
+        uuid4(),
+        None,
+        None,
+        "source_record",
+        uuid4(),
+        0,
+        "hello",
+        [0.1] * 1024,
+        "voyage-3",
+        "tenant",
+        None,
     )
     assert result == chunk_id
     sql = conn.execute.call_args[0][0]

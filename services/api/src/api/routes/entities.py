@@ -51,14 +51,13 @@ async def list_entities(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, entity_type, display_name, status, updated_at"
-                f" FROM public.entity WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, entity_type, display_name, status, updated_at"
+            f" FROM public.entity WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {
@@ -85,14 +84,13 @@ async def get_entity(
     token: Annotated[ApiToken, Depends(get_token)],
 ) -> dict[str, Any]:
     pool = request.app.state.pool
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, entity_type, display_name, status, updated_at"
-                " FROM public.entity WHERE id = %s AND org_id = %s",
-                (str(entity_id), str(token.org_id)),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, entity_type, display_name, status, updated_at"
+            " FROM public.entity WHERE id = %s AND org_id = %s",
+            (str(entity_id), str(token.org_id)),
+        )
+        row = await cur.fetchone()
 
     if row is None:
         raise HTTPException(status_code=404, detail="Entity not found")

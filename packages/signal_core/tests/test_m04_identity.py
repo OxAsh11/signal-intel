@@ -7,8 +7,6 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
-import pytest
-
 from signal_core.ai_gateway.gateway import AiGateway, MemoryExtractorVersions
 from signal_core.ai_gateway.providers.fake import FakeProvider
 from signal_core.config import Settings
@@ -35,11 +33,11 @@ SOURCE_RECORD_ID = uuid4()
 class FakeCursor:
     """Cursor-like object that routes queries through its parent FakeConn."""
 
-    def __init__(self, conn: "FakeConn") -> None:
+    def __init__(self, conn: FakeConn) -> None:
         self._conn = conn
         self._rows: list[tuple[Any, ...]] = []
 
-    async def execute(self, sql: str, args: Any = None) -> "FakeCursor":
+    async def execute(self, sql: str, args: Any = None) -> FakeCursor:
         self._rows = self._conn._route(sql, args)
         return self
 
@@ -49,7 +47,7 @@ class FakeCursor:
     async def fetchall(self) -> list[tuple[Any, ...]]:
         return self._rows
 
-    async def __aenter__(self) -> "FakeCursor":
+    async def __aenter__(self) -> FakeCursor:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -88,8 +86,8 @@ class FakeConn:
                     "acme.com",
                     "US",
                     {},
-                    None,       # entity_id (not yet resolved)
-                    None,       # match_method
+                    None,  # entity_id (not yet resolved)
+                    None,  # match_method
                 )
             ]
         if "public.entity_alias" in sql_lower or "public.entity e" in sql_lower:
@@ -117,7 +115,7 @@ class FakeConn:
     def cursor(self) -> FakeCursor:
         return FakeCursor(self)
 
-    async def __aenter__(self) -> "FakeConn":
+    async def __aenter__(self) -> FakeConn:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -200,14 +198,10 @@ async def test_resolve_mention_exact_match_attaches() -> None:
 
     assert result == "attached"
     # resolve_mention RPC should have been called
-    resolve_calls = [
-        args for sql, args in pool.conn.calls if "app.resolve_mention" in sql
-    ]
+    resolve_calls = [args for sql, args in pool.conn.calls if "app.resolve_mention" in sql]
     assert len(resolve_calls) == 1
     # create_account RPC should have been called
-    account_calls = [
-        args for sql, args in pool.conn.calls if "app.create_account" in sql
-    ]
+    account_calls = [args for sql, args in pool.conn.calls if "app.create_account" in sql]
     assert len(account_calls) == 1
 
 
@@ -232,9 +226,7 @@ async def test_resolve_mention_low_confidence_creates_entity() -> None:
     ]
     assert len(entity_calls) == 1
     # resolve_mention RPC should have been called (linking new entity to mention)
-    resolve_calls = [
-        args for sql, args in pool.conn.calls if "app.resolve_mention" in sql
-    ]
+    resolve_calls = [args for sql, args in pool.conn.calls if "app.resolve_mention" in sql]
     assert len(resolve_calls) == 1
 
 
@@ -306,9 +298,7 @@ async def test_resolve_mention_tiebreak_no_winner_queues() -> None:
     entity_b = uuid4()
     alias_rows = [(str(entity_a),), (str(entity_b),)]
     pool = FakePool(alias_rows)
-    tiebreak_resp = json.dumps(
-        {"winner_index": None, "confidence": 0, "reason": "no match"}
-    )
+    tiebreak_resp = json.dumps({"winner_index": None, "confidence": 0, "reason": "no match"})
     gw = _make_gateway(tiebreak_resp)
 
     result = await resolve_mention(pool, gw, MENTION_ID, WORKSPACE_ID, _ctx())

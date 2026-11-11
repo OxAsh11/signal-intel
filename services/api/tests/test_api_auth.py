@@ -8,14 +8,12 @@ from __future__ import annotations
 import hashlib
 from dataclasses import dataclass, field
 from typing import Any
-from uuid import UUID, uuid4
+from uuid import uuid4
 
-import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 
 from api.main import build_app
-
 
 # ---------------------------------------------------------------------------
 # Fake pool / connection / cursor infrastructure
@@ -40,7 +38,7 @@ class FakeCursor:
         self._rows.clear()
         return rows
 
-    async def __aenter__(self) -> "FakeCursor":
+    async def __aenter__(self) -> FakeCursor:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -54,7 +52,7 @@ class FakeConnection:
     def cursor(self) -> FakeCursor:
         return self._cursor
 
-    async def __aenter__(self) -> "FakeConnection":
+    async def __aenter__(self) -> FakeConnection:
         return self
 
     async def __aexit__(self, *_: Any) -> None:

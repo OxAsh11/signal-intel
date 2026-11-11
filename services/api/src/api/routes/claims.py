@@ -51,14 +51,13 @@ async def list_claims(
     where = " WHERE " + " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, entity_id, predicate_id, value, status, created_at"
-                f" FROM public.claim{where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, entity_id, predicate_id, value, status, created_at"
+            f" FROM public.claim{where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {

@@ -26,13 +26,20 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-extend-exclude = ["node_modules", ".next", "apps", "design"]
+extend-exclude = ["node_modules", ".next", "apps", "design", "docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+# SIM117: `async with pool.connection()` / `async with conn.cursor()` nest on purpose in many
+# modules where the connection outlives one cursor.
+ignore = ["SIM117"]
+
+[tool.ruff.lint.per-file-ignores]
+"services/api/**" = ["B008"]  # FastAPI declares parameters with Query(...) / Depends(...) defaults
+"**/tests/**" = ["E501", "RUF002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["signal_core", "worker"]
+known-first-party = ["signal_core", "worker", "api"]
 
 [tool.mypy]
 python_version = "3.13"

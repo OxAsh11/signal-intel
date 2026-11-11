@@ -21,8 +21,8 @@ from __future__ import annotations
 
 import json
 import xml.etree.ElementTree as ET
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 from urllib.parse import quote_plus
 
 import aiohttp
@@ -40,7 +40,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=30)
 # Deterministic fixture items for fake / test mode
 # ---------------------------------------------------------------------------
 
-_FAKE_ITEMS: list[dict] = [
+_FAKE_ITEMS: list[dict[str, Any]] = [
     {
         "url": "https://news.example.com/article-1",
         "title": "Signal Intel Fake News 1",
@@ -73,16 +73,16 @@ class NewsConnector:
 
     async def fetch(
         self,
-        config: dict,
+        config: dict[str, Any],
         queries: list[str],
-        cursor: dict,
-        guard: "FetchGuard",
+        cursor: dict[str, Any],
+        guard: FetchGuard,
         limit: int,
-    ) -> tuple[list[SourcePayload], dict]:
+    ) -> tuple[list[SourcePayload], dict[str, Any]]:
         if config.get("fake"):
             return _build_payloads(_FAKE_ITEMS), {}
 
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         last_datetime: str = cursor.get("last_datetime", "")
         payloads: list[SourcePayload] = []
         max_seen: str = last_datetime
@@ -126,7 +126,7 @@ class NewsConnector:
                     )
                 )
 
-        next_cursor: dict = {"last_datetime": max_seen} if max_seen else {}
+        next_cursor: dict[str, Any] = {"last_datetime": max_seen} if max_seen else {}
         return payloads, next_cursor
 
 
@@ -135,9 +135,9 @@ class NewsConnector:
 # ---------------------------------------------------------------------------
 
 
-def _build_payloads(items: list[dict]) -> list[SourcePayload]:
+def _build_payloads(items: list[dict[str, Any]]) -> list[SourcePayload]:
     """Build SourcePayload list from a list of item dicts (used for fake mode)."""
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     result: list[SourcePayload] = []
     for item in items:
         raw = json.dumps(item, sort_keys=True).encode("utf-8")
@@ -154,13 +154,12 @@ def _build_payloads(items: list[dict]) -> list[SourcePayload]:
     return result
 
 
-async def _fetch_gdelt(query: str, last_datetime: str, max_records: int, guard: "FetchGuard") -> list[dict]:
+async def _fetch_gdelt(
+    query: str, last_datetime: str, max_records: int, guard: FetchGuard
+) -> list[dict[str, Any]]:
     """Call GDELT DOC 2.0 and return a list of article dicts."""
     params = (
-        f"query={quote_plus(query)}"
-        f"&mode=artlist"
-        f"&maxrecords={min(max_records, 250)}"
-        f"&format=json"
+        f"query={quote_plus(query)}&mode=artlist&maxrecords={min(max_records, 250)}&format=json"
     )
     if last_datetime:
         params += f"&startdatetime={last_datetime}"
@@ -177,7 +176,7 @@ async def _fetch_gdelt(query: str, last_datetime: str, max_records: int, guard: 
         return []
 
 
-async def _fetch_rss(feed_url: str, guard: "FetchGuard", limit: int) -> list[dict]:
+async def _fetch_rss(feed_url: str, guard: FetchGuard, limit: int) -> list[dict[str, Any]]:
     """Fetch an RSS/Atom feed and return a list of item dicts (up to *limit*)."""
     await guard.check(feed_url)
     try:
@@ -194,7 +193,7 @@ async def _fetch_rss(feed_url: str, guard: "FetchGuard", limit: int) -> list[dic
     except ET.ParseError:
         return []
 
-    items: list[dict] = []
+    items: list[dict[str, Any]] = []
 
     # RSS 2.0: <channel><item>…</item></channel>
     for item_el in root.iter("item"):

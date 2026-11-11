@@ -1,9 +1,12 @@
 import type { Metadata } from 'next';
-import { ScreenPlaceholder } from '@/components/screen-placeholder';
-import { screen } from '@/lib/screens';
+import { redirect } from 'next/navigation';
+import { getOrgContext } from '@/lib/org';
 
 export const metadata: Metadata = { title: 'Accounts' };
 
-export default function AccountsPage() {
-  return <ScreenPlaceholder screen={screen('/accounts')} />;
+/** The screen lives under the current workspace; this route sends the navigation link there. */
+export default async function AccountsPage() {
+  const ctx = await getOrgContext();
+  if (!ctx?.workspace) redirect('/settings');
+  redirect(`/workspace/${ctx.workspace.id}/accounts`);
 }

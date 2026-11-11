@@ -31,7 +31,8 @@ export default async function ReportsPage({ params }: { params: Promise<{ wsid: 
         p_metric_key: key,
         p_filters: {},
       });
-      metrics[key] = (data as { value?: number } | null)?.value ?? null;
+      // The metric function returns the value itself (a JSON number), or null.
+      metrics[key] = typeof data === "number" ? data : null;
     }
   }
 

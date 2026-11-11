@@ -17,10 +17,11 @@ duplicate_sweep re-runs resolution on all unresolved mentions for an org.
 from __future__ import annotations
 
 import json
+from typing import Any
 from uuid import UUID
 
-from pydantic import BaseModel
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel
 
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
@@ -53,17 +54,16 @@ class IdentityTiebreak(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict:
+async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict[str, Any]:
     """Return mention row as a dict; raises ValueError if not found."""
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, org_id, source_record_id, entity_type,"
-                " raw_name, raw_domain, raw_country, raw_attributes, entity_id, match_method"
-                " FROM public.mention WHERE id = %s",
-                (str(mention_id),),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, org_id, source_record_id, entity_type,"
+            " raw_name, raw_domain, raw_country, raw_attributes, entity_id, match_method"
+            " FROM public.mention WHERE id = %s",
+            (str(mention_id),),
+        )
+        row = await cur.fetchone()
     if row is None:
         raise ValueError(f"mention {mention_id} not found")
     return {
@@ -81,9 +81,9 @@ async def _fetch_mention(pool: AsyncConnectionPool, mention_id: UUID) -> dict:
 
 
 async def _lookup_aliases(
-    conn,
+    conn: Any,
     org_id: UUID,
-    mention: dict,
+    mention: dict[str, Any],
 ) -> list[tuple[str, str, int]]:
     """Return list of (entity_id, alias_type, confidence) candidates.
 
@@ -134,16 +134,13 @@ async def _lookup_aliases(
         (name_country, str(org_id), name_country),
     )
     rows = await cur.fetchall()
-    return [
-        (str(row[0]), "name_country", min(89, 70 + round(float(row[1]) * 20)))
-        for row in rows
-    ]
+    return [(str(row[0]), "name_country", min(89, 70 + round(float(row[1]) * 20))) for row in rows]
 
 
 async def _ai_tiebreak(
     pool: AsyncConnectionPool,
     gateway: AiGateway,
-    mention: dict,
+    mention: dict[str, Any],
     candidates: list[tuple[str, str, int]],
     ctx: CallContext,
 ) -> tuple[str | None, int]:
@@ -164,12 +161,12 @@ async def _ai_tiebreak(
 
     # Enrich candidates with display_name and aliases for context.
     candidate_ids = [c[0] for c in candidates]
-    enriched: dict[str, dict] = {}
+    enriched: dict[str, dict[str, Any]] = {}
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT e.id, e.display_name,"
-                " array_agg(ea.alias_type || ':' || ea.value_normalised) FILTER (WHERE ea.id IS NOT NULL) as aliases"
+                " array_agg(ea.alias_type || ':' || ea.value_normalised) FILTER (WHERE ea.id IS NOT NULL) as aliases"  # noqa: E501
                 " FROM public.entity e"
                 " LEFT JOIN public.entity_alias ea ON ea.entity_id = e.id"
                 " WHERE e.id = ANY(%s::uuid[])"
@@ -221,9 +218,12 @@ async def _ai_tiebreak(
 
 async def _defer_verdict(entity_id_str: str, org_id: UUID, workspace_id: UUID) -> None:
     """Defer verdict computation after a mention is resolved to an entity."""
-    import signal_core.modules.m05_verdict as _m05_verdict
     import contextlib
+
     from procrastinate.exceptions import AlreadyEnqueued
+
+    import signal_core.modules.m05_verdict as _m05_verdict
+
     try:
         if _m05_verdict.verdict_compute_job is not None:
             with contextlib.suppress(AlreadyEnqueued):
@@ -283,11 +283,9 @@ async def resolve_mention(
         entity_id, (alias_type, confidence) = next(iter(by_entity.items()))
     else:
         # Multiple distinct entities — ask the AI to choose.
-        tiebreak_candidates = [
-            (eid, at, c) for eid, (at, c) in by_entity.items()
-        ]
-        entity_id, confidence = await _ai_tiebreak(pool, gateway, mention, tiebreak_candidates, ctx)
-        if entity_id is None:
+        tiebreak_candidates = [(eid, at, c) for eid, (at, c) in by_entity.items()]
+        picked, confidence = await _ai_tiebreak(pool, gateway, mention, tiebreak_candidates, ctx)
+        if picked is None:
             # AI couldn't decide — queue for human review without a candidate entity.
             async with pool.connection() as conn:
                 await conn.execute(
@@ -306,6 +304,7 @@ async def resolve_mention(
                 mention_id=str(mention_id),
             )
             return "queued"
+        entity_id = picked
         alias_type = by_entity[entity_id][0]
 
     if confidence >= 90:
@@ -323,7 +322,7 @@ async def resolve_mention(
                     (str(org_id), str(workspace_id), entity_id),
                 )
                 _acrow = await _acur.fetchone()
-                if _acrow is not None:
+                if _acrow is not None and _acrow[0] is not None:
                     account_id_attached = str(_acrow[0])
             # Merge provisional entity into winner so claims transfer.
             if provisional_id and str(provisional_id) != entity_id:
@@ -331,7 +330,13 @@ async def resolve_mention(
                     "SELECT app.merge_entities(%s, %s, NULL)",
                     (entity_id, str(provisional_id)),
                 )
-        log.info("identity.attached", mention_id=str(mention_id), entity_id=entity_id, alias_type=alias_type, confidence=confidence)
+        log.info(
+            "identity.attached",
+            mention_id=str(mention_id),
+            entity_id=entity_id,
+            alias_type=alias_type,
+            confidence=confidence,
+        )
         await _defer_verdict(entity_id, org_id, workspace_id)
         if stage_advance_job is not None and account_id_attached is not None:
             await stage_advance_job.defer_async(
@@ -348,7 +353,7 @@ async def resolve_mention(
             async with conn.cursor() as cur:
                 # Check for existing pending review item (idempotency).
                 await cur.execute(
-                    "SELECT id FROM public.review_item WHERE mention_id = %s AND status = 'pending' LIMIT 1",
+                    "SELECT id FROM public.review_item WHERE mention_id = %s AND status = 'pending' LIMIT 1",  # noqa: E501
                     (str(mention_id),),
                 )
                 existing = await cur.fetchone()
@@ -386,7 +391,7 @@ async def _create_new(
     mention_id: UUID,
     source_record_id: str,
     entity_type: str,
-    mention: dict,
+    mention: dict[str, Any],
 ) -> str:
     """Create (or reuse provisional) entity, alias, resolve the mention, and create an account."""
     display_name = mention.get("raw_name") or "unknown"
@@ -400,13 +405,13 @@ async def _create_new(
         entity_id = provisional_entity_id
         log.debug("identity.reuse_provisional", mention_id=str(mention_id), entity_id=entity_id)
     else:
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
-                    (str(org_id), entity_type, display_name),
-                )
-                ent_row = await cur.fetchone()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
+                (str(org_id), entity_type, display_name),
+            )
+            ent_row = await cur.fetchone()
+        assert ent_row is not None
         entity_id = str(ent_row[0])
 
     # Create name_country alias so future mentions can find this entity.
@@ -417,7 +422,7 @@ async def _create_new(
         value_normalised = f"{name_norm}|{raw_country}" if raw_country else name_norm
         async with pool.connection() as conn:
             await conn.execute(
-                "SELECT app.create_entity_alias(%s, %s, %s::public.alias_type, %s, %s::smallint, %s)",
+                "SELECT app.create_entity_alias(%s, %s, %s::public.alias_type, %s, %s::smallint, %s)",  # noqa: E501
                 (
                     str(org_id),
                     entity_id,
@@ -426,6 +431,16 @@ async def _create_new(
                     50,  # moderate confidence for newly minted alias
                     source_record_id,
                 ),
+            )
+
+    # The domain is the stronger handle (F2 matching priority): record it too, so later
+    # mentions, meeting attendees and enrichment can find this entity by it.
+    raw_domain = (mention.get("raw_domain") or "").lower().strip()
+    if raw_domain:
+        async with pool.connection() as conn:
+            await conn.execute(
+                "SELECT app.create_entity_alias(%s, %s, %s::public.alias_type, %s, %s::smallint, %s)",  # noqa: E501
+                (str(org_id), entity_id, "domain", raw_domain, 80, source_record_id),
             )
 
     account_id_created: str | None = None
@@ -440,7 +455,7 @@ async def _create_new(
                 (str(org_id), str(workspace_id), entity_id),
             )
             _acrow2 = await _acur2.fetchone()
-            if _acrow2 is not None:
+            if _acrow2 is not None and _acrow2[0] is not None:
                 account_id_created = str(_acrow2[0])
 
     log.info(
@@ -481,7 +496,7 @@ async def duplicate_sweep(
                 " JOIN public.source_record sr ON sr.id = m.source_record_id"
                 " WHERE m.org_id = %s AND (m.entity_id IS NULL OR m.match_method = 'provisional')"
                 " AND EXISTS (SELECT 1 FROM public.workspace WHERE id = sr.workspace_id)"
-                " AND NOT EXISTS (SELECT 1 FROM public.review_item WHERE mention_id = m.id AND status = 'pending')"
+                " AND NOT EXISTS (SELECT 1 FROM public.review_item WHERE mention_id = m.id AND status = 'pending')"  # noqa: E501
                 " ORDER BY m.id",
                 (str(org_id),),
             )
@@ -510,6 +525,6 @@ async def duplicate_sweep(
 # Until then they are None; m03_extraction already wraps calls in try/except
 # (ImportError, AttributeError), so None.defer_async() is silently swallowed.
 
-identity_resolve_job: object | None = None
-identity_duplicate_sweep_job: object | None = None
-stage_advance_job: object | None = None
+identity_resolve_job: Any | None = None
+identity_duplicate_sweep_job: Any | None = None
+stage_advance_job: Any | None = None

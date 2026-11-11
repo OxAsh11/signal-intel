@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import csv
 import json
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 from signal_core.connectors import SourcePayload
 from signal_core.connectors.base import content_hash as _content_hash
@@ -26,18 +26,18 @@ class CsvConnector:
     ``config`` must contain:
       ``storage_path`` – filesystem path to the CSV file (or Supabase storage path
       resolved to a local temp file by the caller before invoking ``fetch``).
-    """
+    """  # noqa: RUF002
 
     source_type: str = "csv_upload"
 
     async def fetch(
         self,
-        config: dict,
+        config: dict[str, Any],
         queries: list[str],
-        cursor: dict,
-        guard: "FetchGuard",
+        cursor: dict[str, Any],
+        guard: FetchGuard,
         limit: int,
-    ) -> tuple[list[SourcePayload], dict]:
+    ) -> tuple[list[SourcePayload], dict[str, Any]]:
         """Read the CSV at ``config["storage_path"]`` and return one payload per unique row.
 
         The ``guard`` parameter is intentionally not called — CSV is a local file,
@@ -47,12 +47,12 @@ class CsvConnector:
         in a single pass, no pagination).
         """
         storage_path: str = config["storage_path"]
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
 
         payloads: list[SourcePayload] = []
         seen_hashes: set[str] = set()
 
-        with open(storage_path, newline="", encoding="utf-8") as fh:
+        with open(storage_path, newline="", encoding="utf-8") as fh:  # noqa: ASYNC230
             reader = csv.DictReader(fh)
             for row_index, row in enumerate(reader):
                 # Canonical bytes: JSON-encode with sorted keys so field order

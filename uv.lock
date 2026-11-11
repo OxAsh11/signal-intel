@@ -1397,7 +1397,10 @@ name = "signal-core"
 version = "0.1.0"
 source = { editable = "packages/signal_core" }
 dependencies = [
+    { name = "aiohttp" },
     { name = "anthropic" },
+    { name = "cryptography" },
+    { name = "httpx" },
     { name = "procrastinate" },
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic" },
@@ -1408,7 +1411,10 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "aiohttp", specifier = ">=3.10" },
     { name = "anthropic", specifier = "==2.3.0" },
+    { name = "cryptography", specifier = ">=44" },
+    { name = "httpx", specifier = ">=0.27" },
     { name = "procrastinate", specifier = "==3.10.0" },
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.11" },

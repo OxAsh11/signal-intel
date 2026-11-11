@@ -13,6 +13,8 @@ import procrastinate
 from procrastinate.exceptions import AlreadyEnqueued
 from psycopg_pool import AsyncConnectionPool
 
+import signal_core.modules.m03_extraction as _m03_extraction
+import signal_core.modules.m04_identity as _m04_identity
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.config import get_settings
 from signal_core.connectors.base import FetchGuard
@@ -29,13 +31,29 @@ from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
 from signal_core.modules.m02_radar import create_source_records, upsert_radar_queries
 from signal_core.modules.m02_radar_ai import generate_radar_queries
 from signal_core.modules.m03_extraction import extract_structured, judge_relevance
-import signal_core.modules.m03_extraction as _m03_extraction
 from signal_core.modules.m04_identity import duplicate_sweep, resolve_mention
-import signal_core.modules.m04_identity as _m04_identity
-from signal_core.modules.m09_activation import push_campaign_batch
-from signal_core.modules.m10_inbox import classify_reply as _classify_reply, get_inbox as _get_inbox
-from signal_core.modules.m12_meetings import sync_meeting as _sync_meeting, suggest_next_step as _suggest_next_step
-from signal_core.modules.m13_integrations import deliver_webhook as _deliver_webhook
+from signal_core.modules.m09_activation import KillSwitchError, campaigns_due, push_campaign_batch
+from signal_core.modules.m10_inbox import (
+    GENUINE_REPLY_CLASSES,
+)
+from signal_core.modules.m10_inbox import (
+    auto_classify_reply as _auto_classify_reply,
+)
+from signal_core.modules.m10_inbox import (
+    classify_reply as _classify_reply,
+)
+from signal_core.modules.m10_inbox import (
+    get_inbox as _get_inbox,
+)
+from signal_core.modules.m11_stage import mark_dormant_accounts as _mark_dormant_accounts
+from signal_core.modules.m12_meetings import suggest_next_step as _suggest_next_step
+from signal_core.modules.m12_meetings import sync_meeting as _sync_meeting
+from signal_core.modules.m13_integrations import (
+    deliver_webhook as _deliver_webhook,
+)
+from signal_core.modules.m13_integrations import (
+    subscriptions_for_event as _subscriptions_for_event,
+)
 from signal_core.modules.m16_reporting import compute_metric as _compute_metric
 from worker.health import HealthState
 
@@ -45,11 +63,21 @@ CANARY_CRON = "17 3 * * *"  # daily, 03:17 UTC
 AI_STATUS_CRON = "*/10 * * * *"
 RELEASE_STALE_CRON = "*/5 * * * *"
 RADAR_HEALTH_CRON = "30 * * * *"  # every hour at :30
+RADAR_FETCH_CRON = "5 * * * *"  # every hour at :05
 IDENTITY_SWEEP_CRON = "0 2 * * *"  # daily, 02:00 UTC
 HEALTH_CHECK_CRON = "0 6 * * *"  # daily at 06:00 UTC
-INBOX_RECONCILE_CRON = "*/15 * * * *"   # every 15 min
-NEXT_STEP_CRON = "0 7 * * *"             # daily 07:00 UTC
+INBOX_RECONCILE_CRON = "*/15 * * * *"  # every 15 min
+NEXT_STEP_CRON = "0 7 * * *"  # daily 07:00 UTC
+CAMPAIGN_PUSH_CRON = "*/15 * * * *"  # the sync cycle: a pause takes effect within one cycle (M9)
+DORMANCY_CRON = "30 4 * * *"  # daily, 04:30 UTC
+RADAR_REFETCH_HOURS = 24
 RESUME_BATCH = 50
+# Bands that earn a research document automatically (M6), when the verdict supports them.
+RESEARCH_BANDS = frozenset({"High"})
+# Stages in which an account should always have a next step (M12).
+LIVE_STAGES = frozenset({"Contacted", "Engaged", "Qualified", "Dormant"})
+# Source types that are bookkeeping records, not evidence to extract from.
+NO_EXTRACTION_SOURCE_TYPES = frozenset({"synthetic", "enrichment"})
 
 
 # ---------------------------------------------------------------------------
@@ -57,16 +85,15 @@ RESUME_BATCH = 50
 # ---------------------------------------------------------------------------
 
 
-async def _load_radar(pool: AsyncConnectionPool, radar_id: UUID) -> dict:
+async def _load_radar(pool: AsyncConnectionPool, radar_id: UUID) -> dict[str, Any]:
     """Load radar row from DB; raises ValueError if not found."""
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "select id, org_id, workspace_id, brief_id, connector_type, config, cursor_state"
-                " from public.radar where id = %s",
-                (str(radar_id),),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "select id, org_id, workspace_id, brief_id, connector_type, config, cursor_state"
+            " from public.radar where id = %s",
+            (str(radar_id),),
+        )
+        row = await cur.fetchone()
     if row is None:
         raise ValueError(f"Radar {radar_id} not found")
     return {
@@ -80,22 +107,21 @@ async def _load_radar(pool: AsyncConnectionPool, radar_id: UUID) -> dict:
     }
 
 
-async def _load_radar_queries(pool: AsyncConnectionPool, radar_id: UUID) -> list[dict]:
+async def _load_radar_queries(pool: AsyncConnectionPool, radar_id: UUID) -> list[dict[str, Any]]:
     """Return list of query dicts for *radar_id*."""
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "select query_text, language, source from public.radar_query where radar_id = %s",
-                (str(radar_id),),
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "select query_text, language, source from public.radar_query where radar_id = %s",
+            (str(radar_id),),
+        )
+        rows = await cur.fetchall()
     return [{"query_text": r[0], "language": r[1], "source": r[2]} for r in rows]
 
 
 async def _update_cursor(
     pool: AsyncConnectionPool,
     radar_id: UUID,
-    cursor_state: dict,
+    cursor_state: dict[str, Any],
     fetched: int,
     yielded: int,
 ) -> None:
@@ -207,6 +233,7 @@ def build_app(
             org_id=UUID(org_id),
             workspace_id=UUID(workspace_id),
         )
+        assert pool is not None and gateway is not None, "pool and gateway required"
         await run_brief_intake(inp, gateway, pool)
         log.info("brief.intake.done", brief_id=brief_id)
 
@@ -217,7 +244,7 @@ def build_app(
     @job(app, type="source.fetch_csv", kill_switch=kill_switch, queue="fetch", retry=3)
     async def fetch_csv(
         radar_id: str, org_id: str, workspace_id: str, brief_id: str, **_: Any
-    ) -> dict:
+    ) -> dict[str, Any]:
         assert pool is not None, "pool required for source.fetch_csv"
         r = await _load_radar(pool, UUID(radar_id))
         queries = await _load_radar_queries(pool, UUID(radar_id))
@@ -232,13 +259,13 @@ def build_app(
                 raise RuntimeError(
                     "SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY are required for csv_upload radars"
                 )
-            url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/signal-uploads/{storage_path}"
+            url = f"{settings.supabase_url.rstrip('/')}/storage/v1/object/signal-uploads/{storage_path}"  # noqa: E501
             svc_key = settings.supabase_service_role_key.get_secret_value()
             async with aiohttp.ClientSession() as session:
                 async with session.get(url, headers={"Authorization": f"Bearer {svc_key}"}) as resp:
                     resp.raise_for_status()
                     content = await resp.read()
-            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")
+            tmp = tempfile.NamedTemporaryFile(delete=False, suffix=".csv")  # noqa: SIM115
             tmp.write(content)
             tmp.close()
             local_path = tmp.name
@@ -258,7 +285,12 @@ def build_app(
             if local_path:
                 os.unlink(local_path)
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
+            pool,
+            UUID(org_id),
+            UUID(workspace_id),
+            f"radar:{radar_id}",
+            conn_obj.source_type,
+            payloads,
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -266,7 +298,7 @@ def build_app(
     @job(app, type="source.fetch_website", kill_switch=kill_switch, queue="fetch", retry=3)
     async def fetch_website(
         radar_id: str, org_id: str, workspace_id: str, brief_id: str, **_: Any
-    ) -> dict:
+    ) -> dict[str, Any]:
         assert pool is not None, "pool required for source.fetch_website"
         r = await _load_radar(pool, UUID(radar_id))
         queries = await _load_radar_queries(pool, UUID(radar_id))
@@ -280,7 +312,12 @@ def build_app(
             limit=500,
         )
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
+            pool,
+            UUID(org_id),
+            UUID(workspace_id),
+            f"radar:{radar_id}",
+            conn_obj.source_type,
+            payloads,
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -288,7 +325,7 @@ def build_app(
     @job(app, type="source.fetch_news", kill_switch=kill_switch, queue="fetch", retry=3)
     async def fetch_news(
         radar_id: str, org_id: str, workspace_id: str, brief_id: str, **_: Any
-    ) -> dict:
+    ) -> dict[str, Any]:
         assert pool is not None, "pool required for source.fetch_news"
         r = await _load_radar(pool, UUID(radar_id))
         queries = await _load_radar_queries(pool, UUID(radar_id))
@@ -302,7 +339,12 @@ def build_app(
             limit=500,
         )
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
+            pool,
+            UUID(org_id),
+            UUID(workspace_id),
+            f"radar:{radar_id}",
+            conn_obj.source_type,
+            payloads,
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -310,7 +352,7 @@ def build_app(
     @job(app, type="source.fetch_job_post", kill_switch=kill_switch, queue="fetch", retry=3)
     async def fetch_job_post(
         radar_id: str, org_id: str, workspace_id: str, brief_id: str, **_: Any
-    ) -> dict:
+    ) -> dict[str, Any]:
         assert pool is not None, "pool required for source.fetch_job_post"
         r = await _load_radar(pool, UUID(radar_id))
         queries = await _load_radar_queries(pool, UUID(radar_id))
@@ -324,7 +366,12 @@ def build_app(
             limit=500,
         )
         created = await create_source_records(
-            pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", conn_obj.source_type, payloads
+            pool,
+            UUID(org_id),
+            UUID(workspace_id),
+            f"radar:{radar_id}",
+            conn_obj.source_type,
+            payloads,
         )
         await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
         return {"fetched": len(payloads), "created": created}
@@ -336,26 +383,73 @@ def build_app(
     @job(app, type="radar.generate_queries", kill_switch=kill_switch, queue="fetch", retry=1)
     async def generate_queries_job(
         radar_id: str, org_id: str, workspace_id: str, **_: Any
-    ) -> dict:
+    ) -> dict[str, Any]:
         assert pool is not None and gateway is not None, "pool and gateway required"
         r = await _load_radar(pool, UUID(radar_id))
         # Load hypothesis and offer from the brief's draft_config jsonb.
         async with pool.connection() as db_conn:
             async with db_conn.cursor() as cur:
                 await cur.execute(
-                    "select draft_config->>'hypothesis', draft_config->>'offer' from public.brief where id = %s",
+                    "select draft_config->>'hypothesis', draft_config->>'offer' from public.brief where id = %s",  # noqa: E501
                     (str(r["brief_id"]),),
                 )
                 brief_row = await cur.fetchone()
         raw_hypothesis = (brief_row[0] or "") if brief_row else ""
         hypotheses: list[str] = [raw_hypothesis] if raw_hypothesis else []
         icp_summary: str = (brief_row[1] or "") if brief_row else ""
-        ctx = CallContext(UUID(org_id), UUID(workspace_id), None, "worker", "radar.generate_queries", {})
+        ctx = CallContext(
+            UUID(org_id), UUID(workspace_id), None, "worker", "radar.generate_queries", {}
+        )
         query_set = await generate_radar_queries(
             gateway, hypotheses, icp_summary, r["connector_type"], ctx
         )
         await upsert_radar_queries(pool, UUID(radar_id), query_set)
+        # New queries are only useful once they are fetched.
+        await _queue_fetch(
+            radar_id,
+            r["connector_type"],
+            str(r["org_id"]),
+            str(r["workspace_id"]),
+            str(r["brief_id"]),
+        )
         return {"queries": len(query_set.queries)}
+
+    async def _queue_fetch(
+        radar_id: str, connector_type: str, org_id: str, workspace_id: str, brief_id: str
+    ) -> bool:
+        # csv_upload → source.fetch_csv; job_post → source.fetch_job_post; etc.
+        job_name = f"source.fetch_{connector_type.replace('_upload', '')}"
+        if job_name not in app.tasks:
+            log.warning("radar.no_fetch_job", radar_id=radar_id, connector_type=connector_type)
+            return False
+        with contextlib.suppress(AlreadyEnqueued):
+            await app.configure_task(name=job_name, queueing_lock=radar_id).defer_async(
+                radar_id=radar_id, org_id=org_id, workspace_id=workspace_id, brief_id=brief_id
+            )
+        return True
+
+    @app.periodic(cron=RADAR_FETCH_CRON, periodic_id="radar.fetch_cycle")
+    @job(app, type="radar.fetch_cycle", kill_switch=kill_switch, queue="system", retry=0)
+    async def radar_fetch_cycle(timestamp: int) -> int:
+        """Collection is continuous (M2): re-fetch every live radar once its last fetch is stale.
+        A CSV upload is a one-off file and is not re-read."""
+        if pool is None:
+            return 0
+        async with pool.connection() as db_conn:
+            cur = await db_conn.execute(
+                """select id, connector_type, org_id, workspace_id, brief_id from public.radar
+                   where status in ('active', 'silent', 'error')
+                     and connector_type <> 'csv_upload'
+                     and (last_fetched_at is null
+                          or last_fetched_at < now() - make_interval(hours => %s))""",
+                (RADAR_REFETCH_HOURS,),
+            )
+            due = await cur.fetchall()
+        queued = 0
+        for r in due:
+            queued += await _queue_fetch(str(r[0]), r[1], str(r[2]), str(r[3]), str(r[4]))
+        log.info("radar.fetch_cycle", queued=queued)
+        return queued
 
     # ------------------------------------------------------------------
     # Radar health cron (Phase 1c)
@@ -363,7 +457,7 @@ def build_app(
 
     @app.periodic(cron=RADAR_HEALTH_CRON, periodic_id="radar.health_check")
     @job(app, type="radar.health_check", kill_switch=kill_switch, queue="system", retry=0)
-    async def radar_health_check(timestamp: int) -> dict:
+    async def radar_health_check(timestamp: int) -> dict[str, Any]:
         if pool is None:
             return {"silent": 0}
         async with pool.connection() as db_conn:
@@ -397,13 +491,12 @@ def build_app(
             job_args={"source_record_id": source_record_id},
         )
         # Load org/workspace from DB for the real context
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
-                    (source_record_id,),
-                )
-                row = await cur.fetchone()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
+                (source_record_id,),
+            )
+            row = await cur.fetchone()
         if row is None:
             log.warning("extract.source_record_not_found", source_record_id=source_record_id)
             return
@@ -418,22 +511,23 @@ def build_app(
         relevant = await judge_relevance(pool, gateway, _UUID(source_record_id), ctx)
         if relevant:
             with contextlib.suppress(AlreadyEnqueued):
-                await app.tasks["extract.structured"].configure(
-                    queueing_lock=source_record_id
-                ).defer_async(source_record_id=source_record_id)
+                await (
+                    app.tasks["extract.structured"]
+                    .configure(queueing_lock=source_record_id)
+                    .defer_async(source_record_id=source_record_id)
+                )
 
     @job(app, type="extract.structured", kill_switch=kill_switch, queue="extract", retry=2)
     async def extract_structured_job(*, source_record_id: str, **_: Any) -> None:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
 
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
-                    (source_record_id,),
-                )
-                row = await cur.fetchone()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
+                (source_record_id,),
+            )
+            row = await cur.fetchone()
         if row is None:
             log.warning("extract.source_record_not_found", source_record_id=source_record_id)
             return
@@ -468,13 +562,12 @@ def build_app(
         from uuid import UUID as _UUID
 
         # Load org_id from the mention so CallContext carries a real org.
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT org_id FROM public.mention WHERE id = %s",
-                    (mention_id,),
-                )
-                m_row = await cur.fetchone()
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT org_id FROM public.mention WHERE id = %s",
+                (mention_id,),
+            )
+            m_row = await cur.fetchone()
         if m_row is None:
             log.warning("identity.mention_not_found", mention_id=mention_id)
             return "skipped"
@@ -502,7 +595,7 @@ def build_app(
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "SELECT DISTINCT org_id FROM public.mention WHERE entity_id IS NULL OR match_method = 'provisional'"
+                    "SELECT DISTINCT org_id FROM public.mention WHERE entity_id IS NULL OR match_method = 'provisional'"  # noqa: E501
                 )
                 org_rows = await cur.fetchall()
 
@@ -528,11 +621,19 @@ def build_app(
     # ------------------------------------------------------------------
 
     @job(app, type="verdict.compute", kill_switch=kill_switch, queue="derive", retry=2)
-    async def verdict_compute_task(*, entity_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_: Any) -> str | None:
+    async def verdict_compute_task(
+        *, entity_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_: Any
+    ) -> str | None:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m05_verdict as _m05_verdict
-        job_args: dict[str, Any] = {"entity_id": entity_id, "workspace_id": workspace_id, "org_id": org_id}
+
+        job_args: dict[str, Any] = {
+            "entity_id": entity_id,
+            "workspace_id": workspace_id,
+            "org_id": org_id,
+        }
         if approval_id is not None:
             job_args["approval_id"] = approval_id
         ctx = CallContext(
@@ -543,24 +644,29 @@ def build_app(
             job_type="verdict.compute",
             job_args=job_args,
         )
-        return await _m05_verdict.compute_verdict(pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx)
+        return await _m05_verdict.compute_verdict(
+            pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx
+        )
 
     # ------------------------------------------------------------------
     # Indexer job (Phase 1e / S9)
     # ------------------------------------------------------------------
 
     @job(app, type="index.chunk_embed", kill_switch=kill_switch, queue="derive", retry=2)
-    async def index_chunk_embed_task(*, source_record_id: str, approval_id: str | None = None, **_: Any) -> int:
+    async def index_chunk_embed_task(
+        *, source_record_id: str, approval_id: str | None = None, **_: Any
+    ) -> int:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m05_index as _m05_index
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
-                    (source_record_id,),
-                )
-                row = await cur.fetchone()
+
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT org_id, workspace_id FROM public.source_record WHERE id = %s",
+                (source_record_id,),
+            )
+            row = await cur.fetchone()
         if row is None:
             log.warning("index.source_record_not_found", source_record_id=source_record_id)
             return 0
@@ -575,11 +681,14 @@ def build_app(
             job_type="index.chunk_embed",
             job_args=job_args,
         )
-        return await _m05_index.index_source_record(pool, gateway, _UUID(source_record_id), _UUID(str(row[1])), ctx)
+        return await _m05_index.index_source_record(
+            pool, gateway, _UUID(source_record_id), _UUID(str(row[1])), ctx
+        )
 
     # Wire module handles so m05_verdict and m05_index can defer via the job objects.
-    import signal_core.modules.m05_verdict as _m05_verdict
     import signal_core.modules.m05_index as _m05_index
+    import signal_core.modules.m05_verdict as _m05_verdict
+
     _m05_verdict.verdict_compute_job = verdict_compute_task
     _m05_index.index_chunk_embed_job = index_chunk_embed_task
 
@@ -588,17 +697,20 @@ def build_app(
     # ------------------------------------------------------------------
 
     @job(app, type="score.compute", kill_switch=kill_switch, queue="compute", retry=2)
-    async def score_compute_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+    async def score_compute_task(
+        *, account_id: str, workspace_id: str, org_id: str, **_: Any
+    ) -> str | None:
         assert pool is not None, "pool required for score.compute"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m08_scoring as _m08
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT entity_id FROM public.account WHERE id = %s AND workspace_id = %s",
-                    (account_id, workspace_id),
-                )
-                row = await cur.fetchone()
+
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT entity_id FROM public.account WHERE id = %s AND workspace_id = %s",
+                (account_id, workspace_id),
+            )
+            row = await cur.fetchone()
         if row is None:
             log.warning("score.account_not_found", account_id=account_id)
             return None
@@ -613,10 +725,14 @@ def build_app(
         return await _m08.compute_score(pool, _UUID(str(row[0])), _UUID(workspace_id), ctx)
 
     @job(app, type="research.generate", kill_switch=kill_switch, queue="compute", retry=1)
-    async def research_generate_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+    async def research_generate_task(
+        *, account_id: str, workspace_id: str, org_id: str, **_: Any
+    ) -> str | None:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m06_research as _m06
+
         ctx = CallContext(
             org_id=_UUID(org_id),
             workspace_id=_UUID(workspace_id),
@@ -625,28 +741,51 @@ def build_app(
             job_type="research.generate",
             job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
         )
-        return await _m06.generate_research_doc(pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx)
+        return await _m06.generate_research_doc(
+            pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx
+        )
 
     @job(app, type="enrichment.run", kill_switch=kill_switch, queue="compute", retry=1)
-    async def enrichment_run_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> int:
+    async def enrichment_run_task(
+        *, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_: Any
+    ) -> int:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m07_enrichment as _m07
+
+        enrich_args: dict[str, Any] = {
+            "account_id": account_id,
+            "workspace_id": workspace_id,
+            "org_id": org_id,
+        }
+        if approval_id is not None:
+            enrich_args["approval_id"] = approval_id
         ctx = CallContext(
             org_id=_UUID(org_id),
             workspace_id=_UUID(workspace_id),
             brief_id=None,
             job_id=None,
             job_type="enrichment.run",
-            job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
+            job_args=enrich_args,
         )
         return await _m07.enrich_account(pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx)
 
     @job(app, type="account.stage_advance", kill_switch=kill_switch, queue="compute", retry=1)
-    async def stage_advance_task(*, account_id: str, activity_id: str | None = None, activity_kind: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+    async def stage_advance_task(
+        *,
+        account_id: str,
+        activity_id: str | None = None,
+        activity_kind: str,
+        workspace_id: str,
+        org_id: str,
+        **_: Any,
+    ) -> str | None:
         assert pool is not None, "pool required for account.stage_advance"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m11_stage as _m11
+
         ctx = CallContext(
             org_id=_UUID(org_id),
             workspace_id=_UUID(workspace_id),
@@ -665,10 +804,14 @@ def build_app(
         )
 
     @job(app, type="account.card.generate", kill_switch=kill_switch, queue="compute", retry=1)
-    async def account_card_generate_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+    async def account_card_generate_task(
+        *, account_id: str, workspace_id: str, org_id: str, **_: Any
+    ) -> str | None:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
+
         import signal_core.modules.m15_account_card as _m15
+
         ctx = CallContext(
             org_id=_UUID(org_id),
             workspace_id=_UUID(workspace_id),
@@ -677,22 +820,23 @@ def build_app(
             job_type="account.card.generate",
             job_args={"account_id": account_id, "workspace_id": workspace_id, "org_id": org_id},
         )
-        return await _m15.generate_account_card(pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx)
+        return await _m15.generate_account_card(
+            pool, gateway, _UUID(account_id), _UUID(workspace_id), ctx
+        )
 
     @app.periodic(cron=HEALTH_CHECK_CRON, periodic_id="health.check")
     @job(app, type="health.check", kill_switch=kill_switch, queue="health", retry=0)
-    async def health_check_task(timestamp: int) -> dict:
+    async def health_check_task(timestamp: int) -> dict[str, Any]:
         if pool is None:
             return {}
         from uuid import UUID as _UUID
+
         import signal_core.modules.m17_health as _m17
-        async with pool.connection() as conn:
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT id, org_id FROM public.workspace"
-                )
-                rows = await cur.fetchall()
-        results: dict = {}
+
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT id, org_id FROM public.workspace")
+            rows = await cur.fetchall()
+        results: dict[str, Any] = {}
         for row in rows:
             ws_id = _UUID(str(row[0]))
             org_id = _UUID(str(row[1]))
@@ -712,6 +856,7 @@ def build_app(
     # Phase 2 module handle wiring
     import signal_core.modules.m11_stage as _m11_stage
     import signal_core.modules.m15_account_card as _m15_account_card
+
     _m04_identity.stage_advance_job = stage_advance_task
     _m11_stage.stage_advance_job = stage_advance_task
     _m05_verdict.account_card_generate_job = account_card_generate_task
@@ -722,87 +867,230 @@ def build_app(
     # ------------------------------------------------------------------
 
     @job(app, type="campaign.push", kill_switch=kill_switch, queue="compute", retry=2)
-    async def campaign_push_task(*, campaign_id: str, workspace_id: str, org_id: str, **_: Any) -> dict:
-        assert pool is not None and gateway is not None, "pool and gateway required"
-        from uuid import UUID as _UUID
+    async def campaign_push_task(
+        *, campaign_id: str, workspace_id: str, org_id: str, **_: Any
+    ) -> dict[str, Any]:
+        assert pool is not None, "pool required"
         ctx = CallContext(
-            org_id=_UUID(org_id),
-            workspace_id=_UUID(workspace_id),
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
             brief_id=None,
             job_id=None,
             job_type="campaign.push",
             job_args={"campaign_id": campaign_id, "workspace_id": workspace_id, "org_id": org_id},
         )
-        return await push_campaign_batch(pool, gateway, _UUID(campaign_id), ctx)
+        try:
+            return await push_campaign_batch(pool, UUID(campaign_id), ctx)
+        except KillSwitchError:
+            # Switched off between the cycle and this run.
+            return {"pushed": 0, "would_push": 0, "skipped": 0, "paused": False}
+
+    @app.periodic(cron=CAMPAIGN_PUSH_CRON, periodic_id="campaign.push_cycle")
+    @job(app, type="campaign.push_cycle", kill_switch=kill_switch, queue="system", retry=0)
+    async def campaign_push_cycle(timestamp: int) -> int:
+        """One sync cycle: every active campaign in dry run or live gets a push."""
+        if pool is None:
+            return 0
+        due = await campaigns_due(pool)
+        for campaign_id, workspace_id, org_id in due:
+            with contextlib.suppress(AlreadyEnqueued):
+                await campaign_push_task.configure(queueing_lock=f"push:{campaign_id}").defer_async(
+                    campaign_id=str(campaign_id),
+                    workspace_id=str(workspace_id),
+                    org_id=str(org_id),
+                )
+        log.info("campaign.push_cycle", campaigns=len(due))
+        return len(due)
 
     @job(app, type="reply.classify", kill_switch=kill_switch, queue="compute", retry=1)
-    async def reply_classify_task(*, activity_id: str, reply_class: str, member_id: str | None = None, source: str = "ai", **_: Any) -> None:
+    async def reply_classify_task(
+        *,
+        activity_id: str,
+        reply_class: str,
+        member_id: str | None = None,
+        source: str = "ai",
+        **_: Any,
+    ) -> None:
         assert pool is not None, "pool required"
-        from uuid import UUID as _UUID
         await _classify_reply(
             pool,
-            _UUID(activity_id),
+            UUID(activity_id),
             reply_class,
-            _UUID(member_id) if member_id else None,
+            UUID(member_id) if member_id else None,
             source,  # type: ignore[arg-type]
         )
 
+    @job(app, type="reply.auto_classify", kill_switch=kill_switch, queue="compute", retry=2)
+    async def reply_auto_classify_task(
+        *,
+        activity_id: str,
+        workspace_id: str,
+        org_id: str,
+        approval_id: str | None = None,
+        **_: Any,
+    ) -> str | None:
+        """Classify a new reply from the sequencer's signal or, failing that, with AI (M10)."""
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        job_args: dict[str, Any] = {
+            "activity_id": activity_id,
+            "workspace_id": workspace_id,
+            "org_id": org_id,
+        }
+        if approval_id is not None:
+            job_args["approval_id"] = approval_id
+        ctx = CallContext(
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="reply.auto_classify",
+            job_args=job_args,
+        )
+        return await _auto_classify_reply(pool, gateway, UUID(activity_id), ctx)
+
     @app.periodic(cron=INBOX_RECONCILE_CRON, periodic_id="inbox.reconcile")
     @job(app, type="inbox.reconcile", kill_switch=kill_switch, queue="compute", retry=0)
-    async def inbox_reconcile_cron(timestamp: int) -> int:
+    async def inbox_reconcile_cron(timestamp: int) -> dict[str, int]:
+        """Safety net for a missed reply.received event: queue classification for every reply
+        that still has no class, and report how many have waited over two working days."""
+        if pool is None:
+            return {"queued": 0, "overdue": 0}
+        async with pool.connection() as db_conn, db_conn.cursor() as cur:
+            await cur.execute("SELECT id, org_id FROM public.workspace")
+            rows = await cur.fetchall()
+        queued = overdue = 0
+        for row in rows:
+            ws_id = UUID(str(row[0]))
+            for reply in await _get_inbox(pool, ws_id, {"unclassified_only": True, "limit": 200}):
+                overdue += bool(reply["is_overdue"])
+                with contextlib.suppress(AlreadyEnqueued):
+                    await reply_auto_classify_task.configure(
+                        queueing_lock=f"reply:{reply['id']}"
+                    ).defer_async(
+                        activity_id=str(reply["id"]), workspace_id=str(ws_id), org_id=str(row[1])
+                    )
+                queued += 1
+        log.info("inbox.reconcile", queued=queued, overdue=overdue)
+        return {"queued": queued, "overdue": overdue}
+
+    @app.periodic(cron=DORMANCY_CRON, periodic_id="account.dormancy_sweep")
+    @job(app, type="account.dormancy_sweep", kill_switch=kill_switch, queue="compute", retry=0)
+    async def dormancy_sweep_cron(timestamp: int) -> int:
+        """Accounts with nothing happening inside the dormancy window become Dormant (M11)."""
         if pool is None:
             return 0
-        from uuid import UUID as _UUID
-        async with pool.connection() as db_conn:
-            async with db_conn.cursor() as cur:
-                await cur.execute("SELECT id FROM public.workspace")
-                rows = await cur.fetchall()
-        total = 0
+        async with pool.connection() as db_conn, db_conn.cursor() as cur:
+            await cur.execute("SELECT id, org_id FROM public.workspace")
+            rows = await cur.fetchall()
+        marked = 0
         for row in rows:
-            ws_id = _UUID(str(row[0]))
-            result = await _get_inbox(pool, ws_id, limit=100)
-            total += len(result)
-            log.info("inbox.reconcile.workspace", workspace_id=str(ws_id), items=len(result))
-        return total
+            ctx = CallContext(
+                org_id=UUID(str(row[1])),
+                workspace_id=UUID(str(row[0])),
+                brief_id=None,
+                job_id=None,
+                job_type="account.dormancy_sweep",
+                job_args={},
+            )
+            marked += await _mark_dormant_accounts(pool, UUID(str(row[0])), ctx)
+        return marked
 
     @job(app, type="meeting.sync", kill_switch=kill_switch, queue="compute", retry=2)
-    async def meeting_sync_task(*, org_id: str, workspace_id: str, integration_id: str, external_id: str, scheduled_at: str, attendee_domains: list[str], **_: Any) -> str:
+    async def meeting_sync_task(
+        *,
+        org_id: str,
+        workspace_id: str,
+        integration_id: str,
+        external_id: str,
+        scheduled_at: str,
+        attendee_domains: list[str],
+        **_: Any,
+    ) -> str:
         assert pool is not None, "pool required"
-        from uuid import UUID as _UUID
         from datetime import datetime
+        from uuid import UUID as _UUID
+
         dt = datetime.fromisoformat(scheduled_at)
         meeting_id = await _sync_meeting(
-            pool, _UUID(org_id), _UUID(workspace_id), _UUID(integration_id),
-            external_id, dt, attendee_domains,
+            pool,
+            _UUID(org_id),
+            _UUID(workspace_id),
+            _UUID(integration_id),
+            external_id,
+            dt,
+            attendee_domains,
         )
         log.info("meeting.sync.done", meeting_id=str(meeting_id))
         return str(meeting_id)
 
     @job(app, type="next_step.suggest", kill_switch=kill_switch, queue="compute", retry=1)
-    async def next_step_suggest_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str:
+    async def next_step_suggest_task(
+        *, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_: Any
+    ) -> str | None:
         assert pool is not None and gateway is not None, "pool and gateway required"
-        from uuid import UUID as _UUID
-        suggestion = await _suggest_next_step(pool, gateway, _UUID(account_id), _UUID(workspace_id))
+        job_args: dict[str, Any] = {
+            "account_id": account_id,
+            "workspace_id": workspace_id,
+            "org_id": org_id,
+        }
+        if approval_id is not None:
+            job_args["approval_id"] = approval_id
+        ctx = CallContext(
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="next_step.suggest",
+            job_args=job_args,
+        )
+        suggestion = await _suggest_next_step(
+            pool, gateway, UUID(account_id), UUID(workspace_id), ctx
+        )
         log.info("next_step.suggest.done", account_id=account_id)
         return suggestion
 
-    @job(app, type="webhook.deliver", kill_switch=kill_switch, queue="default", retry=3)
-    async def webhook_deliver_task(*, subscription_id: str, event_id: str, event_type: str, payload: dict, **_: Any) -> str:
+    # retry=1: one attempt per job. A failed attempt re-queues itself after the next backoff
+    # delay, so no worker slot is held while waiting (M13: backoff for up to 24 hours).
+    @job(app, type="webhook.deliver", kill_switch=kill_switch, queue="default", retry=1)
+    async def webhook_deliver_task(
+        *,
+        subscription_id: str,
+        event_id: str,
+        event_type: str,
+        payload: dict[str, Any],
+        attempt: int = 1,
+        **_: Any,
+    ) -> str:
         assert pool is not None, "pool required"
-        from uuid import UUID as _UUID
-        return await _deliver_webhook(pool, _UUID(subscription_id), _UUID(event_id), event_type, payload)
+        outcome = await _deliver_webhook(
+            pool, UUID(subscription_id), UUID(event_id), event_type, payload, attempt
+        )
+        if outcome.status == "retry":
+            await webhook_deliver_task.configure(
+                schedule_in={"seconds": outcome.retry_in}
+            ).defer_async(
+                subscription_id=subscription_id,
+                event_id=event_id,
+                event_type=event_type,
+                payload=payload,
+                attempt=attempt + 1,
+            )
+        return outcome.status
 
     @job(app, type="metric.snapshot", kill_switch=kill_switch, queue="compute", retry=1)
-    async def metric_snapshot_task(*, workspace_id: str, brief_id: str, org_id: str, **_: Any) -> dict:
+    async def metric_snapshot_task(
+        *, workspace_id: str, brief_id: str, org_id: str, **_: Any
+    ) -> dict[str, Any]:
         assert pool is not None, "pool required"
         from uuid import UUID as _UUID
-        async with pool.connection() as db_conn:
-            async with db_conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT key FROM public.metric_definition WHERE workspace_id = %s",
-                    (workspace_id,),
-                )
-                rows = await cur.fetchall()
+
+        async with pool.connection() as db_conn, db_conn.cursor() as cur:
+            await cur.execute(
+                "SELECT DISTINCT key FROM public.metric_definition"
+                " WHERE published_at IS NOT NULL AND (org_id IS NULL OR org_id = %s)",
+                (org_id,),
+            )
+            rows = await cur.fetchall()
         results = {}
         for row in rows:
             key = row[0]
@@ -819,33 +1107,33 @@ def build_app(
     async def next_step_cron(timestamp: int) -> int:
         if pool is None or gateway is None:
             return 0
-        from uuid import UUID as _UUID
-        async with pool.connection() as db_conn:
-            async with db_conn.cursor() as cur:
-                await cur.execute(
-                    """SELECT a.id, a.workspace_id, a.org_id
+        async with pool.connection() as db_conn, db_conn.cursor() as cur:
+            await cur.execute(
+                """SELECT a.id, a.workspace_id, a.org_id
                        FROM public.account a
-                       WHERE a.stage IN ('Contacted', 'Engaged', 'Qualified')
+                       WHERE a.stage IN ('Contacted', 'Engaged', 'Qualified', 'Dormant')
                          AND NOT EXISTS (
                              SELECT 1 FROM public.next_step ns
                              WHERE ns.account_id = a.id
                                AND ns.updated_at > now() - interval '24 hours'
                          )
                        LIMIT 500"""
-                )
-                rows = await cur.fetchall()
+            )
+            rows = await cur.fetchall()
         queued = 0
         for row in rows:
             account_id = str(row[0])
             workspace_id = str(row[1])
             org_id = str(row[2])
             with contextlib.suppress(AlreadyEnqueued):
-                await app.tasks["next_step.suggest"].configure(
-                    queueing_lock=f"nss:{account_id}"
-                ).defer_async(
-                    account_id=account_id,
-                    workspace_id=workspace_id,
-                    org_id=org_id,
+                await (
+                    app.tasks["next_step.suggest"]
+                    .configure(queueing_lock=f"nss:{account_id}")
+                    .defer_async(
+                        account_id=account_id,
+                        workspace_id=workspace_id,
+                        org_id=org_id,
+                    )
                 )
             queued += 1
         log.info("next_step.cron.done", queued=queued)
@@ -855,12 +1143,149 @@ def build_app(
     # Dispatch router (updated for Phase 1c events)
     # ------------------------------------------------------------------
 
+    async def _enqueue(task_name: str, lock: str, **kwargs: Any) -> None:
+        """Defer a job once: a copy already waiting under the same lock is enough."""
+        with contextlib.suppress(AlreadyEnqueued):
+            await app.tasks[task_name].configure(queueing_lock=lock).defer_async(**kwargs)
+
+    async def _fetch_one(sql: str, params: tuple[Any, ...]) -> tuple[Any, ...] | None:
+        assert pool is not None
+        async with pool.connection() as db_conn:
+            cur = await db_conn.execute(sql, params)
+            row: tuple[Any, ...] | None = await cur.fetchone()
+        return row
+
+    async def _advance_stage(
+        account_id: str, kind: str, activity_id: str | None, org_id: str, workspace_id: str
+    ) -> None:
+        await _enqueue(
+            "account.stage_advance",
+            f"stage:{account_id}:{kind}:{activity_id}",
+            account_id=account_id,
+            activity_id=activity_id,
+            activity_kind=kind,
+            workspace_id=workspace_id,
+            org_id=org_id,
+        )
+
+    async def _derive(evt: str, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        """S5 dependency graph: claim → verdict → score → label → research/card; activity → stage.
+        Every consumer is idempotent, so a replayed event only repeats work."""
+        org_id = str(event.get("org_id") or "")
+        workspace_id = str(event.get("workspace_id") or "")
+        if pool is None or not org_id or not workspace_id:
+            return
+        tenant = {"workspace_id": workspace_id, "org_id": org_id}
+
+        if evt == "source_record.created":
+            if payload.get("source_type") not in NO_EXTRACTION_SOURCE_TYPES:
+                source_record_id = str(payload["source_record_id"])
+                await _enqueue(
+                    "extract.relevance_judge", source_record_id, source_record_id=source_record_id
+                )
+        elif evt == "verdict.changed":
+            row = await _fetch_one(
+                "select id from public.account where entity_id = %s and workspace_id = %s",
+                (str(payload["entity_id"]), workspace_id),
+            )
+            if row is not None:
+                await _enqueue("score.compute", f"score:{row[0]}", account_id=str(row[0]), **tenant)
+        elif evt == "contact_point.verified":
+            row = await _fetch_one(
+                "select account_id from public.contact_point where id = %s",
+                (str(payload["contact_point_id"]),),
+            )
+            if row is not None and row[0] is not None:
+                await _enqueue("score.compute", f"score:{row[0]}", account_id=str(row[0]), **tenant)
+        elif evt == "score.band_changed":
+            account_id = str(payload["account_id"])
+            await _enqueue(
+                "account.card.generate", f"card:{account_id}", account_id=account_id, **tenant
+            )
+            if payload.get("new_band") in RESEARCH_BANDS:
+                # Research is automatic for the strongest accounts with a supporting verdict (M6).
+                row = await _fetch_one(
+                    """select 1 from public.verdict v join public.account a on a.entity_id = v.entity_id
+                       where a.id = %s and v.brief_version_id = %s
+                         and v.value in ('Confirmed', 'Likely')""",  # noqa: E501
+                    (account_id, str(payload["brief_version_id"])),
+                )
+                if row is not None:
+                    await _enqueue(
+                        "research.generate",
+                        f"research:{account_id}",
+                        account_id=account_id,
+                        **tenant,
+                    )
+                    await _enqueue(
+                        "enrichment.run", f"enrich:{account_id}", account_id=account_id, **tenant
+                    )
+        elif evt == "research_doc.published":
+            account_id = str(payload["account_id"])
+            await _enqueue(
+                "account.card.generate", f"card:{account_id}", account_id=account_id, **tenant
+            )
+        elif evt == "campaign.member_added":
+            await _advance_stage(
+                str(payload["account_id"]), "campaign_member_added", None, org_id, workspace_id
+            )
+        elif evt == "reply.received":
+            activity_id = str(payload["activity_id"])
+            await _enqueue(
+                "reply.auto_classify", f"reply:{activity_id}", activity_id=activity_id, **tenant
+            )
+        elif evt == "reply.classified":
+            # Only a genuine reply moves the stage; out-of-office and the rest never do (M11).
+            if payload.get("reply_class") in GENUINE_REPLY_CLASSES and payload.get("account_id"):
+                await _advance_stage(
+                    str(payload["account_id"]),
+                    "genuine_reply",
+                    str(payload["activity_id"]),
+                    org_id,
+                    workspace_id,
+                )
+        elif evt == "meeting.held":
+            if payload.get("account_id") and payload.get("activity_id"):
+                await _advance_stage(
+                    str(payload["account_id"]),
+                    "meeting_held",
+                    str(payload["activity_id"]),
+                    org_id,
+                    workspace_id,
+                )
+        elif evt == "account.stage_changed":
+            account_id = str(payload["account_id"])
+            await _enqueue(
+                "account.card.generate", f"card:{account_id}", account_id=account_id, **tenant
+            )
+            if payload.get("to_stage") in LIVE_STAGES:
+                await _enqueue(
+                    "next_step.suggest", f"nss:{account_id}", account_id=account_id, **tenant
+                )
+
+    async def _fan_out_webhooks(evt: str, event: dict[str, Any], payload: dict[str, Any]) -> None:
+        """M13: every enabled subscription in the event's workspace that asked for this type."""
+        workspace_id = event.get("workspace_id")
+        event_id = event.get("event_id")
+        if pool is None or not workspace_id or not event_id:
+            return
+        for subscription_id in await _subscriptions_for_event(pool, UUID(str(workspace_id)), evt):
+            await _enqueue(
+                "webhook.deliver",
+                f"wh:{subscription_id}:{event_id}",
+                subscription_id=str(subscription_id),
+                event_id=str(event_id),
+                event_type=evt,
+                payload=payload,
+            )
+
     @job(app, type=DISPATCH_TASK, kill_switch=kill_switch, queue="events")
     async def dispatch(**event: Any) -> None:
-        # Consumers (derivation S5, webhooks M13, notifications, indexer S9, health M17)
-        # register here as their modules land. Each must be idempotent by event_id.
+        # Each consumer must be idempotent by event_id: delivery is at least once.
         evt = event.get("event", "")
         payload = event.get("payload") or {}
+        await _derive(evt, event, payload)
+        await _fan_out_webhooks(evt, event, payload)
         if evt == "brief.intake_requested":
             await brief_intake.configure(queueing_lock=payload["brief_id"]).defer_async(
                 brief_id=payload["brief_id"],
@@ -869,32 +1294,25 @@ def build_app(
                 workspace_id=payload["workspace_id"],
             )
         elif evt == "radar.fetch_queued":
-            # csv_upload → source.fetch_csv; job_post → source.fetch_job_post; etc.
-            ctype = payload.get("connector_type", "")
-            job_name = f"source.fetch_{ctype.replace('_upload', '')}"
-            if job_name in app.tasks:
-                with contextlib.suppress(AlreadyEnqueued):
-                    await app.configure_task(
-                        name=job_name, queueing_lock=payload["radar_id"]
-                    ).defer_async(
-                        radar_id=payload["radar_id"],
-                        org_id=payload["org_id"],
-                        workspace_id=payload["workspace_id"],
-                        brief_id=payload["brief_id"],
-                    )
+            await _queue_fetch(
+                payload["radar_id"],
+                payload.get("connector_type", ""),
+                payload["org_id"],
+                payload["workspace_id"],
+                payload["brief_id"],
+            )
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")
             version = payload.get("version")
             if brief_id:
                 # Fetch workspace_id from the brief table — the payload only carries
                 # {brief_id, version} and does NOT include workspace_id.
-                async with pool.connection() as db_conn:
-                    async with db_conn.cursor() as wcur:
-                        await wcur.execute(
-                            "select workspace_id from public.brief where id = %s",
-                            (brief_id,),
-                        )
-                        brief_row = await wcur.fetchone()
+                async with pool.connection() as db_conn, db_conn.cursor() as wcur:
+                    await wcur.execute(
+                        "select workspace_id from public.brief where id = %s",
+                        (brief_id,),
+                    )
+                    brief_row = await wcur.fetchone()
                 workspace_id = str(brief_row[0]) if brief_row else None
 
                 async with pool.connection() as db_conn:
@@ -906,21 +1324,25 @@ def build_app(
                     radars = await cur.fetchall()
                 for r in radars:
                     with contextlib.suppress(AlreadyEnqueued):
-                        await app.tasks["radar.generate_queries"].configure(
-                            queueing_lock=f"gq:{r[0]}"
-                        ).defer_async(
-                            radar_id=str(r[0]),
-                            org_id=str(r[1]),
-                            workspace_id=str(r[2]),
+                        await (
+                            app.tasks["radar.generate_queries"]
+                            .configure(queueing_lock=f"gq:{r[0]}")
+                            .defer_async(
+                                radar_id=str(r[0]),
+                                org_id=str(r[1]),
+                                workspace_id=str(r[2]),
+                            )
                         )
                 # Re-queue pending source_records so they are processed under the new brief version.
                 if workspace_id:
                     with contextlib.suppress(AlreadyEnqueued):
-                        await app.tasks["extract.backfill"].configure(
-                            queueing_lock=f"backfill:{brief_id}:{version}"
-                        ).defer_async(
-                            brief_id=brief_id,
-                            workspace_id=workspace_id,
+                        await (
+                            app.tasks["extract.backfill"]
+                            .configure(queueing_lock=f"backfill:{brief_id}:{version}")
+                            .defer_async(
+                                brief_id=brief_id,
+                                workspace_id=workspace_id,
+                            )
                         )
         log.info("outbox.dispatched", event_id=event.get("event_id"), event_type=evt)
 

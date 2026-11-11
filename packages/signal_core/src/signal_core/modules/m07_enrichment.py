@@ -1,300 +1,363 @@
-"""M7 Enrichment engine — provider waterfall, verification gate, suppression.
+"""M7 Enrichment — find the right people at an account and verified ways to reach them.
 
-Flow (per entity linked to the account):
-  1. Fetch account org_id and entity_id.
-  2. For the entity:
-     a. Never-pay-twice: skip if valid contact_point exists within 30 days.
-     b. Suppression: skip if invalid contact_point exists for same type.
-     c. Run provider waterfall; reserve budget before each paid provider.
-     d. On first valid result, write via app.create_contact_point RPC.
+Flow for one account:
+  1. Load the account, its company name and domain, and the Brief's personas.
+  2. Never pay twice: skip when the account already has a valid contact verified in the last
+     30 days, or was looked up in that window.
+  3. Provider waterfall: providers are tried in order and the waterfall stops at the first one
+     that returns a valid contact. A paid lookup reserves budget first (S6); the reservation is
+     settled with the real cost on success and released when nothing was bought.
+  4. Each contact becomes a tenant-scoped person with a works_at link to the company. The value
+     is stored encrypted, with a keyed digest for de-duplication; suppressed people are skipped.
+
+Providers are configured by environment. With none configured the job does nothing: Settings
+shows "Not set up yet".
 """
 
 from __future__ import annotations
 
+import hashlib
+import json
+import time
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Any, Protocol
 from uuid import UUID
 
+import httpx
+from psycopg_pool import AsyncConnectionPool
+
 from signal_core.ai_gateway.gateway import AiGateway
+from signal_core.briefs import active_brief_versions
+from signal_core.config import get_settings
+from signal_core.crypto import SecretsNotConfigured, encrypt_secret, lookup_hash
 from signal_core.logging import get_logger
-from signal_core.metering import CallContext
+from signal_core.metering import BudgetPaused, CallContext
 
 log = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Provider definitions
-# ---------------------------------------------------------------------------
+RECENT_DAYS = 30
+MAX_CONTACTS_PER_ACCOUNT = 10
+
+
+@dataclass(frozen=True)
+class FoundContact:
+    name: str
+    title: str | None
+    type: str  # email | phone | profile
+    value: str
+    status: str  # valid | risky | invalid | unknown
+    verified_at: datetime | None = None
+
+
+class EnrichmentProvider(Protocol):
+    name: str
+    is_paid: bool
+    cost_usd: Decimal
+
+    async def lookup(self, company_name: str, company_domain: str) -> list[FoundContact]: ...
 
 
 class StubProvider:
+    """Returns nothing. Used in tests (subclassed) and never configured in production."""
+
     name = "stub"
     is_paid = False
-    contact_type = "email"
+    cost_usd = Decimal(0)
 
-    async def lookup(
-        self,
-        entity_id: UUID,
-        display_name: str,
-        company_domain: str,
-    ) -> dict | None:
-        """Returns dict with type/value_encrypted/status or None.
+    async def lookup(self, company_name: str, company_domain: str) -> list[FoundContact]:
+        return []
 
-        Base stub returns nothing; tests override via subclass or monkeypatch.
-        """
+
+class HunterProvider:
+    """Hunter domain search: people at a company domain with a verification status."""
+
+    name = "hunter"
+    is_paid = True
+    cost_usd = Decimal("0.05")
+    _URL = "https://api.hunter.io/v2/domain-search"
+    _STATUS = {"valid": "valid", "accept_all": "risky", "invalid": "invalid"}  # noqa: RUF012
+
+    def __init__(self, api_key: str) -> None:
+        self._api_key = api_key
+
+    async def lookup(self, company_name: str, company_domain: str) -> list[FoundContact]:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            response = await client.get(
+                self._URL,
+                params={"domain": company_domain, "type": "personal", "limit": 25},
+                headers={"X-API-KEY": self._api_key},
+            )
+        response.raise_for_status()
+        emails = (response.json().get("data") or {}).get("emails") or []
+        found: list[FoundContact] = []
+        for item in emails:
+            value = item.get("value")
+            if not value:
+                continue
+            verification = item.get("verification") or {}
+            status = self._STATUS.get(str(verification.get("status")), "unknown")
+            verified_at: datetime | None = None
+            if verification.get("date"):
+                try:
+                    verified_at = datetime.fromisoformat(str(verification["date"])).replace(
+                        tzinfo=UTC
+                    )
+                except ValueError:
+                    verified_at = None
+            if status == "valid" and verified_at is None:
+                verified_at = datetime.now(UTC)
+            name = " ".join(p for p in (item.get("first_name"), item.get("last_name")) if p)
+            found.append(
+                FoundContact(
+                    name=name or value.split("@")[0],
+                    title=item.get("position"),
+                    type="email",
+                    value=str(value),
+                    status=status,
+                    verified_at=verified_at,
+                )
+            )
+        return found
+
+
+def configured_providers() -> list[EnrichmentProvider]:
+    settings = get_settings()
+    providers: list[EnrichmentProvider] = []
+    if settings.hunter_api_key is not None:
+        providers.append(HunterProvider(settings.hunter_api_key.get_secret_value()))
+    return providers
+
+
+def match_persona(title: str | None, personas: dict[str, list[str]]) -> str | None:
+    """The persona role (buyer, user, influencer) whose titles the contact's title matches."""
+    if not title:
         return None
-
-
-PROVIDERS: list[StubProvider] = [StubProvider()]
-
-# ---------------------------------------------------------------------------
-# Main function
-# ---------------------------------------------------------------------------
+    lowered = title.lower()
+    for role, titles in personas.items():
+        if any(t and t.lower() in lowered for t in titles):
+            return role
+    return None
 
 
 async def enrich_account(
-    pool: object,  # AsyncConnectionPool
+    pool: AsyncConnectionPool,
     gateway: AiGateway,
     account_id: UUID,
     workspace_id: UUID,
     ctx: CallContext,
+    *,
+    providers: list[EnrichmentProvider] | None = None,
 ) -> int:
-    """Run enrichment waterfall for all person entities linked to account.
-
-    Returns count of new contact_points created.
-    """
-    # 1. Fetch account org_id and entity_id
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT a.org_id, a.entity_id FROM public.account a
-                WHERE a.id = %s AND a.workspace_id = %s
-                """,
-                (str(account_id), str(workspace_id)),
-            )
-            account_row = await cur.fetchone()
-
-    if account_row is None:
-        log.warning(
-            "enrichment.account_not_found",
-            account_id=str(account_id),
-            workspace_id=str(workspace_id),
-        )
+    """Run the waterfall for one account. Returns the number of contacts stored or refreshed."""
+    providers = configured_providers() if providers is None else providers
+    if not providers:
+        log.info("enrichment.not_configured", account_id=str(account_id))
         return 0
 
-    org_id = UUID(str(account_row[0]))
-    entity_id = UUID(str(account_row[1]))
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT a.org_id, e.display_name,
+                   (SELECT ea.value_normalised FROM public.entity_alias ea
+                     WHERE ea.entity_id = a.entity_id AND ea.alias_type = 'domain'
+                     ORDER BY ea.confidence DESC LIMIT 1),
+                   EXISTS (SELECT 1 FROM public.contact_point cp
+                            WHERE cp.account_id = a.id AND cp.status = 'valid'
+                              AND cp.verified_at > now() - make_interval(days => %s)),
+                   EXISTS (SELECT 1 FROM public.source_record sr
+                            WHERE sr.org_id = a.org_id AND sr.source_type = 'enrichment'
+                              AND sr.url = 'account:' || a.id::text
+                              AND sr.fetched_at > now() - make_interval(days => %s))
+              FROM public.account a
+              JOIN public.entity e ON e.id = a.entity_id
+             WHERE a.id = %s AND a.workspace_id = %s
+            """,
+            (RECENT_DAYS, RECENT_DAYS, str(account_id), str(workspace_id)),
+        )
+        row = await cur.fetchone()
 
-    # 2. Fetch entity display_name
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT e.display_name FROM public.entity e WHERE e.id = %s",
-                (str(entity_id),),
-            )
-            entity_row = await cur.fetchone()
+    if row is None:
+        log.warning("enrichment.account_not_found", account_id=str(account_id))
+        return 0
+    org_id, company_name, domain, has_recent_valid, looked_up_recently = row
+    if not domain:
+        log.info("enrichment.no_domain", account_id=str(account_id))
+        return 0
+    if has_recent_valid or looked_up_recently:
+        log.info("enrichment.skip_recent", account_id=str(account_id))
+        return 0
 
-    display_name: str = (entity_row[0] if entity_row else None) or "unknown"
+    briefs = await active_brief_versions(pool, workspace_id)
+    personas_raw = briefs[0].config.get("personas") if briefs else None
+    personas: dict[str, list[str]] = personas_raw if isinstance(personas_raw, dict) else {}
+    wants_personas = any(personas.values())
 
-    # 3. Fetch company domain from entity_alias (alias_type = 'domain')
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT ea.value_normalised FROM public.entity_alias ea WHERE ea.entity_id = %s AND ea.alias_type = 'domain' LIMIT 1",
-                (str(entity_id),),
-            )
-            domain_row = await cur.fetchone()
-
-    company_domain: str = (domain_row[0] if domain_row else None) or ""
-
-    created_count = 0
-
-    # 4. Run provider waterfall
-    for provider in PROVIDERS:
-        contact_type = provider.contact_type
-
-        # Never-pay-twice: skip if valid contact_point exists within 30 days
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT id FROM public.contact_point
-                    WHERE entity_id = %s AND type = %s AND status = 'valid'
-                      AND (verified_at IS NULL OR verified_at > now() - interval '30 days')
-                    LIMIT 1
-                    """,
-                    (str(entity_id), contact_type),
-                )
-                existing_valid = await cur.fetchone()
-
-        if existing_valid is not None:
-            log.info(
-                "enrichment.skip_already_valid",
-                entity_id=str(entity_id),
-                contact_type=contact_type,
-            )
+    stored = 0
+    for provider in providers:
+        reservation_id = await _reserve(pool, ctx, provider) if provider.is_paid else None
+        started = time.monotonic()
+        try:
+            contacts = await provider.lookup(str(company_name or ""), str(domain))
+        except Exception as exc:
+            log.warning("enrichment.lookup_failed", provider=provider.name, error=str(exc))
+            await _settle(pool, reservation_id, None)
             continue
 
-        # Suppression: skip if invalid contact_point exists for same type
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT id FROM public.contact_point
-                    WHERE entity_id = %s AND type = %s AND status = 'invalid'
-                    LIMIT 1
-                    """,
-                    (str(entity_id), contact_type),
-                )
-                existing_invalid = await cur.fetchone()
+        latency_ms = int((time.monotonic() - started) * 1000)
+        await _settle(
+            pool,
+            reservation_id,
+            {
+                "capability": "enrich",
+                "provider": provider.name,
+                "model": None,
+                "latency_ms": latency_ms,
+                "status": "ok",
+                "job_id": ctx.job_id,
+                "lines": [
+                    {"unit": "enrichment_lookup", "quantity": 1, "cost_usd": str(provider.cost_usd)}
+                ],
+            },
+        )
 
-        if existing_invalid is not None:
-            log.info(
-                "enrichment.skip_suppressed",
-                entity_id=str(entity_id),
-                contact_type=contact_type,
-                provider=provider.name,
-            )
-            continue
+        # Provenance for whatever the provider returned (no personal data in the record).
+        source_record_id = await _record_lookup(
+            pool,
+            UUID(str(org_id)),
+            workspace_id,
+            account_id,
+            provider.name,
+            str(domain),
+            len(contacts),
+        )
 
-        # Reserve budget before paid provider calls
-        reservation_id: UUID | None = None
-        if provider.is_paid:
-            try:
-                estimate_usd = Decimal("0.01")  # default estimate per lookup
-                reservation_id = await _reserve_budget(pool, ctx, estimate_usd)
-            except Exception as exc:
-                log.warning(
-                    "enrichment.budget_reserve_failed",
-                    provider=provider.name,
-                    error=str(exc),
-                )
+        any_valid = False
+        for contact in contacts[: MAX_CONTACTS_PER_ACCOUNT * 3]:
+            persona = match_persona(contact.title, personas)
+            if wants_personas and persona is None:
                 continue
+            if stored >= MAX_CONTACTS_PER_ACCOUNT:
+                break
+            try:
+                encrypted, digest = encrypt_secret(contact.value), lookup_hash(contact.value)
+            except SecretsNotConfigured:
+                log.error("enrichment.secrets_not_configured")
+                return stored
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT app.upsert_person_contact(%s, %s, %s, %s, %s, %s, %s, %s, %s,"
+                    " %s::public.contact_verification_status, %s, %s, %s)",
+                    (
+                        str(org_id),
+                        str(workspace_id),
+                        str(account_id),
+                        contact.name,
+                        contact.title,
+                        persona,
+                        contact.type,
+                        encrypted,
+                        digest,
+                        contact.status,
+                        contact.verified_at,
+                        provider.name,
+                        str(source_record_id),
+                    ),
+                )
+                cp_row = await cur.fetchone()
+            if cp_row is not None and cp_row[0] is not None:
+                stored += 1
+                any_valid = any_valid or contact.status == "valid"
 
-        # Call provider
-        try:
-            result = await provider.lookup(entity_id, display_name, company_domain)
-        except Exception as exc:
-            log.warning(
-                "enrichment.provider_lookup_failed",
-                provider=provider.name,
-                entity_id=str(entity_id),
-                error=str(exc),
-            )
-            if reservation_id is not None:
-                await _release_budget(pool, reservation_id)
-            continue
-
-        if result is None:
-            log.info(
-                "enrichment.provider_no_result",
-                provider=provider.name,
-                entity_id=str(entity_id),
-            )
-            if reservation_id is not None:
-                await _release_budget(pool, reservation_id)
-            continue
-
-        # Write via app.create_contact_point RPC (S8: all writes through RPCs)
-        # params: (org_id, workspace_id, entity_id, account_id, type, value_encrypted,
-        #          status::contact_verification_status, verified_at, provider)
-        cp_type = result.get("type", contact_type)
-        cp_value = result.get("value_encrypted", "")
-        cp_status = result.get("status", "unknown")
-        cp_verified_at = result.get("verified_at", None)
-
-        try:
-            async with pool.connection() as conn:  # type: ignore[union-attr]
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        """
-                        SELECT app.create_contact_point(%s, %s, %s, %s, %s, %s,
-                            %s::public.contact_verification_status, %s, %s)
-                        """,
-                        (
-                            str(org_id),
-                            str(workspace_id),
-                            str(entity_id),
-                            str(account_id),
-                            cp_type,
-                            cp_value,
-                            cp_status,
-                            cp_verified_at,
-                            provider.name,
-                        ),
-                    )
-            created_count += 1
-            log.info(
-                "enrichment.contact_point_created",
-                entity_id=str(entity_id),
-                provider=provider.name,
-                contact_type=cp_type,
-                status=cp_status,
-            )
-        except Exception as exc:
-            log.warning(
-                "enrichment.create_contact_point_failed",
-                entity_id=str(entity_id),
-                provider=provider.name,
-                error=str(exc),
-            )
-            if reservation_id is not None:
-                await _release_budget(pool, reservation_id)
-            continue
-
-        # Waterfall: stop at first valid result per provider type
-        if cp_status == "valid":
+        log.info(
+            "enrichment.provider_done",
+            account_id=str(account_id),
+            provider=provider.name,
+            returned=len(contacts),
+            stored=stored,
+        )
+        if any_valid:
             break
 
-    log.info(
-        "enrichment.complete",
-        account_id=str(account_id),
-        created_count=created_count,
-    )
-    return created_count
+    return stored
 
 
-# ---------------------------------------------------------------------------
-# Budget helpers
-# ---------------------------------------------------------------------------
+async def _record_lookup(
+    pool: AsyncConnectionPool,
+    org_id: UUID,
+    workspace_id: UUID,
+    account_id: UUID,
+    provider: str,
+    domain: str,
+    returned: int,
+) -> UUID:
+    """One source record per lookup: the receipt every contact found in it points to."""
+    now = datetime.now(UTC)
+    digest = hashlib.sha256(
+        f"enrichment:{provider}:{account_id}:{now.isoformat()}".encode()
+    ).hexdigest()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
+            (
+                str(org_id),
+                str(workspace_id),
+                f"enrichment:{provider}",
+                "enrichment",
+                f"account:{account_id}",
+                now,
+                digest,
+                None,
+                None,
+                json.dumps({"provider": provider, "domain": domain, "contacts_returned": returned}),
+            ),
+        )
+        row = await cur.fetchone()
+    assert row is not None
+    return UUID(str(row[0]))
 
 
-async def _reserve_budget(pool: object, ctx: CallContext, estimate_usd: Decimal) -> UUID:
-    """Reserve budget via app.reserve_budget RPC."""
-    import json
-
+async def _reserve(
+    pool: AsyncConnectionPool, ctx: CallContext, provider: EnrichmentProvider
+) -> UUID:
+    """Reserve the lookup's cost. Over a cap, the job pauses for approval (BudgetPaused)."""
     approval = ctx.job_args.get("approval_id")
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT app.reserve_budget(%s, %s, %s, %s, %s::jsonb, %s)",
-                (
-                    str(ctx.workspace_id),
-                    str(ctx.brief_id) if ctx.brief_id else None,
-                    str(estimate_usd),
-                    ctx.job_type,
-                    json.dumps(ctx.job_args, default=str),
-                    str(approval) if approval else None,
-                ),
-            )
-            row = await cur.fetchone()
-    result = row[0] if row else {}
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT app.reserve_budget(%s, %s, %s::numeric, %s, %s::jsonb, %s)",
+            (
+                str(ctx.workspace_id),
+                str(ctx.brief_id) if ctx.brief_id else None,
+                str(provider.cost_usd),
+                ctx.job_type,
+                json.dumps(ctx.job_args, default=str),
+                str(approval) if approval else None,
+            ),
+        )
+        row = await cur.fetchone()
+    result: dict[str, Any] = row[0] if row else {}
     if not result.get("ok"):
-        raise RuntimeError(f"Budget reservation failed: {result}")
+        raise BudgetPaused(
+            UUID(str(result["approval_id"])),
+            str(result.get("period")),
+            Decimal(str(result.get("cap", 0))),
+            Decimal(str(result.get("spent", 0))),
+        )
     return UUID(str(result["reservation_id"]))
 
 
-async def _release_budget(pool: object, reservation_id: UUID) -> None:
-    """Release a budget reservation."""
+async def _settle(
+    pool: AsyncConnectionPool, reservation_id: UUID | None, actual: dict[str, Any] | None
+) -> None:
+    """Settle a reservation with the actual usage, or release it when `actual` is None."""
+    if reservation_id is None:
+        return
     try:
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT app.settle_reservation(%s, %s)",
-                    (str(reservation_id), None),
-                )
+        async with pool.connection() as conn:
+            await conn.execute(
+                "SELECT app.settle_reservation(%s, %s::jsonb)",
+                (str(reservation_id), json.dumps(actual) if actual is not None else None),
+            )
     except Exception as exc:
-        log.warning(
-            "enrichment.release_budget_failed",
-            reservation_id=str(reservation_id),
-            error=str(exc),
-        )
+        log.warning("enrichment.settle_failed", reservation_id=str(reservation_id), error=str(exc))

@@ -101,7 +101,18 @@ async def amain() -> None:
         )
         worker = asyncio.create_task(
             app.run_worker_async(
-                queues=["system", "events", "briefs", "fetch", "extract", "identity", "derive", "compute", "health", "default"],
+                queues=[
+                    "system",
+                    "events",
+                    "briefs",
+                    "fetch",
+                    "extract",
+                    "identity",
+                    "derive",
+                    "compute",
+                    "health",
+                    "default",
+                ],
                 install_signal_handlers=False,
             )
         )

@@ -43,9 +43,7 @@ async def run_brief_intake(
         config = result.value.model_dump()
     except Exception:
         async with pool.connection() as conn:
-            await conn.execute(
-                "select app.fail_brief_intake(%s)", (str(inp.brief_id),)
-            )
+            await conn.execute("select app.fail_brief_intake(%s)", (str(inp.brief_id),))
         raise
     async with pool.connection() as conn:
         await conn.execute(

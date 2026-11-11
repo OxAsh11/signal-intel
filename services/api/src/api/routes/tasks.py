@@ -56,14 +56,13 @@ async def list_tasks(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, workspace_id, account_id, title, status, due_date, created_at"
-                f" FROM public.task WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, workspace_id, account_id, title, status, due_date, created_at"
+            f" FROM public.task WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {

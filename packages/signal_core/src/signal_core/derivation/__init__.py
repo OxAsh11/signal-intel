@@ -7,4 +7,4 @@ from __future__ import annotations
 
 from signal_core.derivation.writer import upsert_memory_chunk, upsert_verdict
 
-__all__ = ["upsert_verdict", "upsert_memory_chunk"]
+__all__ = ["upsert_memory_chunk", "upsert_verdict"]

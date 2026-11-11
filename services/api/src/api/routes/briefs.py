@@ -48,14 +48,13 @@ async def list_briefs(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, workspace_id, name, state, current_version_id, updated_at"
-                f" FROM public.brief WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, workspace_id, name, state, current_version_id, updated_at"
+            f" FROM public.brief WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {
@@ -97,29 +96,28 @@ async def list_brief_versions(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            # Verify the brief exists and belongs to this org
-            await cur.execute(
-                "SELECT id FROM public.brief WHERE id = %s AND org_id = %s",
-                (str(brief_id), str(token.org_id)),
-            )
-            if await cur.fetchone() is None:
-                raise HTTPException(status_code=404, detail="Brief not found")
+    async with pool.connection() as conn, conn.cursor() as cur:
+        # Verify the brief exists and belongs to this org
+        await cur.execute(
+            "SELECT id FROM public.brief WHERE id = %s AND org_id = %s",
+            (str(brief_id), str(token.org_id)),
+        )
+        if await cur.fetchone() is None:
+            raise HTTPException(status_code=404, detail="Brief not found")
 
-            await cur.execute(
-                f"SELECT id, brief_id, version, created_at"
-                f" FROM public.brief_version WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+        await cur.execute(
+            f"SELECT id, brief_id, version, published_at"
+            f" FROM public.brief_version WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {
             "id": str(r[0]),
             "brief_id": str(r[1]),
             "version": r[2],
-            "created_at": r[3].isoformat() if r[3] else None,
+            "published_at": r[3].isoformat() if r[3] else None,
         }
         for r in rows
     ]

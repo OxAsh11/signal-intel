@@ -8,8 +8,11 @@ Kill-switch: health.check
 
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
+from typing import Any
 from uuid import UUID
+
+from psycopg_pool import AsyncConnectionPool
 
 from signal_core.kill_switch import is_enabled
 from signal_core.logging import get_logger
@@ -50,7 +53,7 @@ PIPELINES: dict[str, dict[str, str]] = {
         """,
     },
     "stage": {
-        "expected_sql": "SELECT COUNT(*) FROM public.account WHERE workspace_id = %s AND stage != 'Untouched'",
+        "expected_sql": "SELECT COUNT(*) FROM public.account WHERE workspace_id = %s AND stage != 'Untouched'",  # noqa: E501
         "actual_sql": """
             SELECT COUNT(DISTINCT ase.account_id) FROM public.account_stage_event ase
             JOIN public.account a ON a.id = ase.account_id
@@ -67,10 +70,10 @@ PIPELINES: dict[str, dict[str, str]] = {
 
 
 async def check_completeness(
-    pool: object,  # AsyncConnectionPool
+    pool: AsyncConnectionPool,  # AsyncConnectionPool
     workspace_id: UUID,
     ctx: CallContext,
-) -> dict[str, dict]:
+) -> dict[str, dict[str, Any]]:
     """Check data completeness for all pipelines in a workspace.
 
     Returns dict mapping pipeline_name → {'expected': int, 'actual': int}.
@@ -81,7 +84,7 @@ async def check_completeness(
         return {}
 
     # Fetch org_id for this workspace (needed for the RPC call)
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT w.org_id FROM public.workspace w WHERE w.id = %s",
@@ -95,15 +98,15 @@ async def check_completeness(
 
     org_id: str = str(workspace_row[0])
 
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     period_start = now - timedelta(days=30)
     period_end = now
 
-    result: dict[str, dict] = {}
+    result: dict[str, dict[str, Any]] = {}
 
     for pipeline_name, pipeline in PIPELINES.items():
         # Run expected and actual counts
-        async with pool.connection() as conn:  # type: ignore[union-attr]
+        async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(pipeline["expected_sql"], (str(workspace_id),))
                 expected_row = await cur.fetchone()
@@ -114,7 +117,7 @@ async def check_completeness(
                 actual = int(actual_row[0]) if actual_row else 0
 
         # Persist via RPC (S8: no direct INSERT)
-        async with pool.connection() as conn:  # type: ignore[union-attr]
+        async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT app.record_data_completeness(%s, %s, %s, %s, %s, %s, %s)",

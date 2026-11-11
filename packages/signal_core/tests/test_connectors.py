@@ -3,11 +3,10 @@
 Tasks 4 and 5 will ADD further tests to this file.
 """
 
-import io
-import csv
 import pytest
-from signal_core.connectors.csv_upload import CsvConnector
+
 from signal_core.connectors.base import FetchGuard
+from signal_core.connectors.csv_upload import CsvConnector
 
 
 @pytest.mark.asyncio
@@ -17,7 +16,7 @@ async def test_csv_produces_one_payload_per_data_row(tmp_path):
     path.write_text("\n".join(",".join(r) for r in rows))
     conn = CsvConnector()
     guard = FetchGuard()
-    payloads, cursor = await conn.fetch(
+    payloads, _cursor = await conn.fetch(
         config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000
     )
     assert len(payloads) == 2
@@ -31,7 +30,9 @@ async def test_csv_header_only_returns_zero_payloads(tmp_path):
     path.write_text("name,domain\n")
     conn = CsvConnector()
     guard = FetchGuard()
-    payloads, _ = await conn.fetch(config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000)
+    payloads, _ = await conn.fetch(
+        config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000
+    )
     assert payloads == []
 
 
@@ -41,7 +42,9 @@ async def test_csv_deduplicates_identical_rows(tmp_path):
     path.write_text("name,domain\nAcme,acme.com\nAcme,acme.com\n")
     conn = CsvConnector()
     guard = FetchGuard()
-    payloads, _ = await conn.fetch(config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000)
+    payloads, _ = await conn.fetch(
+        config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000
+    )
     hashes = [p.content_hash for p in payloads]
     assert len(set(hashes)) == len(hashes)  # all unique hashes (deduped at upload layer)
 
@@ -101,7 +104,7 @@ async def test_website_strips_html():
 
     with patch("aiohttp.ClientSession", new=_session_ctx):
         conn = WebsiteConnector()
-        payloads, next_cursor = await conn.fetch(
+        payloads, _next_cursor = await conn.fetch(
             config={"urls": ["http://example.com/page"]},
             queries=[],
             cursor={},
@@ -179,10 +182,12 @@ def test_radar_query_set_model_validates():
     """RadarQuerySet validates correctly with all source types."""
     from signal_core.modules.m02_radar import RadarQuery, RadarQuerySet
 
-    qs = RadarQuerySet(queries=[
-        RadarQuery(query_text="SolidWorks hiring", language="en", source="hypothesis"),
-        RadarQuery(query_text="CAD software engineer", source="icp"),
-    ])
+    qs = RadarQuerySet(
+        queries=[
+            RadarQuery(query_text="SolidWorks hiring", language="en", source="hypothesis"),
+            RadarQuery(query_text="CAD software engineer", source="icp"),
+        ]
+    )
     assert len(qs.queries) == 2
     assert qs.queries[0].source == "hypothesis"
     assert qs.queries[1].source == "icp"
@@ -200,18 +205,26 @@ async def test_generate_radar_queries_calls_gateway():
     from signal_core.modules.m02_radar import RadarQuery, RadarQuerySet
     from signal_core.modules.m02_radar_ai import generate_radar_queries
 
-    expected_qs = RadarQuerySet(queries=[
-        RadarQuery(query_text="SolidWorks hiring", source="hypothesis"),
-        RadarQuery(query_text="CAD engineer ICP", source="icp"),
-    ])
+    expected_qs = RadarQuerySet(
+        queries=[
+            RadarQuery(query_text="SolidWorks hiring", source="hypothesis"),
+            RadarQuery(query_text="CAD engineer ICP", source="icp"),
+        ]
+    )
 
     class _FakeGateway:
         async def run(self, *args, **kwargs):
-            return Result(value=expected_qs, extractor_version_id=uuid4(), cost_usd=Decimal("0.001"))
+            return Result(
+                value=expected_qs, extractor_version_id=uuid4(), cost_usd=Decimal("0.001")
+            )
 
     ctx = CallContext(
-        org_id=uuid4(), workspace_id=uuid4(), brief_id=uuid4(),
-        job_id=None, job_type="test", job_args={},
+        org_id=uuid4(),
+        workspace_id=uuid4(),
+        brief_id=uuid4(),
+        job_id=None,
+        job_type="test",
+        job_args={},
     )
     result = await generate_radar_queries(
         gateway=_FakeGateway(),

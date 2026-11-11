@@ -27,6 +27,14 @@ class Settings(BaseSettings):
 
     sentry_dsn: SecretStr | None = None
 
+    # Fernet key (or "new,old" during rotation) for credentials and contact values stored in
+    # the database. Generate with: python -c "from cryptography.fernet import Fernet;
+    # print(Fernet.generate_key().decode())"
+    secrets_encryption_key: SecretStr | None = None
+
+    # Enrichment provider (M7). Without a key the provider is skipped: "Not set up yet".
+    hunter_api_key: SecretStr | None = None
+
     # Supabase project URL (same as NEXT_PUBLIC_SUPABASE_URL) and service key —
     # used by the worker to download uploaded files from Supabase Storage.
     supabase_url: str | None = None

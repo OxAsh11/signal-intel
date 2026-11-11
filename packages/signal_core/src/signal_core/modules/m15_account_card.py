@@ -14,8 +14,10 @@ Flow:
 from __future__ import annotations
 
 import json
+from typing import Any
 from uuid import UUID
 
+from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
 
 from signal_core.ai_gateway.gateway import AiGateway
@@ -26,7 +28,7 @@ from signal_core.metering import CallContext
 log = get_logger(__name__)
 
 # Module-level handle wired by build_app()
-account_card_generate_job: object | None = None
+account_card_generate_job: Any | None = None
 
 
 class AccountCardOutput(BaseModel):
@@ -35,7 +37,7 @@ class AccountCardOutput(BaseModel):
 
 
 async def generate_account_card(
-    pool: object,
+    pool: AsyncConnectionPool,
     gateway: AiGateway,
     account_id: UUID,
     workspace_id: UUID,
@@ -46,7 +48,7 @@ async def generate_account_card(
     Returns account_card id string or None when no brief_version.
     """
     # 1. Find latest published brief_version for this workspace
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -66,7 +68,7 @@ async def generate_account_card(
     hypothesis: str = bv_row[2] or ""
 
     # 2. Fetch account entity_id
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT a.entity_id FROM public.account a WHERE a.id = %s AND a.workspace_id = %s",
@@ -85,7 +87,7 @@ async def generate_account_card(
     entity_id = UUID(str(account_row[0]))
 
     # 3. Fetch entity display_name
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT e.display_name FROM public.entity e WHERE e.id = %s",
@@ -96,7 +98,7 @@ async def generate_account_card(
     display_name: str = (entity_row[0] if entity_row else None) or "unknown"
 
     # 4. Early-return check: existing card more recent than latest verdict
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -108,7 +110,7 @@ async def generate_account_card(
             existing_card = await cur.fetchone()
 
     if existing_card is not None:
-        async with pool.connection() as conn:  # type: ignore[union-attr]
+        async with pool.connection() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     "SELECT MAX(v.computed_at) FROM public.verdict v WHERE v.entity_id = %s",
@@ -127,7 +129,7 @@ async def generate_account_card(
             return str(existing_card[0])
 
     # 5. Fetch latest verdict
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -144,7 +146,7 @@ async def generate_account_card(
     verdict_quotes_str = json.dumps(verdict_quotes) if verdict_quotes else "[]"
 
     # 6. Fetch latest score
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -163,7 +165,7 @@ async def generate_account_card(
     timing: str = str(score_row[4]) if score_row else "N/A"
 
     # 7. Fetch account stage
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT a.stage FROM public.account a WHERE a.id = %s",
@@ -174,7 +176,7 @@ async def generate_account_card(
     account_stage: str = (stage_row[0] if stage_row else None) or "unknown"
 
     # 8. Fetch top claims
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -187,15 +189,15 @@ async def generate_account_card(
             )
             claims = await cur.fetchall()
 
-    claims_summary = "\n".join(
-        f"[CLAIM:{c[0]}] {c[1]}: {c[2]}" for c in claims
-    ) if claims else "(no claims)"
+    claims_summary = (
+        "\n".join(f"[CLAIM:{c[0]}] {c[1]}: {c[2]}" for c in claims) if claims else "(no claims)"
+    )
 
     # 9. Fetch contact coverage
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT COUNT(*) FROM public.contact_point WHERE account_id = %s AND status = 'valid'",
+                "SELECT COUNT(*) FROM public.contact_point WHERE account_id = %s AND status = 'valid'",  # noqa: E501
                 (str(account_id),),
             )
             contact_row = await cur.fetchone()
@@ -238,7 +240,7 @@ async def generate_account_card(
         }
     )
 
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT app.upsert_account_card(%s, %s, %s::jsonb, %s::jsonb)",

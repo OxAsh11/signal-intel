@@ -9,18 +9,18 @@ from uuid import UUID, uuid4
 
 import pytest
 
-from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
+import signal_core.modules.m03_extraction as _m03_extraction
+from signal_core.ai_gateway.errors import AiOutputInvalid
 from signal_core.ai_gateway.gateway import AiGateway, MemoryExtractorVersions
 from signal_core.ai_gateway.providers.fake import FakeProvider
 from signal_core.config import Settings
 from signal_core.contracts.enums import UsageUnit
 from signal_core.metering import CallContext, MemoryBudgetGuard, MemoryPriceBook
-import signal_core.modules.m03_extraction as _m03_extraction
 from signal_core.modules.m03_extraction import (
     ExtractionResult,
     extract_backfill,
-    judge_relevance,
     extract_structured,
+    judge_relevance,
 )
 
 # ---------------------------------------------------------------------------
@@ -42,7 +42,7 @@ PREDICATE_KEY = "uses_hiring"
 class FakeCursor:
     """Cursor-like object returned by FakeConn.cursor()."""
 
-    def __init__(self, conn: "FakeConn") -> None:
+    def __init__(self, conn: FakeConn) -> None:
         self._conn = conn
         self._rows: list[tuple[Any, ...]] = []
 
@@ -55,7 +55,7 @@ class FakeCursor:
     async def fetchall(self) -> list[tuple[Any, ...]]:
         return self._rows
 
-    async def __aenter__(self) -> "FakeCursor":
+    async def __aenter__(self) -> FakeCursor:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -101,14 +101,14 @@ class FakeConn:
         # app.update_extraction_status and others return nothing meaningful
         return []
 
-    async def execute(self, sql: str, args: Any = None) -> "FakeCursor":
+    async def execute(self, sql: str, args: Any = None) -> FakeCursor:
         self._route(sql, args)
         return FakeCursor(self)  # cursor with empty rows for non-select execute calls
 
-    def cursor(self) -> "FakeCursor":
+    def cursor(self) -> FakeCursor:
         return FakeCursor(self)
 
-    async def __aenter__(self) -> "FakeConn":
+    async def __aenter__(self) -> FakeConn:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -213,9 +213,7 @@ async def test_judge_relevance_irrelevant_updates_status() -> None:
     result = await judge_relevance(pool, gw, SOURCE_RECORD_ID, _ctx())
 
     assert result is False
-    status_calls = [
-        args for sql, args in pool.conn.calls if "update_extraction_status" in sql
-    ]
+    status_calls = [args for sql, args in pool.conn.calls if "update_extraction_status" in sql]
     assert len(status_calls) == 1
     assert "irrelevant" in status_calls[0]
 
@@ -229,9 +227,7 @@ async def test_judge_relevance_ai_error_updates_status_and_reraises() -> None:
     with pytest.raises(AiOutputInvalid):
         await judge_relevance(pool, gw, SOURCE_RECORD_ID, _ctx())
 
-    status_calls = [
-        args for sql, args in pool.conn.calls if "update_extraction_status" in sql
-    ]
+    status_calls = [args for sql, args in pool.conn.calls if "update_extraction_status" in sql]
     assert len(status_calls) == 1
     assert "failed" in status_calls[0]
 
@@ -287,9 +283,7 @@ async def test_extract_structured_persists_extracted_status() -> None:
 
     await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
 
-    status_calls = [
-        args for sql, args in pool.conn.calls if "update_extraction_status" in sql
-    ]
+    status_calls = [args for sql, args in pool.conn.calls if "update_extraction_status" in sql]
     assert len(status_calls) == 1
     assert "extracted" in status_calls[0]
 
@@ -303,9 +297,7 @@ async def test_extract_structured_ai_error_updates_status_and_reraises() -> None
     with pytest.raises(AiOutputInvalid):
         await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
 
-    status_calls = [
-        args for sql, args in pool.conn.calls if "update_extraction_status" in sql
-    ]
+    status_calls = [args for sql, args in pool.conn.calls if "update_extraction_status" in sql]
     assert len(status_calls) == 1
     assert "failed" in status_calls[0]
 
@@ -314,9 +306,7 @@ async def test_extract_structured_skips_unknown_predicates() -> None:
     """Claims referencing unknown predicate keys are silently skipped."""
     extraction_resp = json.dumps(
         {
-            "mentions": [
-                {"entity_type": "company", "raw_name": "Acme Corp", "raw_attributes": {}}
-            ],
+            "mentions": [{"entity_type": "company", "raw_name": "Acme Corp", "raw_attributes": {}}],
             "claims": [
                 {
                     "mention_index": 0,
@@ -342,9 +332,7 @@ async def test_extract_structured_skips_oob_mention_index() -> None:
     """Claims with mention_index out of bounds are silently skipped."""
     extraction_resp = json.dumps(
         {
-            "mentions": [
-                {"entity_type": "company", "raw_name": "Acme Corp", "raw_attributes": {}}
-            ],
+            "mentions": [{"entity_type": "company", "raw_name": "Acme Corp", "raw_attributes": {}}],
             "claims": [
                 {
                     "mention_index": 99,  # out of bounds
@@ -384,7 +372,7 @@ class _FakeBackfillCursor:
     async def fetchall(self) -> list[tuple]:
         return self._rows
 
-    async def __aenter__(self) -> "_FakeBackfillCursor":
+    async def __aenter__(self) -> _FakeBackfillCursor:
         return self
 
     async def __aexit__(self, *_: Any) -> None:
@@ -398,7 +386,7 @@ class _FakeBackfillConn:
     def cursor(self) -> _FakeBackfillCursor:
         return _FakeBackfillCursor(self._ids)
 
-    async def __aenter__(self) -> "_FakeBackfillConn":
+    async def __aenter__(self) -> _FakeBackfillConn:
         return self
 
     async def __aexit__(self, *_: Any) -> None:

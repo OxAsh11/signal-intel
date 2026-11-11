@@ -16,8 +16,11 @@ Flow for mark_dormant_accounts:
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
+
+from psycopg_pool import AsyncConnectionPool
 
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
@@ -28,21 +31,43 @@ log = get_logger(__name__)
 # Module-level job handle (wired by services/worker/src/worker/app.py)
 # ---------------------------------------------------------------------------
 
-stage_advance_job: object | None = None
+stage_advance_job: Any | None = None
 
 # ---------------------------------------------------------------------------
 # Transition table
 # ---------------------------------------------------------------------------
 
+# Keys are activity kinds, plus three derived triggers that are not activities:
+#   campaign_member_added  a person from the account entered a live campaign (Queued)
+#   genuine_reply          a reply classified Interested or Referral (a raw reply never moves a stage)  # noqa: E501
+#   dormant_timeout        no activity inside the workspace's dormancy window
+# A genuine reply or inbound contact brings a Dormant account back into the flow.
 TRANSITIONS: dict[str, dict[str, str]] = {
-    "message_sent":        {"Untouched": "Contacted", "Queued": "Contacted"},
-    "reply_received":      {"Contacted": "Engaged"},
-    "inbound_contact":     {"Untouched": "Engaged", "Contacted": "Engaged"},
-    "meeting_held":        {"Contacted": "Meeting", "Engaged": "Meeting", "Qualified": "Meeting"},
-    "marked_qualified":    {"Contacted": "Qualified", "Engaged": "Qualified"},
+    "campaign_member_added": {"Untouched": "Queued"},
+    "message_sent": {"Untouched": "Contacted", "Queued": "Contacted"},
+    "genuine_reply": {
+        "Untouched": "Engaged",
+        "Queued": "Engaged",
+        "Contacted": "Engaged",
+        "Dormant": "Engaged",
+    },
+    "inbound_contact": {
+        "Untouched": "Engaged",
+        "Queued": "Engaged",
+        "Contacted": "Engaged",
+        "Dormant": "Engaged",
+    },
+    "meeting_held": {
+        "Queued": "Meeting",
+        "Contacted": "Meeting",
+        "Engaged": "Meeting",
+        "Qualified": "Meeting",
+        "Dormant": "Meeting",
+    },
+    "marked_qualified": {"Contacted": "Qualified", "Engaged": "Qualified"},
     "marked_disqualified": {"*": "Disqualified"},
-    "deal_created":        {"Meeting": "Handed off"},
-    "dormant_timeout":     {"Contacted": "Dormant", "Engaged": "Dormant", "Qualified": "Dormant"},
+    "deal_created": {"Engaged": "Qualified", "Contacted": "Qualified", "Meeting": "Handed off"},
+    "dormant_timeout": {"Contacted": "Dormant", "Engaged": "Dormant", "Qualified": "Dormant"},
 }
 
 
@@ -52,7 +77,7 @@ TRANSITIONS: dict[str, dict[str, str]] = {
 
 
 async def advance_stage(
-    pool: object,
+    pool: AsyncConnectionPool,
     account_id: UUID,
     activity_id: UUID | None,
     activity_kind: str,
@@ -65,7 +90,7 @@ async def advance_stage(
     transition applies for the current (stage, activity_kind) combination.
     """
     # 1. Fetch current stage and org_id.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT a.stage, a.org_id FROM public.account a"
@@ -83,7 +108,7 @@ async def advance_stage(
         return None
 
     current_stage: str = row[0]
-    org_id: UUID = UUID(str(row[1]))
+    UUID(str(row[1]))
 
     # 2. Determine target stage from TRANSITIONS.
     stage_map = TRANSITIONS.get(activity_kind)
@@ -99,8 +124,8 @@ async def advance_stage(
         return None
 
     # 3. Write via RPC.
-    occurred_at = datetime.now(timezone.utc)
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    occurred_at = datetime.now(UTC)
+    async with pool.connection() as conn:
         await conn.execute(
             "SELECT app.upsert_account_stage(%s, %s::public.stage, %s, %s)",
             (
@@ -122,24 +147,31 @@ async def advance_stage(
 
 
 async def mark_dormant_accounts(
-    pool: object,
+    pool: AsyncConnectionPool,
     workspace_id: UUID,
     ctx: CallContext,
 ) -> int:
-    """Mark accounts in Contacted/Engaged/Qualified with no activity in 45 days as Dormant.
+    """Mark accounts in Contacted/Engaged/Qualified as Dormant when nothing has happened on them
+    inside the workspace's dormancy window (workspace_settings.dormancy_days, default 45).
 
     Returns the count of accounts successfully marked.
     """
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT a.id, a.org_id FROM public.account a"
+                "  JOIN public.workspace_settings ws ON ws.workspace_id = a.workspace_id"
                 " WHERE a.workspace_id = %s"
                 "   AND a.stage IN ('Contacted', 'Engaged', 'Qualified')"
                 "   AND NOT EXISTS ("
+                "     SELECT 1 FROM public.activity act"
+                "     WHERE act.account_id = a.id"
+                "       AND act.occurred_at > now() - make_interval(days => ws.dormancy_days)"
+                "   )"
+                "   AND NOT EXISTS ("
                 "     SELECT 1 FROM public.account_stage_event ase"
                 "     WHERE ase.account_id = a.id"
-                "       AND ase.occurred_at > now() - interval '45 days'"
+                "       AND ase.occurred_at > now() - make_interval(days => ws.dormancy_days)"
                 "   )",
                 (str(workspace_id),),
             )

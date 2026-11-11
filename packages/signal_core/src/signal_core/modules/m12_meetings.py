@@ -1,57 +1,40 @@
-"""M12 Meetings + Tasks — meeting sync, confirmation with proof rule, task creation,
-and AI-powered next-step suggestion.
+"""M12 Meetings, tasks and next steps.
 
-Flow for sync_meeting:
-  1. Match attendee_domains against public.entity_alias (alias_type='domain') to find
-     the best-matching account_id in this workspace.
-  2. Call app.create_meeting RPC (idempotent: integration_id + external_id are unique).
-  3. Return the meeting UUID.
+sync_meeting      match a calendar event to an account by attendee domain and store it.
+                  An unmatched meeting is stored without an account, for review (never dropped).
+confirm_meeting   record proof that a meeting was held. app.confirm_meeting resolves outbound
+                  attribution (person, then account, inside the attribution window), logs the
+                  meeting_held activity and emits meeting.held.
+create_task       create a task.
+suggest_next_step write the next step for an account. In Active mode it also becomes a task.
 
-Flow for confirm_meeting:
-  1. Reject silently if proof_status not in ('confirmed', 'has_transcript') — PRD §M12.
-  2. If attribution_campaign_id is None, run the 90-day attribution window query to
-     find a campaign that touched the account.
-  3. Call app.confirm_meeting RPC with the resolved attribution_campaign_id.
-
-Flow for create_task:
-  1. Call app.create_task RPC.
-  2. Return the task UUID.
-
-Flow for suggest_next_step:
-  1. Fetch account context (stage + recent activity summary) from public.account.
-  2. Call gateway.write('prompts/next_step/v1.md', context_dict) -> suggested text.
-  3. Persist via app.upsert_next_step RPC.
-  4. Return the suggested text.
-
-Security note: all writes go through app.* SECURITY DEFINER RPCs.
-No direct INSERT/UPDATE/DELETE from Python.
+All writes go through app.* RPCs (S8).
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Any
+from datetime import date, datetime
 from uuid import UUID
 
+from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel
+
+from signal_core.ai_gateway.gateway import AiGateway
+from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.logging import get_logger
+from signal_core.metering import CallContext
 
 log = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
 _VALID_PROOF_STATUSES = frozenset(["confirmed", "has_transcript"])
-_ATTRIBUTION_DAYS = 90
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+class NextStepOutput(BaseModel):
+    next_step: str
 
 
 async def sync_meeting(
-    pool: object,
+    pool: AsyncConnectionPool,
     org_id: UUID,
     workspace_id: UUID,
     integration_id: UUID,
@@ -59,112 +42,72 @@ async def sync_meeting(
     scheduled_at: datetime,
     attendee_domains: list[str],
 ) -> UUID:
-    """Sync a calendar meeting into Signal Intel.
-
-    Matches attendee_domains to a known account via entity_alias, then calls
-    app.create_meeting (idempotent on integration_id + external_id).
-
-    Parameters
-    ----------
-    pool:             async connection pool.
-    org_id:           organisation UUID.
-    workspace_id:     workspace UUID.
-    integration_id:   calendar integration UUID (e.g. Google Calendar connector).
-    external_id:      provider-side meeting ID.
-    scheduled_at:     meeting start time (timezone-aware recommended).
-    attendee_domains: e-mail domains of external attendees used to resolve account.
-
-    Returns
-    -------
-    UUID of the meeting row.
-    """
-    # 1. Resolve account_id from attendee domains.
+    """Store a calendar meeting (idempotent on integration + external id). Returns its id."""
     account_id: UUID | None = None
-    if attendee_domains:
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    """
-                    SELECT a.id
-                    FROM public.entity_alias ea
-                    JOIN public.account a ON a.entity_id = ea.entity_id
-                    WHERE ea.alias_type = 'domain'
-                      AND ea.alias_value = ANY(%s)
-                      AND a.workspace_id = %s
-                    LIMIT 1
-                    """,
-                    (attendee_domains, str(workspace_id)),
-                )
-                row = await cur.fetchone()
+    domains = sorted({d.strip().lower() for d in attendee_domains if d and d.strip()})
+    if domains:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                """
+                SELECT a.id
+                  FROM public.entity_alias ea
+                  JOIN public.account a ON a.entity_id = ea.entity_id
+                 WHERE ea.org_id = %s
+                   AND ea.alias_type = 'domain'
+                   AND ea.value_normalised = ANY(%s::text[])
+                   AND a.workspace_id = %s
+                 ORDER BY ea.confidence DESC, a.created_at
+                 LIMIT 1
+                """,
+                (str(org_id), domains, str(workspace_id)),
+            )
+            row = await cur.fetchone()
         if row is not None:
             account_id = UUID(str(row[0]))
 
-    # 2. Create (or return existing) meeting row via SECURITY DEFINER RPC.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT app.create_meeting(%s, %s, %s, %s, %s, %s)",
-                (
-                    str(org_id),
-                    str(workspace_id),
-                    str(integration_id),
-                    external_id,
-                    scheduled_at,
-                    str(account_id) if account_id is not None else None,
-                ),
-            )
-            row = await cur.fetchone()
-
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT app.create_meeting(%s, %s, %s, %s, %s, %s, %s)",
+            (
+                str(org_id),
+                str(workspace_id),
+                str(account_id) if account_id else None,
+                None,
+                external_id,
+                str(integration_id),
+                scheduled_at,
+            ),
+        )
+        row = await cur.fetchone()
+    assert row is not None
     meeting_id = UUID(str(row[0]))
     log.info(
         "meetings.synced",
         meeting_id=str(meeting_id),
-        org_id=str(org_id),
         workspace_id=str(workspace_id),
-        account_id=str(account_id) if account_id else None,
+        matched=account_id is not None,
     )
     return meeting_id
 
 
 async def confirm_meeting(
-    pool: object,
+    pool: AsyncConnectionPool,
     meeting_id: UUID,
     held_at: datetime,
     proof_status: str,
     attribution_campaign_id: UUID | None = None,
-) -> None:
-    """Confirm a meeting was held with proof.
-
-    Only 'confirmed' and 'has_transcript' are accepted as proof — anything else
-    is a silent no-op per PRD §M12.
-
-    If attribution_campaign_id is None, the 90-day attribution window is queried
-    automatically.
-
-    Parameters
-    ----------
-    pool:                     async connection pool.
-    meeting_id:               UUID of the public.meeting row.
-    held_at:                  timestamp when the meeting actually occurred.
-    proof_status:             'confirmed' | 'has_transcript' (all others ignored).
-    attribution_campaign_id:  override the attribution lookup (use None to auto-detect).
-    """
+) -> bool:
+    """Record a held meeting. Without proof ('confirmed' or 'has_transcript') nothing is written
+    and False is returned (M12 proof rule)."""
     if proof_status not in _VALID_PROOF_STATUSES:
         log.info(
             "meetings.confirm_skipped_no_proof",
             meeting_id=str(meeting_id),
             proof_status=proof_status,
         )
-        return
+        return False
 
-    # Resolve attribution if not explicitly provided.
-    if attribution_campaign_id is None:
-        attribution_campaign_id = await _find_attribution_campaign(
-            pool, meeting_id, held_at
-        )
-
-    # Call the SECURITY DEFINER RPC.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         await conn.execute(
             "SELECT app.confirm_meeting(%s, %s, %s, %s)",
             (
@@ -174,169 +117,111 @@ async def confirm_meeting(
                 str(attribution_campaign_id) if attribution_campaign_id else None,
             ),
         )
-
-    log.info(
-        "meetings.confirmed",
-        meeting_id=str(meeting_id),
-        proof_status=proof_status,
-        attribution_campaign_id=(
-            str(attribution_campaign_id) if attribution_campaign_id else None
-        ),
-    )
-
-
-async def _find_attribution_campaign(
-    pool: object,
-    meeting_id: UUID,
-    held_at: datetime,
-) -> UUID | None:
-    """Return the most recent campaign that touched this meeting's account within
-    90 days before held_at, or None if no match."""
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT cm.campaign_id
-                FROM public.campaign_member cm
-                JOIN public.meeting m ON m.account_id = cm.account_id
-                WHERE m.id = %s
-                  AND cm.pushed_at >= %s - interval '90 days'
-                  AND cm.pushed_at <= %s
-                ORDER BY cm.pushed_at DESC
-                LIMIT 1
-                """,
-                (str(meeting_id), held_at, held_at),
-            )
-            row = await cur.fetchone()
-    if row is None:
-        return None
-    return UUID(str(row[0]))
+    log.info("meetings.confirmed", meeting_id=str(meeting_id), proof_status=proof_status)
+    return True
 
 
 async def create_task(
-    pool: object,
+    pool: AsyncConnectionPool,
     org_id: UUID,
     workspace_id: UUID,
     account_id: UUID,
     title: str,
-    due_date: Any | None,
+    due_date: date | None,
     origin: str,
     owner_member_id: UUID | None = None,
 ) -> UUID:
-    """Create a task via app.create_task SECURITY DEFINER RPC.
-
-    Parameters
-    ----------
-    pool:            async connection pool.
-    org_id:          organisation UUID.
-    workspace_id:    workspace UUID.
-    account_id:      account this task is linked to.
-    title:           task title / description.
-    due_date:        optional due date (date or None).
-    origin:          provenance string, e.g. 'reply', 'manual', 'ai'.
-    owner_member_id: optional member who owns the task.
-
-    Returns
-    -------
-    UUID of the new task row.
-    """
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT app.create_task(%s, %s, %s, %s, %s, %s, %s)",
-                (
-                    str(org_id),
-                    str(workspace_id),
-                    str(account_id),
-                    title,
-                    origin,
-                    str(owner_member_id) if owner_member_id else None,
-                    due_date,
-                ),
-            )
-            row = await cur.fetchone()
-
+    """Create a task. `origin` is one of manual, reply, meeting, next_step."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT app.create_task(%s, %s, %s, %s, %s, %s, %s)",
+            (
+                str(org_id),
+                str(workspace_id),
+                str(account_id),
+                title,
+                origin,
+                str(owner_member_id) if owner_member_id else None,
+                due_date,
+            ),
+        )
+        row = await cur.fetchone()
+    assert row is not None
     task_id = UUID(str(row[0]))
-    log.info(
-        "tasks.created",
-        task_id=str(task_id),
-        account_id=str(account_id),
-        origin=origin,
-    )
+    log.info("tasks.created", task_id=str(task_id), account_id=str(account_id), origin=origin)
     return task_id
 
 
 async def suggest_next_step(
-    pool: object,
-    gateway: Any,
+    pool: AsyncConnectionPool,
+    gateway: AiGateway,
     account_id: UUID,
     workspace_id: UUID,
-) -> str:
-    """Generate and persist a next-step suggestion for an account.
-
-    Uses the AI gateway WRITE capability (Haiku by default) to produce a
-    concise suggested action, then persists it via app.upsert_next_step.
-
-    Parameters
-    ----------
-    pool:         async connection pool.
-    gateway:      async gateway with `.write(prompt_path, context_dict) -> str`.
-    account_id:   account to suggest next step for.
-    workspace_id: workspace context.
-
-    Returns
-    -------
-    The suggested next-step text.
-    """
-    # 1. Fetch account context summary: stage + most recent activity kind.
-    stage = "Unknown"
-    recent_activity = "No recent activity"
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT stage FROM public.account WHERE id = %s",
-                (str(account_id),),
-            )
-            row = await cur.fetchone()
-            if row is not None:
-                stage = str(row[0]) if row[0] is not None else "Unknown"
-            # Fetch most recent activity kind for richer context.
-            await cur.execute(
-                """SELECT kind, occurred_at FROM public.activity
-                   WHERE account_id = %s
-                   ORDER BY occurred_at DESC
-                   LIMIT 5""",
-                (str(account_id),),
-            )
-            act_rows = await cur.fetchall()
-    if act_rows:
-        recent_activity = "; ".join(
-            f"{r[0]} at {r[1].isoformat() if hasattr(r[1], 'isoformat') else r[1]}"
-            for r in act_rows
+    ctx: CallContext,
+) -> str | None:
+    """Write and store the next step for an account. Returns the text, or None when the account
+    is not in the workspace."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            """
+            SELECT a.org_id, a.stage, a.owner_member_id, e.display_name, ws.next_step_mode
+              FROM public.account a
+              JOIN public.entity e ON e.id = a.entity_id
+              JOIN public.workspace_settings ws ON ws.workspace_id = a.workspace_id
+             WHERE a.id = %s AND a.workspace_id = %s
+            """,
+            (str(account_id), str(workspace_id)),
         )
+        row = await cur.fetchone()
+        if row is None:
+            log.warning("next_step.account_not_found", account_id=str(account_id))
+            return None
+        org_id, stage, owner_member_id, account_name, mode = row
 
-    # 2. Call AI gateway.
-    suggestion: str = await gateway.write(
-        "prompts/next_step/v1.md",
+        await cur.execute(
+            "SELECT kind, occurred_at FROM public.activity"
+            " WHERE account_id = %s ORDER BY occurred_at DESC LIMIT 5",
+            (str(account_id),),
+        )
+        activity_rows = await cur.fetchall()
+
+    recent_activity = (
+        "; ".join(f"{kind} on {occurred_at:%Y-%m-%d}" for kind, occurred_at in activity_rows)
+        or "No activity yet"
+    )
+
+    result = await gateway.run(
+        Capability.WRITE,
+        load_prompt("next_step", 2),
         {
-            "account_id": str(account_id),
-            "workspace_id": str(workspace_id),
-            "stage": stage,
+            "account_name": str(account_name or "unknown"),
+            "stage": str(stage),
             "recent_activity": recent_activity,
         },
+        NextStepOutput,
+        ctx,
+        max_tokens=300,
     )
-    suggestion = suggestion.strip()
+    suggestion = result.value.next_step.strip()
 
-    # 3. Persist via SECURITY DEFINER RPC.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         await conn.execute(
             "SELECT app.upsert_next_step(%s, %s, %s::public.next_step_mode)",
-            (str(account_id), suggestion, "ai"),
+            (str(account_id), suggestion, str(mode)),
         )
 
-    log.info(
-        "meetings.next_step_suggested",
-        account_id=str(account_id),
-        workspace_id=str(workspace_id),
-    )
+    # Active mode: the step becomes a task for the account owner (M12).
+    if str(mode) == "Active":
+        await create_task(
+            pool,
+            UUID(str(org_id)),
+            workspace_id,
+            account_id,
+            suggestion[:500],
+            None,
+            "next_step",
+            UUID(str(owner_member_id)) if owner_member_id else None,
+        )
+
+    log.info("next_step.suggested", account_id=str(account_id), mode=str(mode))
     return suggestion

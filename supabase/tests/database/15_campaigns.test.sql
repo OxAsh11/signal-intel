@@ -23,12 +23,11 @@ set local role service_role;
 insert into ids select 'ent', app.create_entity(
   (select v from ids where k = 'org'), 'person', 'Suite 15 Person', 'tenant'
 );
-insert into public.account (id, org_id, workspace_id, entity_id, stage)
+insert into public.account (id, org_id, workspace_id, entity_id)
   values (gen_random_uuid(),
           (select v from ids where k = 'org'),
           (select v from ids where k = 'ws'),
-          (select v from ids where k = 'ent'),
-          'Identified');
+          (select v from ids where k = 'ent'));
 insert into ids select 'account', id from public.account
   where entity_id = (select v from ids where k = 'ent');
 reset role;
@@ -76,6 +75,11 @@ insert into ids select 'campaign', app.create_campaign(
   'Suite 15 Campaign',
   'Geographic'::public.motion
 );
+
+-- Members can only be added to a live campaign, and a campaign goes live only from dry run
+-- (migration 0029).
+select app.set_campaign_push_mode((select v from ids where k = 'campaign'), 'dry run'::public.push_mode);
+select app.set_campaign_push_mode((select v from ids where k = 'campaign'), 'live'::public.push_mode);
 
 -- ── Assertion 5: add_campaign_member first call succeeds ─────────────────────
 -- Actual signature: add_campaign_member(campaign_id, account_id, person_entity_id, contact_point_id DEFAULT NULL, variables DEFAULT '{}')

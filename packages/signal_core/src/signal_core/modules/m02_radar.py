@@ -40,17 +40,19 @@ async def create_source_records(
         for payload in payloads:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    "select app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s, %s)",
+                    "select app.create_source_record(%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         str(org_id),
                         str(workspace_id),
                         connector_id,
-                        source_type,          # NEW — p_source_type
+                        source_type,
                         payload.url,
                         payload.fetched_at,
                         payload.content_hash,
                         payload.payload_ref,
                         payload.language,
+                        # The fetched text is stored with the record: extraction reads it.
+                        payload.raw.decode("utf-8", errors="replace").replace("\x00", ""),
                     ),
                 )
                 row = await cur.fetchone()
@@ -69,12 +71,9 @@ async def upsert_radar_queries(
     Deletes any non-user-sourced rows for the radar, then re-inserts all
     queries in *query_set*.
     """
-    queries_json = json.dumps(
-        [q.model_dump() for q in query_set.queries]
-    )
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "select app.upsert_radar_queries(%s, %s)",
-                (str(radar_id), queries_json),
-            )
+    queries_json = json.dumps([q.model_dump() for q in query_set.queries])
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "select app.upsert_radar_queries(%s, %s)",
+            (str(radar_id), queries_json),
+        )

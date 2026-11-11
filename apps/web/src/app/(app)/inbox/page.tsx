@@ -1,9 +1,12 @@
 import type { Metadata } from 'next';
-import { ScreenPlaceholder } from '@/components/screen-placeholder';
-import { screen } from '@/lib/screens';
+import { redirect } from 'next/navigation';
+import { getOrgContext } from '@/lib/org';
 
 export const metadata: Metadata = { title: 'Inbox' };
 
-export default function InboxPage() {
-  return <ScreenPlaceholder screen={screen('/inbox')} />;
+/** The screen lives under the current workspace; this route sends the navigation link there. */
+export default async function InboxPage() {
+  const ctx = await getOrgContext();
+  if (!ctx?.workspace) redirect('/settings');
+  redirect(`/workspace/${ctx.workspace.id}/inbox`);
 }

@@ -49,14 +49,13 @@ async def list_campaigns(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, workspace_id, name, motion, brief_id, status, created_at"
-                f" FROM public.campaign WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, workspace_id, name, motion, brief_id, status, created_at"
+            f" FROM public.campaign WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {
@@ -96,19 +95,18 @@ async def create_campaign(
         raise HTTPException(status_code=403, detail="Workspace not permitted")
 
     pool = request.app.state.pool
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT app.create_campaign(%s, %s, %s, %s, %s::public.motion, NULL)",
-                (
-                    str(token.org_id),
-                    str(body.workspace_id),
-                    str(body.brief_id),
-                    body.name,
-                    body.motion,
-                ),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT app.create_campaign(%s, %s, %s, %s, %s::public.motion, NULL)",
+            (
+                str(token.org_id),
+                str(body.workspace_id),
+                str(body.brief_id),
+                body.name,
+                body.motion,
+            ),
+        )
+        row = await cur.fetchone()
 
     campaign_id = row[0] if row else None
     return {"id": str(campaign_id) if campaign_id else None}
@@ -136,14 +134,13 @@ async def list_campaign_members(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, campaign_id, account_id, person_entity_id, created_at"
-                f" FROM public.campaign_member WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, campaign_id, account_id, person_entity_id, created_at"
+            f" FROM public.campaign_member WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {

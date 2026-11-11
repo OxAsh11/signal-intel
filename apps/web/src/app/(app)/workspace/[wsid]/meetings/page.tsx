@@ -1,4 +1,5 @@
 import { createClient } from "@/lib/supabase/server";
+import { completeTask, confirmMeeting } from "@/app/actions/activation";
 
 export default async function MeetingsPage({ params }: { params: Promise<{ wsid: string }> }) {
   const { wsid } = await params;
@@ -69,16 +70,24 @@ export default async function MeetingsPage({ params }: { params: Promise<{ wsid:
               <th>Account</th>
               <th>Held at</th>
               <th>Proof status</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
             {meetings.map((m) => (
               <tr key={m.id}>
                 <td>{m.scheduled_at ? new Date(m.scheduled_at).toLocaleString() : "—"}</td>
-                <td>{m.accountNorm?.displayName ?? m.accountNorm?.id ?? "—"}</td>
+                <td>{m.accountNorm?.displayName ?? m.accountNorm?.id ?? "Unmatched"}</td>
                 <td>{m.held_at ? new Date(m.held_at).toLocaleString() : "—"}</td>
                 <td>
                   <span data-proof-status={m.proof_status ?? undefined}>{m.proof_status ?? "—"}</span>
+                </td>
+                <td>
+                  {m.proof_status === "unconfirmed" && (
+                    <form action={confirmMeeting.bind(null, m.id, wsid)} style={{ display: "inline" }}>
+                      <button type="submit">Confirm held</button>
+                    </form>
+                  )}
                 </td>
               </tr>
             ))}
@@ -97,6 +106,7 @@ export default async function MeetingsPage({ params }: { params: Promise<{ wsid:
               <th>Account</th>
               <th>Due date</th>
               <th>Origin</th>
+              <th>Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -107,6 +117,11 @@ export default async function MeetingsPage({ params }: { params: Promise<{ wsid:
                 <td>{t.due_date ? new Date(t.due_date).toLocaleDateString() : "—"}</td>
                 <td>
                   <span data-origin={t.origin ?? undefined}>{t.origin ?? "—"}</span>
+                </td>
+                <td>
+                  <form action={completeTask.bind(null, t.id, wsid)} style={{ display: "inline" }}>
+                    <button type="submit">Done</button>
+                  </form>
                 </td>
               </tr>
             ))}

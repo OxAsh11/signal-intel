@@ -11,8 +11,11 @@ Functions:
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from typing import Any
 from uuid import UUID
+
+from psycopg_pool import AsyncConnectionPool
 
 from signal_core.logging import get_logger
 
@@ -33,12 +36,12 @@ STAGE_ORDER: list[str] = [
 
 
 async def compute_metric(
-    pool: object,
+    pool: AsyncConnectionPool,
     workspace_id: UUID,
     brief_id: UUID,
     metric_key: str,
-    filters: dict = {},
-) -> dict:
+    filters: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """Call ``app.compute_metric`` RPC and return a normalised result dict.
 
     Returns::
@@ -52,8 +55,10 @@ async def compute_metric(
 
     Raises ``ValueError`` if the RPC returns NULL (unknown / unpublished metric).
     """
+    if filters is None:
+        filters = {}
     filters_json = json.dumps(filters)
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT app.compute_metric(%s, %s, %s, %s)",
@@ -72,7 +77,7 @@ async def compute_metric(
     value = raw
 
     # Fetch the current published version for this key so we can embed it.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -89,7 +94,7 @@ async def compute_metric(
 
     definition_version: int = int(ver_row[0]) if ver_row else 1
 
-    computed_at = datetime.now(tz=timezone.utc).isoformat()
+    computed_at = datetime.now(tz=UTC).isoformat()
 
     log.info(
         "reporting.metric_computed",
@@ -108,10 +113,10 @@ async def compute_metric(
 
 
 async def get_funnel(
-    pool: object,
+    pool: AsyncConnectionPool,
     workspace_id: UUID,
     brief_id: UUID,
-) -> list[dict]:
+) -> list[dict[str, Any]]:
     """Return stage counts, conversion rates, and median days in stage.
 
     Queries ``public.account`` grouped by ``stage`` for the given workspace.
@@ -131,7 +136,7 @@ async def get_funnel(
         ]
     """
     # 1. Stage counts
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -155,12 +160,12 @@ async def get_funnel(
             stage_rows = await cur.fetchall()
 
     counts: dict[str, int] = {}
-    for stage_name, cnt in (stage_rows or []):
+    for stage_name, cnt in stage_rows or []:
         if stage_name:
             counts[stage_name] = int(cnt)
 
     # 2. Median days in each stage via account_stage_event
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 """
@@ -181,20 +186,27 @@ async def get_funnel(
                   FROM public.account_stage_event ase
                   JOIN public.account a ON a.id = ase.account_id
                  WHERE a.workspace_id = %s
+                   AND EXISTS (
+                     SELECT 1 FROM public.verdict v
+                      WHERE v.entity_id = a.entity_id
+                        AND v.brief_version_id IN (
+                          SELECT bv.id FROM public.brief_version bv WHERE bv.brief_id = %s
+                        )
+                   )
                  GROUP BY ase.to_stage
                 """,
-                (str(workspace_id),),
+                (str(workspace_id), str(brief_id)),
             )
             median_rows = await cur.fetchall()
 
     median_days: dict[str, float | None] = {}
-    for stage_name, med in (median_rows or []):
+    for stage_name, med in median_rows or []:
         if stage_name:
             median_days[stage_name] = float(med) if med is not None else None
 
     # 3. Build ordered funnel rows
-    funnel: list[dict] = []
-    for i, stage in enumerate(STAGE_ORDER):
+    funnel: list[dict[str, Any]] = []
+    for i, stage in enumerate(STAGE_ORDER):  # noqa: B007
         cnt = counts.get(stage, 0)
         funnel.append(
             {

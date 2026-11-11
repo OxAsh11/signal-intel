@@ -56,14 +56,13 @@ async def list_meetings(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, workspace_id, account_id, proof_status, scheduled_at, held_at"
-                f" FROM public.meeting WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, workspace_id, account_id, proof_status, scheduled_at, held_at"
+            f" FROM public.meeting WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {

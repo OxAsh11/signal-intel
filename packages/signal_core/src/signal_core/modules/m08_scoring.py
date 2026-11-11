@@ -1,50 +1,39 @@
-"""M8 Scoring engine — purely mathematical, no AI gateway call.
+"""M8 Scoring and labels — deterministic, no AI call.
 
-Flow:
-  1. Find the latest published brief_version for the workspace (early-return if None).
-  2. Find account_id from entity + workspace.
-  3. Fetch the latest verdict for entity+brief_version.
-  4. Fetch all active claims for entity.
-  5. Compute 5 dimensions: fit, evidence, scale, timing, reachability.
-  6. Apply gates (Contradicted → Excluded; exclusion_list → Excluded; Unverified → Low cap).
-  7. Compute weighted priority score and assign band.
-  8. Persist via app.upsert_score and batch app.upsert_label calls.
-  9. Return the band string.
-"""
+For the entity's account, under the current version of every Pilot/Active Brief in the workspace:
+  1. Read the verdict, the claims that still count (active, not expired) and valid contact points.
+  2. Compute five dimensions (0–100): fit, evidence, scale, timing, reachability. A claim's
+     weight halves every `decay_half_life_days` of its predicate.
+  3. Apply gates: Contradicted verdict or exclusion list → Excluded; Unverified caps at Low.
+  4. Priority = weighted fit/evidence/scale/timing with the Brief's weights; band from the
+     Brief's thresholds. Reachability is kept apart as readiness (M8).
+  5. Store the score, write the labels this computation produces and remove the ones it no
+     longer produces.
+"""  # noqa: RUF002
 
 from __future__ import annotations
 
 import math
-import json
-from datetime import datetime, timezone, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any
 from uuid import UUID
 
-from signal_core.derivation.writer import upsert_score, upsert_label
+from psycopg_pool import AsyncConnectionPool
+
+from signal_core.briefs import ActiveBrief, active_brief_versions
+from signal_core.derivation.writer import prune_labels, upsert_label, upsert_score
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
 
 log = get_logger(__name__)
 
-# Predicates considered "Fit" claims
 FIT_PREDICATES = {"vertical", "size", "geography", "commercial_role"}
+QUANTITY_PREDICATES = {"sites", "seats", "units"}
+LABEL_PREDICATES = ("vertical", "geography", "commercial_role")
+TIMING_WINDOW_DAYS = 90
 
-# Default weights
-DEFAULT_WEIGHTS: dict[str, float] = {
-    "fit": 0.25,
-    "evidence": 0.25,
-    "scale": 0.25,
-    "timing": 0.25,
-}
-
-# Default band thresholds
-DEFAULT_THRESHOLDS: dict[str, float] = {
-    "High": 70.0,
-    "Medium": 40.0,
-    "Low": 0.0,
-}
-
-# Evidence verdict → score
+DEFAULT_WEIGHTS: dict[str, float] = {"fit": 0.25, "evidence": 0.25, "scale": 0.25, "timing": 0.25}
+DEFAULT_THRESHOLDS: dict[str, float] = {"High": 70.0, "Medium": 40.0}
 VERDICT_EVIDENCE_SCORE: dict[str, int] = {
     "Confirmed": 90,
     "Likely": 65,
@@ -52,243 +41,167 @@ VERDICT_EVIDENCE_SCORE: dict[str, int] = {
     "Contradicted": 0,
 }
 
+# id, predicate key, value, confidence, observed_at, half-life (days), connector that found it
+_CLAIMS_SQL = """
+    SELECT c.id, p.key, c.value, c.confidence, c.observed_at, p.decay_half_life_days,
+           sr.connector_id
+      FROM public.claim c
+      JOIN public.predicate p ON p.id = c.predicate_id
+      JOIN public.source_record sr ON sr.id = c.source_record_id
+     WHERE c.entity_id = %s
+       AND c.status = 'active'
+       AND (c.expires_at IS NULL OR c.expires_at > now())
+"""
+
 
 def _band_from_priority(priority: float, thresholds: dict[str, float]) -> str:
-    if priority >= thresholds.get("High", 70.0):
+    if priority >= thresholds.get("High", DEFAULT_THRESHOLDS["High"]):
         return "High"
-    if priority >= thresholds.get("Medium", 40.0):
+    if priority >= thresholds.get("Medium", DEFAULT_THRESHOLDS["Medium"]):
         return "Medium"
     return "Low"
 
 
+def _settings(brief: ActiveBrief) -> tuple[dict[str, float], dict[str, float], list[str]]:
+    """Weights, band thresholds and required persona roles from the Brief version."""
+    raw_weights = {**(brief.config.get("weights") or {}), **brief.weights}
+    weights = {k: float(raw_weights.get(k, default)) for k, default in DEFAULT_WEIGHTS.items()}
+    raw_thresholds = raw_weights.get("band_thresholds") or brief.config.get("band_thresholds") or {}
+    thresholds = {
+        k: float(raw_thresholds.get(k, default)) for k, default in DEFAULT_THRESHOLDS.items()
+    }
+    personas = brief.config.get("personas") or {}
+    if isinstance(personas, dict):
+        roles = [role for role, titles in personas.items() if titles]
+    else:
+        roles = [str(p) for p in personas]
+    return weights, thresholds, roles
+
+
+def _decay(observed_at: Any, half_life_days: Any, now: datetime) -> float:
+    if not half_life_days or not isinstance(observed_at, datetime):
+        return 1.0
+    ts = observed_at if observed_at.tzinfo else observed_at.replace(tzinfo=UTC)
+    age_days = max((now - ts).total_seconds() / 86400.0, 0.0)
+    return float(0.5 ** (age_days / float(half_life_days)))
+
+
+def _label_value(value: Any) -> str:
+    return value if isinstance(value, str) else str(value)
+
+
 async def compute_score(
-    pool: object,  # AsyncConnectionPool
+    pool: AsyncConnectionPool,
     entity_id: UUID,
     workspace_id: UUID,
     ctx: CallContext,
 ) -> str | None:
-    """Compute and persist score+labels for entity in workspace.
+    """Compute and store score and labels under every active Brief version.
 
-    Returns band string ('High','Medium','Low','Excluded') or None when no brief_version.
-    NO AI gateway — purely mathematical.
+    Returns the band under the most recently published Brief, or None when the workspace has no
+    active Brief or no account on the entity.
     """
-    # 1. Find latest published brief_version for this workspace
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT bv.id, bv.org_id, bv.config
-                FROM public.brief_version bv
-                WHERE bv.workspace_id = %s
-                ORDER BY bv.published_at DESC
-                LIMIT 1
-                """,
-                (str(workspace_id),),
-            )
-            bv_row = await cur.fetchone()
-
-    if bv_row is None:
+    briefs = await active_brief_versions(pool, workspace_id)
+    if not briefs:
         log.info("score.no_brief_version", workspace_id=str(workspace_id))
         return None
 
-    brief_version_id = UUID(str(bv_row[0]))
-    org_id = UUID(str(bv_row[1]))
-    config: dict[str, Any] = bv_row[2] or {}
-
-    # Parse weights + thresholds from config
-    weights_raw = config.get("weights") or {}
-    if isinstance(weights_raw, str):
-        weights_raw = json.loads(weights_raw)
-    weights = {
-        "fit": float(weights_raw.get("fit", DEFAULT_WEIGHTS["fit"])),
-        "evidence": float(weights_raw.get("evidence", DEFAULT_WEIGHTS["evidence"])),
-        "scale": float(weights_raw.get("scale", DEFAULT_WEIGHTS["scale"])),
-        "timing": float(weights_raw.get("timing", DEFAULT_WEIGHTS["timing"])),
-    }
-
-    thresholds_raw = config.get("band_thresholds") or {}
-    if isinstance(thresholds_raw, str):
-        thresholds_raw = json.loads(thresholds_raw)
-    thresholds = {
-        "High": float(thresholds_raw.get("High", DEFAULT_THRESHOLDS["High"])),
-        "Medium": float(thresholds_raw.get("Medium", DEFAULT_THRESHOLDS["Medium"])),
-        "Low": float(thresholds_raw.get("Low", DEFAULT_THRESHOLDS["Low"])),
-    }
-
-    # Parse personas from config
-    personas_raw = config.get("personas") or []
-    if isinstance(personas_raw, str):
-        personas_raw = json.loads(personas_raw)
-    required_personas: list[str] = [str(p) for p in personas_raw] if personas_raw else []
-
-    # 2. Find account_id from entity + workspace
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT a.id, a.org_id FROM public.account a "
-                "WHERE a.entity_id = %s AND a.workspace_id = %s",
-                (str(entity_id), str(workspace_id)),
-            )
-            acct_row = await cur.fetchone()
-
-    if acct_row is None:
-        log.info(
-            "score.no_account",
-            entity_id=str(entity_id),
-            workspace_id=str(workspace_id),
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT a.id FROM public.account a WHERE a.entity_id = %s AND a.workspace_id = %s",
+            (str(entity_id), str(workspace_id)),
         )
-        return None
+        account_row = await cur.fetchone()
+        if account_row is None:
+            log.info("score.no_account", entity_id=str(entity_id), workspace_id=str(workspace_id))
+            return None
+        account_id = UUID(str(account_row[0]))
 
-    account_id = UUID(str(acct_row[0]))
+        await cur.execute(_CLAIMS_SQL, (str(entity_id),))
+        claims = await cur.fetchall()
 
-    # 3. Fetch latest verdict for entity + brief_version
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT v.value FROM public.verdict v "
-                "WHERE v.entity_id = %s AND v.brief_version_id = %s "
-                "ORDER BY v.computed_at DESC LIMIT 1",
-                (str(entity_id), str(brief_version_id)),
-            )
-            verdict_row = await cur.fetchone()
+        await cur.execute(
+            "SELECT count(*) FROM public.contact_point cp"
+            " WHERE cp.account_id = %s AND cp.status = 'valid'",
+            (str(account_id),),
+        )
+        contacts_row = await cur.fetchone()
+    valid_contacts = int(contacts_row[0]) if contacts_row else 0
 
+    bands = [
+        await _score_for_brief(pool, brief, account_id, entity_id, claims, valid_contacts, ctx)
+        for brief in briefs
+    ]
+    return bands[0]
+
+
+async def _score_for_brief(
+    pool: AsyncConnectionPool,
+    brief: ActiveBrief,
+    account_id: UUID,
+    entity_id: UUID,
+    claims: list[tuple[Any, ...]],
+    valid_contacts: int,
+    ctx: CallContext,
+) -> str:
+    weights, thresholds, persona_roles = _settings(brief)
+    now = datetime.now(UTC)
+
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT v.value FROM public.verdict v"
+            " WHERE v.entity_id = %s AND v.brief_version_id = %s"
+            " ORDER BY v.computed_at DESC LIMIT 1",
+            (str(entity_id), str(brief.brief_version_id)),
+        )
+        verdict_row = await cur.fetchone()
+        await cur.execute(
+            "SELECT 1 FROM public.exclusion_list WHERE entity_id = %s AND org_id = %s LIMIT 1",
+            (str(entity_id), str(brief.org_id)),
+        )
+        excluded_by_list = await cur.fetchone() is not None
     verdict_value: str = verdict_row[0] if verdict_row else "Unverified"
 
-    # 4. Fetch all active claims for entity
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT c.id, p.key, c.value, c.confidence, c.created_at, c.source_record_id
-                FROM public.claim c
-                JOIN public.predicate p ON p.id = c.predicate_id
-                WHERE c.entity_id = %s AND c.status = 'active'
-                """,
-                (str(entity_id),),
-            )
-            claims = await cur.fetchall()
+    decayed = [(c, _decay(c[4], c[5], now)) for c in claims]
 
-    # 5a. Compute fit score
-    fit_claims = [c for c in claims if c[1] in FIT_PREDICATES]
-    if fit_claims:
-        fit_confidences = [
-            int(c[3]) if c[3] is not None else 50 for c in fit_claims
-        ]
-        fit_score = int(sum(fit_confidences) / len(fit_confidences))
-    else:
-        fit_score = 50
+    # Fit: confidence of the ICP claims, weighted by how fresh each is.
+    fit_claims = [(c, w) for c, w in decayed if c[1] in FIT_PREDICATES]
+    fit_weight = sum(w for _, w in fit_claims)
+    fit_score = (
+        round(sum((c[3] if c[3] is not None else 50) * w for c, w in fit_claims) / fit_weight)
+        if fit_weight > 0
+        else 50
+    )
 
-    fit_claim_ids = [str(c[0]) for c in fit_claims]
-
-    # 5b. Compute evidence score from verdict
+    # Evidence: the verdict, plus a small bonus for the weight of corroborating claims.
     evidence_base = VERDICT_EVIDENCE_SCORE.get(verdict_value, 10)
-    claim_bonus = min(len(claims) * 2, 100 - evidence_base) if len(claims) > 1 else 0
-    evidence_score = min(evidence_base + claim_bonus, 100)
+    corroboration = sum(w for _, w in decayed) if len(claims) > 1 else 0.0
+    evidence_score = min(evidence_base + round(corroboration * 2), 100)
 
-    # 5c. Compute scale score from quantity predicates
-    qty_predicates = {"sites", "seats", "units"}
-    qty_claims = [c for c in claims if c[1] in qty_predicates]
-    if qty_claims:
-        total_qty = 0.0
-        for c in qty_claims:
-            try:
-                total_qty += float(c[2])
-            except (TypeError, ValueError):
-                pass
-        scale_score = int(min(math.log1p(total_qty) * 10, 100))
-    else:
-        scale_score = 0
-
-    # 5d. Compute timing score: count recent claims (last 90 days)
-    now_utc = datetime.now(timezone.utc)
-    cutoff = now_utc - timedelta(days=90)
-    recent_count = 0
-    for c in claims:
-        created_at = c[4]
-        if created_at is not None:
-            # created_at may be a datetime or a string
-            if isinstance(created_at, datetime):
-                ts = created_at
-                if ts.tzinfo is None:
-                    ts = ts.replace(tzinfo=timezone.utc)
-            else:
-                try:
-                    ts = datetime.fromisoformat(str(created_at))
-                    if ts.tzinfo is None:
-                        ts = ts.replace(tzinfo=timezone.utc)
-                except ValueError:
-                    continue
-            if ts > cutoff:
-                recent_count += 1
-
-    timing_score = min(recent_count * 10, 100)
-
-    # 5e. Compute reachability: valid contact_points / required_personas
-    if required_personas:
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT cp.id FROM public.contact_point cp "
-                    "WHERE cp.account_id = %s AND cp.status = 'valid'",
-                    (str(account_id),),
-                )
-                cp_rows = await cur.fetchall()
-        covered_count = min(len(cp_rows), len(required_personas))
-        reachability_score = int(covered_count / len(required_personas) * 100)
-        covered_personas = required_personas[:covered_count]
-        uncovered_personas = required_personas[covered_count:]
-    else:
-        reachability_score = 0
-        covered_personas = []
-        uncovered_personas = []
-
-    readiness_score = reachability_score  # synonym in this context
-
-    # 6. Apply gates
-    gates: list[dict] = []
-
-    # Gate 1: Contradicted verdict → Excluded
-    if verdict_value == "Contradicted":
-        gates.append({"reason": "verdict_contradicted"})
-        band = "Excluded"
-        log.info("score.gate.contradicted", entity_id=str(entity_id))
-    else:
-        # Gate 2: exclusion_list check
-        excluded_by_list = False
+    # Scale: quantity predicates (sites, seats, units), log-scaled.
+    total_qty = 0.0
+    qty_claims = [c for c in claims if c[1] in QUANTITY_PREDICATES]
+    for c in qty_claims:
         try:
-            async with pool.connection() as conn:  # type: ignore[union-attr]
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT 1 FROM public.exclusion_list "
-                        "WHERE entity_id = %s AND org_id = %s LIMIT 1",
-                        (str(entity_id), str(org_id)),
-                    )
-                    ex_row = await cur.fetchone()
-                    excluded_by_list = ex_row is not None
-        except Exception:
-            excluded_by_list = False
+            total_qty += float(c[2])
+        except (TypeError, ValueError):
+            continue
+    scale_score = int(min(math.log1p(total_qty) * 10, 100)) if qty_claims else 0
 
-        if excluded_by_list:
-            gates.append({"reason": "exclusion_list"})
-            band = "Excluded"
-        else:
-            # Compute priority score
-            priority = (
-                fit_score * weights["fit"]
-                + evidence_score * weights["evidence"]
-                + scale_score * weights["scale"]
-                + timing_score * weights["timing"]
-            )
+    # Timing: recent signals.
+    cutoff = now - timedelta(days=TIMING_WINDOW_DAYS)
+    recent = [
+        c
+        for c in claims
+        if isinstance(c[4], datetime)
+        and (c[4] if c[4].tzinfo else c[4].replace(tzinfo=UTC)) > cutoff
+    ]
+    timing_score = min(len(recent) * 10, 100)
 
-            # Assign band from thresholds
-            band = _band_from_priority(priority, thresholds)
+    # Reachability: valid contact points against the persona roles the Brief asks for.
+    covered = min(valid_contacts, len(persona_roles))
+    reachability_score = round(covered / len(persona_roles) * 100) if persona_roles else 0
 
-            # Gate 3: Unverified caps at Low
-            if verdict_value == "Unverified" and band in ("High", "Medium"):
-                gates.append({"reason": "verdict_unverified"})
-                band = "Low"
-
-    # Priority (computed even for Excluded, for the explanation)
     priority = (
         fit_score * weights["fit"]
         + evidence_score * weights["evidence"]
@@ -296,112 +209,77 @@ async def compute_score(
         + timing_score * weights["timing"]
     )
 
-    # Build explanation JSON
+    gates: list[dict[str, str]] = []
+    if verdict_value == "Contradicted":
+        gates.append({"reason": "verdict_contradicted"})
+        band = "Excluded"
+    elif excluded_by_list:
+        gates.append({"reason": "exclusion_list"})
+        band = "Excluded"
+    else:
+        band = _band_from_priority(priority, thresholds)
+        if verdict_value == "Unverified" and band in ("High", "Medium"):
+            gates.append({"reason": "verdict_unverified"})
+            band = "Low"
+
     explanation = {
-        "fit": {"score": fit_score, "claim_ids": fit_claim_ids},
-        "evidence": {"score": evidence_score, "verdict": verdict_value},
-        "scale": {"score": scale_score, "qty_claim_count": len(qty_claims)},
-        "timing": {"score": timing_score, "recent_count": recent_count},
+        "fit": {"score": fit_score, "claim_ids": [str(c[0]) for c, _ in fit_claims]},
+        "evidence": {"score": evidence_score, "verdict": verdict_value, "claims": len(claims)},
+        "scale": {"score": scale_score, "claim_ids": [str(c[0]) for c in qty_claims]},
+        "timing": {"score": timing_score, "claim_ids": [str(c[0]) for c in recent]},
         "reachability": {
             "score": reachability_score,
-            "covered": len(covered_personas),
-            "total": len(required_personas),
+            "covered": covered,
+            "total": len(persona_roles),
         },
+        "weights": weights,
         "gates": gates,
     }
-
-    inputs_dict = {
+    inputs = {
         "module": "m08_scoring",
-        "workspace_id": str(workspace_id),
         "entity_id": str(entity_id),
         "job_id": ctx.job_id,
         "job_type": ctx.job_type,
     }
 
-    # 7. Persist score
     await upsert_score(
-        pool,  # type: ignore[arg-type]
+        pool,
         account_id,
-        brief_version_id,
+        brief.brief_version_id,
         fit_score,
         evidence_score,
         scale_score,
         timing_score,
         reachability_score,
         priority,
-        readiness_score,
+        reachability_score,
         band,
         gates,
         explanation,
-        inputs_dict,
+        inputs,
     )
 
-    # 8. Persist labels
-    # radar:<source> — one per unique source_record_id in claims
-    seen_sources: set[str] = set()
+    # Labels are lenses (M8): the radar that found the account, ICP facets, persona coverage.
+    labels: set[tuple[str, str]] = set()
     for c in claims:
-        src = c[5]
-        if src is not None:
-            src_str = str(src)
-            if src_str not in seen_sources:
-                seen_sources.add(src_str)
-                await upsert_label(
-                    pool,  # type: ignore[arg-type]
-                    account_id,
-                    brief_version_id,
-                    f"radar:{src_str}",
-                    src_str,
-                    inputs_dict,
-                )
+        if c[6] and str(c[6]).startswith("radar:"):
+            labels.add(("radar", str(c[6])[len("radar:") :]))
+        if c[1] in LABEL_PREDICATES:
+            labels.add((str(c[1]), _label_value(c[2])))
+    for i, role in enumerate(persona_roles):
+        labels.add(("persona_coverage", f"{role}:{'covered' if i < covered else 'uncovered'}"))
 
-    # vertical:<value> — one per vertical claim value
-    for c in claims:
-        if c[1] == "vertical":
-            await upsert_label(
-                pool,  # type: ignore[arg-type]
-                account_id,
-                brief_version_id,
-                f"vertical:{c[2]}",
-                str(c[2]),
-                inputs_dict,
-            )
-
-    # geography:<country> — one per geography claim value
-    for c in claims:
-        if c[1] == "geography":
-            await upsert_label(
-                pool,  # type: ignore[arg-type]
-                account_id,
-                brief_version_id,
-                f"geography:{c[2]}",
-                str(c[2]),
-                inputs_dict,
-            )
-
-    # persona_coverage:<persona_key>:<covered|uncovered>
-    for persona_key in covered_personas:
-        await upsert_label(
-            pool,  # type: ignore[arg-type]
-            account_id,
-            brief_version_id,
-            f"persona_coverage:{persona_key}:covered",
-            persona_key,
-            inputs_dict,
-        )
-    for persona_key in uncovered_personas:
-        await upsert_label(
-            pool,  # type: ignore[arg-type]
-            account_id,
-            brief_version_id,
-            f"persona_coverage:{persona_key}:uncovered",
-            persona_key,
-            inputs_dict,
-        )
+    ordered = sorted(labels)
+    for kind, value in ordered:
+        await upsert_label(pool, account_id, brief.brief_version_id, kind, value, inputs)
+    await prune_labels(
+        pool, account_id, brief.brief_version_id, [k for k, _ in ordered], [v for _, v in ordered]
+    )
 
     log.info(
         "score.computed",
         entity_id=str(entity_id),
-        workspace_id=str(workspace_id),
+        brief_version_id=str(brief.brief_version_id),
         band=band,
         priority=priority,
     )

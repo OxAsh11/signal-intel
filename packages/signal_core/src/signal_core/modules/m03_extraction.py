@@ -7,8 +7,7 @@ Flow:
   2. extract_structured: EXTRACT call; creates provisional entities, mentions, and
      claims in the DB; dispatches identity resolution (M4) per mention.
 
-Each function reads the source record payload from source_record.url (Phase 2 will
-swap this for real object-storage retrieval once payload_ref is fully wired).
+Both read the text stored with the source record (public.source_payload).
 """
 
 from __future__ import annotations
@@ -17,15 +16,15 @@ import json
 from typing import Any, Literal
 from uuid import UUID
 
-from pydantic import BaseModel, field_validator
 from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel, field_validator
 
+import signal_core.modules.m05_index as _m05_index
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
-import signal_core.modules.m05_index as _m05_index
 
 log = get_logger(__name__)
 
@@ -37,6 +36,8 @@ RELEVANCE_PROMPT_NAME = "relevance_judge"
 RELEVANCE_PROMPT_VERSION = 1
 EXTRACTION_PROMPT_NAME = "extraction"
 EXTRACTION_PROMPT_VERSION = 1
+# Longest text sent to the model for one record (about 10k tokens).
+MAX_CONTENT_CHARS = 40_000
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +55,7 @@ class MentionExtract(BaseModel):
     raw_name: str | None = None
     raw_domain: str | None = None
     raw_country: str | None = None
-    raw_attributes: dict = {}
+    raw_attributes: dict[str, Any] = {}
 
 
 class ClaimExtract(BaseModel):
@@ -86,16 +87,17 @@ class ExtractionResult(BaseModel):
 # ---------------------------------------------------------------------------
 
 
-async def _load_source_record(pool: AsyncConnectionPool, source_record_id: UUID) -> dict:
-    """Return id, org_id, workspace_id, url, payload_ref for the given source record."""
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, org_id, workspace_id, url, payload_ref"
-                " FROM public.source_record WHERE id = %s",
-                (str(source_record_id),),
-            )
-            row = await cur.fetchone()
+async def _load_source_record(pool: AsyncConnectionPool, source_record_id: UUID) -> dict[str, Any]:
+    """Return id, org_id, workspace_id, url and the stored text for the given source record."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT sr.id, sr.org_id, sr.workspace_id, sr.url, sp.content"
+            " FROM public.source_record sr"
+            " LEFT JOIN public.source_payload sp ON sp.source_record_id = sr.id"
+            " WHERE sr.id = %s",
+            (str(source_record_id),),
+        )
+        row = await cur.fetchone()
     if row is None:
         raise ValueError(f"source_record {source_record_id} not found")
     return {
@@ -103,21 +105,18 @@ async def _load_source_record(pool: AsyncConnectionPool, source_record_id: UUID)
         "org_id": UUID(str(row[1])),
         "workspace_id": UUID(str(row[2])),
         "url": row[3],
-        "payload_ref": row[4],
+        "content": row[4],
     }
 
 
-def _content_text(source_record: dict) -> str:
-    """Return the text to judge/extract.
-
-    Phase 2 will add real object-storage retrieval via payload_ref.
-    For now we use source_record.url as a stable text proxy.
-    """
-    payload_ref: str = source_record.get("payload_ref") or ""
-    # A storage path (not an http URL) is reserved for Phase 2 integration.
-    if payload_ref and not payload_ref.startswith("http"):
-        log.debug("extraction.payload_ref_not_resolved", payload_ref=payload_ref)
-    return source_record.get("url") or ""
+def _content_text(source_record: dict[str, Any]) -> str:
+    """The text to judge and extract from: the stored payload, headed by its URL."""
+    url = source_record.get("url") or ""
+    content = (source_record.get("content") or "").strip()
+    if not content:
+        return url
+    text = f"Source: {url}\n\n{content}" if url else content
+    return text[:MAX_CONTENT_CHARS]
 
 
 async def _update_status(
@@ -150,13 +149,12 @@ async def judge_relevance(
     On AI error, persists extraction_status = 'failed' and re-raises.
     """
     # Gate: skip if already processed or missing.
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT extraction_status FROM public.source_record WHERE id = %s",
-                (str(source_record_id),),
-            )
-            sr_row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT extraction_status FROM public.source_record WHERE id = %s",
+            (str(source_record_id),),
+        )
+        sr_row = await cur.fetchone()
     if sr_row is None or sr_row[0] != "pending":
         log.info(
             "extraction.skipped_not_pending",
@@ -212,14 +210,13 @@ async def extract_structured(
     workspace_id: UUID = source_record["workspace_id"]
 
     # Load workspace predicates for prompt injection and claim linkage.
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, key, extraction_hint"
-                " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
-                (str(workspace_id),),
-            )
-            pred_rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, key, extraction_hint"
+            " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
+            (str(workspace_id),),
+        )
+        pred_rows = await cur.fetchall()
 
     predicates_list = [{"key": row[1], "hint": row[2] or ""} for row in pred_rows]
     pred_by_key: dict[str, UUID] = {row[1]: UUID(str(row[0])) for row in pred_rows}
@@ -245,36 +242,36 @@ async def extract_structured(
     for mention in extraction.mentions:
         try:
             # Provisional entity: M4 identity resolution will resolve/merge this later.
-            async with pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
-                        (str(org_id), mention.entity_type, mention.raw_name or "unknown"),
-                    )
-                    ent_row = await cur.fetchone()
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
+                    (str(org_id), mention.entity_type, mention.raw_name or "unknown"),
+                )
+                ent_row = await cur.fetchone()
+            assert ent_row is not None
             provisional_entity_id = UUID(str(ent_row[0]))
             entity_ids.append(provisional_entity_id)
 
-            async with pool.connection() as conn:
-                async with conn.cursor() as cur:
-                    await cur.execute(
-                        "SELECT app.create_mention(%s, %s, %s::public.entity_type,"
-                        " %s, %s, %s, %s::jsonb)",
-                        (
-                            str(org_id),
-                            str(source_record_id),
-                            mention.entity_type,
-                            mention.raw_name,
-                            mention.raw_domain,
-                            mention.raw_country,
-                            json.dumps(mention.raw_attributes),
-                        ),
-                    )
-                    men_row = await cur.fetchone()
+            async with pool.connection() as conn, conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT app.create_mention(%s, %s, %s::public.entity_type,"
+                    " %s, %s, %s, %s::jsonb)",
+                    (
+                        str(org_id),
+                        str(source_record_id),
+                        mention.entity_type,
+                        mention.raw_name,
+                        mention.raw_domain,
+                        mention.raw_country,
+                        json.dumps(mention.raw_attributes),
+                    ),
+                )
+                men_row = await cur.fetchone()
+            assert men_row is not None
             mention_id = UUID(str(men_row[0]))
             mention_ids.append(mention_id)
 
-            # Link provisional entity to mention so M4 can reuse it instead of creating a second one.
+            # Link provisional entity to mention so M4 can reuse it instead of creating a second one.  # noqa: E501
             async with pool.connection() as conn:
                 await conn.execute(
                     "SELECT app.resolve_mention(%s, %s, %s, %s::smallint)",
@@ -329,7 +326,7 @@ async def extract_structured(
     # Deferring here (not inside the mention loop) guarantees claims exist when
     # verdict.compute runs: identity and derive queues are concurrent, and an
     # early dispatch would let compute_verdict see zero claims and write Unverified.
-    from signal_core.modules import m04_identity  # noqa: PLC0415
+    from signal_core.modules import m04_identity
 
     if m04_identity.identity_resolve_job is not None:
         for mid in mention_ids:
@@ -348,7 +345,9 @@ async def extract_structured(
     try:
         if _m05_index.index_chunk_embed_job is not None:
             import contextlib
+
             from procrastinate.exceptions import AlreadyEnqueued
+
             with contextlib.suppress(AlreadyEnqueued):
                 await _m05_index.index_chunk_embed_job.configure(
                     queueing_lock=f"index:{source_record_id}"
@@ -377,15 +376,14 @@ async def extract_backfill(
 
     Returns the number of records queued.
     """
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id FROM public.source_record"
-                " WHERE workspace_id = %s AND extraction_status = 'pending'"
-                " ORDER BY created_at LIMIT 500",
-                (str(workspace_id),),
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id FROM public.source_record"
+            " WHERE workspace_id = %s AND extraction_status = 'pending'"
+            " ORDER BY created_at LIMIT 500",
+            (str(workspace_id),),
+        )
+        rows = await cur.fetchall()
 
     for (sr_id,) in rows:
         await extract_relevance_judge_job.defer_async(source_record_id=str(sr_id))

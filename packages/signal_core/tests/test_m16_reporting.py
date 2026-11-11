@@ -7,8 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from signal_core.modules.m16_reporting import compute_metric, get_funnel, STAGE_ORDER
-
+from signal_core.modules.m16_reporting import STAGE_ORDER, compute_metric, get_funnel
 
 # ---------------------------------------------------------------------------
 # Shared fixtures
@@ -103,8 +102,8 @@ def _make_funnel_pool(stage_rows, median_rows):
 async def test_compute_metric_accounts_discovered():
     """compute_metric returns a dict with 'value' for a known key."""
     pool = _make_two_call_pool(
-        first_fetchone=(42,),   # app.compute_metric RPC returns 42
-        second_fetchone=(1,),   # metric_definition version lookup returns 1
+        first_fetchone=(42,),  # app.compute_metric RPC returns 42
+        second_fetchone=(1,),  # metric_definition version lookup returns 1
     )
     result = await compute_metric(pool, ws_id, brief_id, "accounts_discovered")
     assert "value" in result
@@ -130,7 +129,7 @@ async def test_compute_metric_returns_required_keys():
 async def test_compute_metric_unknown_key_raises():
     """compute_metric raises ValueError with 'unknown metric' for a NULL RPC response."""
     pool = _make_two_call_pool(
-        first_fetchone=(None,),   # RPC returns NULL
+        first_fetchone=(None,),  # RPC returns NULL
         second_fetchone=(1,),
     )
     with pytest.raises(ValueError, match="unknown metric"):

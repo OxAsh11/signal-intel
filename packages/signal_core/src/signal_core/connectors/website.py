@@ -10,9 +10,9 @@ stays the same.
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html.parser import HTMLParser
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
@@ -42,21 +42,21 @@ class _BodyTextExtractor(HTMLParser):
         self._skip_tags: frozenset[str] = frozenset({"script", "style"})
         self.parts: list[str] = []
 
-    def handle_starttag(self, tag: str, attrs: list) -> None:  # type: ignore[override]
+    def handle_starttag(self, tag: str, attrs: list[Any]) -> None:
         tag = tag.lower()
         if tag == "body":
             self._in_body = True
         if tag in self._skip_tags:
             self._skip_depth += 1
 
-    def handle_endtag(self, tag: str) -> None:  # type: ignore[override]
+    def handle_endtag(self, tag: str) -> None:
         tag = tag.lower()
         if tag == "body":
             self._in_body = False
         if tag in self._skip_tags:
             self._skip_depth = max(0, self._skip_depth - 1)
 
-    def handle_data(self, data: str) -> None:  # type: ignore[override]
+    def handle_data(self, data: str) -> None:
         if self._in_body and self._skip_depth == 0:
             stripped = data.strip()
             if stripped:
@@ -90,14 +90,14 @@ class WebsiteConnector:
 
     async def fetch(
         self,
-        config: dict,
+        config: dict[str, Any],
         queries: list[str],
-        cursor: dict,
-        guard: "FetchGuard",
+        cursor: dict[str, Any],
+        guard: FetchGuard,
         limit: int,
-    ) -> tuple[list[SourcePayload], dict]:
+    ) -> tuple[list[SourcePayload], dict[str, Any]]:
         urls: list[str] = config["urls"]
-        now = datetime.now(tz=timezone.utc)
+        now = datetime.now(tz=UTC)
         sem = asyncio.Semaphore(_CONCURRENCY)
         payloads: list[SourcePayload] = []
 

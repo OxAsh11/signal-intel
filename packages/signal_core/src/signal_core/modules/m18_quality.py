@@ -12,7 +12,10 @@ Functions:
 from __future__ import annotations
 
 import json
+from typing import Any
 from uuid import UUID
+
+from psycopg_pool import AsyncConnectionPool
 
 from signal_core.logging import get_logger
 
@@ -20,7 +23,7 @@ log = get_logger(__name__)
 
 
 async def submit_dsr(
-    pool: object,
+    pool: AsyncConnectionPool,
     org_id: UUID,
     person_entity_id: UUID,
     type_: str,
@@ -33,7 +36,7 @@ async def submit_dsr(
 
     Returns the UUID of the newly created DSR row.
     """
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT app.submit_dsr(%s, %s, %s, %s)",
@@ -41,6 +44,7 @@ async def submit_dsr(
             )
             row = await cur.fetchone()
 
+    assert row is not None
     dsr_id = UUID(str(row[0]))
 
     log.info(
@@ -55,7 +59,7 @@ async def submit_dsr(
 
 
 async def record_lawful_basis(
-    pool: object,
+    pool: AsyncConnectionPool,
     org_id: UUID,
     source_type: str,
     basis: str,
@@ -64,7 +68,7 @@ async def record_lawful_basis(
 
     Returns the UUID of the newly created row.
     """
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT app.record_lawful_basis(%s, %s, %s)",
@@ -72,6 +76,7 @@ async def record_lawful_basis(
             )
             row = await cur.fetchone()
 
+    assert row is not None
     record_id = UUID(str(row[0]))
 
     log.info(
@@ -86,16 +91,16 @@ async def record_lawful_basis(
 
 
 async def add_evaluation_example(
-    pool: object,
+    pool: AsyncConnectionPool,
     org_id: UUID,
     workspace_id: UUID,
     brief_version_id: UUID,
-    example: dict,
+    example: dict[str, Any],
 ) -> None:
     """Append an example to the evaluation set via ``app.add_evaluation_example`` RPC."""
     example_json = json.dumps(example)
 
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
                 "SELECT app.add_evaluation_example(%s, %s, %s, %s::jsonb)",
@@ -111,15 +116,15 @@ async def add_evaluation_example(
 
 
 async def is_suppressed(
-    pool: object,
+    pool: AsyncConnectionPool,
     org_id: UUID,
     person_entity_id: UUID,
 ) -> bool:
     """Return True if the person is on the suppression list for the given org."""
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT EXISTS(SELECT 1 FROM public.suppression_list WHERE org_id=%s AND person_entity_id=%s)",
+                "SELECT EXISTS(SELECT 1 FROM public.suppression_list WHERE org_id=%s AND person_entity_id=%s)",  # noqa: E501
                 (str(org_id), str(person_entity_id)),
             )
             row = await cur.fetchone()

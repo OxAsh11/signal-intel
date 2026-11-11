@@ -1,235 +1,157 @@
-"""M10 Inbox — reply classification with human-wins rule and unsubscribe handling.
+"""M10 Inbox — reply classification and the reply list.
 
-Flow for classify_reply:
-  1. Load the activity row from public.activity.
-  2. If the row's payload["reply_class_source"] == "human" and source != "human",
-     return immediately (human mark wins; AI/sequencer cannot override).
-  3. Call app.patch_activity_reply_class RPC — SECURITY DEFINER, gates the
-     activity_append_only trigger via a transaction-local set_config flag.
-  4. If source == "human" and member_id is provided, insert a feedback row.
-  5. If reply_class == "Unsubscribe", insert person_entity_id into suppression_list.
-  6. Emit reply.classified via app.emit.
-
-Flow for get_inbox:
-  1. SELECT from public.activity WHERE workspace_id and kind = 'reply_received'.
-  2. Apply optional filters (unclassified_only, min_age_days).
-  3. Compute is_overdue = occurred_at < now() - 2 working days.
-  4. Return list of dicts.
+classify_reply       store a classification. app.classify_reply does it in one transaction: the
+                     latest human mark wins, a human mark is recorded as feedback, an Unsubscribe
+                     is suppressed immediately, and reply.classified is emitted.
+auto_classify_reply  classify a new reply when no human has: the sequencer's own signal if the
+                     event carried one, otherwise the AI gateway over the reply text.
+get_inbox            replies for a workspace, with an overdue flag for unclassified ones.
 """
 
 from __future__ import annotations
 
 import json
-from datetime import datetime, timedelta, timezone
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import Any, Literal
 from uuid import UUID
 
+from psycopg_pool import AsyncConnectionPool
+from pydantic import BaseModel
+
+from signal_core.ai_gateway.gateway import AiGateway
+from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.logging import get_logger
+from signal_core.metering import CallContext
 
 log = get_logger(__name__)
 
-# ---------------------------------------------------------------------------
-# Constants
-# ---------------------------------------------------------------------------
-
+ReplyClass = Literal[
+    "Interested", "Referral", "Not now", "Not interested", "Out of office", "Unsubscribe"
+]
 VALID_REPLY_CLASSES = frozenset(
     ["Interested", "Referral", "Not now", "Not interested", "Out of office", "Unsubscribe"]
 )
+GENUINE_REPLY_CLASSES = frozenset(["Interested", "Referral"])
 
-# 2 working days ≈ 2 calendar days for simplicity; production can refine
-# with a proper business-day calendar.
+# Two working days, approximated as two calendar days.
 _OVERDUE_DAYS = 2
+_MAX_REPLY_CHARS = 6000
 
 
-# ---------------------------------------------------------------------------
-# Public API
-# ---------------------------------------------------------------------------
+class ReplyClassOutput(BaseModel):
+    reply_class: ReplyClass
 
 
 async def classify_reply(
-    pool: object,
+    pool: AsyncConnectionPool,
     activity_id: UUID,
     reply_class: str,
     member_id: UUID | None,
     source: Literal["human", "ai", "sequencer"],
-) -> None:
-    """Classify an inbound reply and persist the result.
-
-    Parameters
-    ----------
-    pool:        async connection pool (psycopg3 AsyncConnectionPool).
-    activity_id: UUID of the public.activity row (kind = 'reply_received').
-    reply_class: one of the public.reply_class enum values.
-    member_id:   required when source == "human"; identifies the team member.
-    source:      "human" | "ai" | "sequencer".
-    """
+) -> bool:
+    """Classify a reply. Returns False when a human mark already exists and the caller is not
+    human (the human mark stands)."""
     if reply_class not in VALID_REPLY_CLASSES:
         raise ValueError(
-            f"reply_class {reply_class!r} is not a valid public.reply_class value. "
-            f"Valid values: {sorted(VALID_REPLY_CLASSES)}"
+            f"reply_class {reply_class!r} is not valid. Valid values: {sorted(VALID_REPLY_CLASSES)}"
         )
-
-    # 1. Load the activity row.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, org_id, workspace_id, person_entity_id, payload"
-                " FROM public.activity"
-                " WHERE id = %s",
-                (str(activity_id),),
-            )
-            row = await cur.fetchone()
-
-    if row is None:
-        log.warning("inbox.activity_not_found", activity_id=str(activity_id))
-        return
-
-    _act_id, org_id_raw, workspace_id_raw, person_entity_id_raw, payload = row
-    org_id: UUID = UUID(str(org_id_raw))
-    workspace_id: UUID = UUID(str(workspace_id_raw))
-    person_entity_id: UUID | None = (
-        UUID(str(person_entity_id_raw)) if person_entity_id_raw is not None else None
-    )
-
-    # Normalise payload: psycopg3 may return a dict or a JSON string.
-    if isinstance(payload, str):
-        payload = json.loads(payload)
-
-    # 2. Human-wins guard: if already classified by human, skip for non-human callers.
-    if payload.get("reply_class_source") == "human" and source != "human":
-        log.info(
-            "inbox.classify_skipped_human_wins",
-            activity_id=str(activity_id),
-            source=source,
-            existing_class=payload.get("reply_class"),
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT app.classify_reply(%s, %s::public.reply_class, %s, %s)",
+            (str(activity_id), reply_class, source, str(member_id) if member_id else None),
         )
-        return
-
-    # 3. Patch activity.payload via SECURITY DEFINER RPC.
-    #    app.patch_activity_reply_class gates the activity_append_only trigger
-    #    using a transaction-local set_config flag (migration 0024).
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        await conn.execute(
-            "SELECT app.patch_activity_reply_class(%s, %s::public.reply_class, %s)",
-            (str(activity_id), reply_class, source),
-        )
-
+        row = await cur.fetchone()
+    applied = bool(row[0]) if row else False
     log.info(
-        "inbox.classified",
+        "inbox.classified" if applied else "inbox.classify_skipped_human_wins",
         activity_id=str(activity_id),
         reply_class=reply_class,
         source=source,
     )
+    return applied
 
-    # 4. If source == "human", insert a feedback row via SECURITY DEFINER RPC (S8).
-    if source == "human" and member_id is not None:
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            await conn.execute(
-                "SELECT app.record_feedback(%s, %s, %s, %s, %s, %s, %s::jsonb)",
-                (
-                    str(org_id),
-                    str(workspace_id),
-                    str(member_id),
-                    "reply_class",
-                    str(activity_id),
-                    "correct",
-                    json.dumps(reply_class),
-                ),
-            )
 
-    # 5. Unsubscribe: add to suppression_list via SECURITY DEFINER RPC (S8).
-    if reply_class == "Unsubscribe" and person_entity_id is not None:
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            await conn.execute(
-                "SELECT app.add_to_suppression_list(%s, %s, %s)",
-                (str(org_id), str(person_entity_id), "unsubscribe"),
-            )
-        log.info(
-            "inbox.suppressed",
-            org_id=str(org_id),
-            person_entity_id=str(person_entity_id),
+async def auto_classify_reply(
+    pool: AsyncConnectionPool,
+    gateway: AiGateway,
+    activity_id: UUID,
+    ctx: CallContext,
+) -> str | None:
+    """Classify a reply that has no class yet. Returns the class applied, or None."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT payload FROM public.activity WHERE id = %s AND kind = 'reply_received'",
+            (str(activity_id),),
         )
+        row = await cur.fetchone()
+    if row is None:
+        log.warning("inbox.activity_not_found", activity_id=str(activity_id))
+        return None
 
-    # 6. Emit reply.classified event via outbox.
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        await conn.execute(
-            "SELECT app.emit(%s::public.event_type, %s, %s, 'activity', %s, %s::jsonb)",
-            (
-                "reply.classified",
-                str(org_id),
-                str(workspace_id),
-                str(activity_id),
-                json.dumps(
-                    {
-                        "reply_class": reply_class,
-                        "reply_class_source": source,
-                    }
-                ),
-            ),
-        )
+    payload: dict[str, Any] = json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+    if payload.get("reply_class"):
+        return None
+
+    sequencer_class = payload.get("sequencer_reply_class")
+    if sequencer_class in VALID_REPLY_CLASSES:
+        await classify_reply(pool, activity_id, str(sequencer_class), None, "sequencer")
+        return str(sequencer_class)
+
+    text = str(payload.get("text") or "").strip()
+    if not text:
+        return None
+
+    result = await gateway.run(
+        Capability.PREJUDGE,
+        load_prompt("reply_classify", 1),
+        {"reply_text": text[:_MAX_REPLY_CHARS]},
+        ReplyClassOutput,
+        ctx,
+        max_tokens=100,
+    )
+    reply_class = result.value.reply_class
+    applied = await classify_reply(pool, activity_id, reply_class, None, "ai")
+    return reply_class if applied else None
 
 
 async def get_inbox(
-    pool: object,
+    pool: AsyncConnectionPool,
     workspace_id: UUID,
-    filters: dict,
-) -> list[dict]:
-    """Return activity rows of kind 'reply_received' for the given workspace.
+    filters: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """Replies for a workspace, newest first.
 
-    Parameters
-    ----------
-    pool:         async connection pool.
-    workspace_id: scope the query to this workspace.
-    filters:      optional dict with keys:
-                    - unclassified_only (bool): skip rows that already have reply_class
-                    - min_age_days (int):       only rows older than N days
-
-    Returns a list of dicts with an extra ``is_overdue`` field (True when
-    occurred_at is more than 2 working days old without classification).
+    filters: unclassified_only (bool), min_age_days (int), limit (int, default 500).
+    Each row carries is_overdue: unclassified and older than two working days (review queue).
     """
-    unclassified_only: bool = filters.get("unclassified_only", False)
-    min_age_days: int | None = filters.get("min_age_days")
-
+    filters = filters or {}
     conditions = ["workspace_id = %s", "kind = 'reply_received'"]
-    params: list = [str(workspace_id)]
+    params: list[Any] = [str(workspace_id)]
 
-    if unclassified_only:
+    if filters.get("unclassified_only"):
         conditions.append("(payload ->> 'reply_class') IS NULL")
-
-    if min_age_days is not None:
-        conditions.append("occurred_at < now() - %s * interval '1 day'")
-        params.append(min_age_days)
+    if filters.get("min_age_days") is not None:
+        conditions.append("occurred_at < now() - make_interval(days => %s)")
+        params.append(int(filters["min_age_days"]))
+    params.append(int(filters.get("limit", 500)))
 
     where_clause = " AND ".join(conditions)
     sql = (
-        "SELECT id, org_id, workspace_id, account_id, person_entity_id,"
-        "       kind, occurred_at, payload"
-        f" FROM public.activity"
-        f" WHERE {where_clause}"
-        f" ORDER BY occurred_at DESC"
+        "SELECT id, org_id, workspace_id, account_id, person_entity_id, kind, occurred_at, payload"
+        f" FROM public.activity WHERE {where_clause}"
+        " ORDER BY occurred_at DESC LIMIT %s"
     )
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(sql, params)
+        rows = await cur.fetchall()
 
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(sql, params)
-            rows = await cur.fetchall()
-
-    cutoff = datetime.now(timezone.utc) - timedelta(days=_OVERDUE_DAYS)
-    result: list[dict] = []
-
+    cutoff = datetime.now(UTC) - timedelta(days=_OVERDUE_DAYS)
+    result: list[dict[str, Any]] = []
     for row in rows:
-        payload = row[7]
-        if isinstance(payload, str):
-            payload = json.loads(payload)
-
+        payload = json.loads(row[7]) if isinstance(row[7], str) else (row[7] or {})
         occurred_at: datetime = row[6]
-        # Make timezone-aware if needed.
         if occurred_at.tzinfo is None:
-            occurred_at = occurred_at.replace(tzinfo=timezone.utc)
-
-        is_classified = bool(payload.get("reply_class"))
-        is_overdue = (not is_classified) and (occurred_at < cutoff)
-
+            occurred_at = occurred_at.replace(tzinfo=UTC)
         result.append(
             {
                 "id": row[0],
@@ -240,8 +162,7 @@ async def get_inbox(
                 "kind": row[5],
                 "occurred_at": occurred_at,
                 "payload": payload,
-                "is_overdue": is_overdue,
+                "is_overdue": not payload.get("reply_class") and occurred_at < cutoff,
             }
         )
-
     return result

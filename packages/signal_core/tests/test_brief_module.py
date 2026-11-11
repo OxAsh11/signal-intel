@@ -2,7 +2,7 @@
 
 import re
 from decimal import Decimal
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 from pydantic import ValidationError
@@ -85,7 +85,15 @@ class MockPool:
 class _FakeGateway:
     """Returns a valid BriefDraft for any run() call."""
 
-    async def run(self, capability: object, prompt: object, variables: object, output: object, ctx: object, **kwargs: object) -> Result[BriefDraft]:  # type: ignore[type-arg]
+    async def run(
+        self,
+        capability: object,
+        prompt: object,
+        variables: object,
+        output: object,
+        ctx: object,
+        **kwargs: object,
+    ) -> Result[BriefDraft]:  # type: ignore[type-arg]
         draft = BriefDraft.model_validate(_VALID_RAW)
         return Result(value=draft, extractor_version_id=uuid4(), cost_usd=Decimal("0.001"))
 

@@ -5,13 +5,12 @@ from __future__ import annotations
 from contextlib import asynccontextmanager
 from datetime import datetime
 from unittest.mock import AsyncMock, MagicMock
-from uuid import UUID, uuid4
+from uuid import uuid4
 
 import pytest
 
 from signal_core.metering import CallContext
 from signal_core.modules.m05_index import chunk_text, index_source_record
-
 
 # ---------------------------------------------------------------------------
 # chunk_text unit tests

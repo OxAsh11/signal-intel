@@ -56,14 +56,13 @@ async def list_accounts(
     where = " AND ".join(conditions)
     params.append(limit)
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                f"SELECT id, workspace_id, entity_id, stage, updated_at"
-                f" FROM public.account WHERE {where} ORDER BY id LIMIT %s",
-                params,
-            )
-            rows = await cur.fetchall()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            f"SELECT id, workspace_id, entity_id, stage, updated_at"
+            f" FROM public.account WHERE {where} ORDER BY id LIMIT %s",
+            params,
+        )
+        rows = await cur.fetchall()
 
     items = [
         {
@@ -90,14 +89,13 @@ async def get_account(
     token: Annotated[ApiToken, Depends(get_token)],
 ) -> dict[str, Any]:
     pool = request.app.state.pool
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, workspace_id, entity_id, stage, updated_at"
-                " FROM public.account WHERE id = %s AND org_id = %s",
-                (str(account_id), str(token.org_id)),
-            )
-            row = await cur.fetchone()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, workspace_id, entity_id, stage, updated_at"
+            " FROM public.account WHERE id = %s AND org_id = %s",
+            (str(account_id), str(token.org_id)),
+        )
+        row = await cur.fetchone()
 
     if row is None:
         raise HTTPException(status_code=404, detail="Account not found")

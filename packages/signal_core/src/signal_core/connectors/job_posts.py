@@ -24,8 +24,8 @@ returned immediately without any network I/O.
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
-from typing import TYPE_CHECKING
+from datetime import UTC, datetime
+from typing import TYPE_CHECKING, Any
 
 import aiohttp
 
@@ -41,7 +41,7 @@ _TIMEOUT = aiohttp.ClientTimeout(total=30)
 # Deterministic fixture items for fake / test mode
 # ---------------------------------------------------------------------------
 
-_FAKE_JOBS: list[dict] = [
+_FAKE_JOBS: list[dict[str, Any]] = [
     {
         "url": "https://boards.greenhouse.io/example/jobs/1001",
         "title": "Fake Job 1",
@@ -75,19 +75,19 @@ class JobPostConnector:
 
     async def fetch(
         self,
-        config: dict,
+        config: dict[str, Any],
         queries: list[str],
-        cursor: dict,
-        guard: "FetchGuard",
+        cursor: dict[str, Any],
+        guard: FetchGuard,
         limit: int,
-    ) -> tuple[list[SourcePayload], dict]:
+    ) -> tuple[list[SourcePayload], dict[str, Any]]:
         if config.get("fake"):
             return _build_payloads(_FAKE_JOBS), {}
 
-        now = datetime.now(tz=timezone.utc)
-        boards: list[dict] = config.get("boards", [])
+        now = datetime.now(tz=UTC)
+        boards: list[dict[str, Any]] = config.get("boards", [])
         payloads: list[SourcePayload] = []
-        new_cursor: dict = {}
+        new_cursor: dict[str, Any] = {}
 
         for board in boards:
             if len(payloads) >= limit:
@@ -97,7 +97,9 @@ class JobPostConnector:
             board_key = f"{source}:{token}"
             max_updated_at: str = cursor.get(board_key, "")
 
-            jobs, latest = await _fetch_board(source, token, max_updated_at, limit - len(payloads), guard)
+            jobs, latest = await _fetch_board(
+                source, token, max_updated_at, limit - len(payloads), guard
+            )
             if latest:
                 new_cursor[board_key] = latest
 
@@ -122,9 +124,9 @@ class JobPostConnector:
 # ---------------------------------------------------------------------------
 
 
-def _build_payloads(jobs: list[dict]) -> list[SourcePayload]:
+def _build_payloads(jobs: list[dict[str, Any]]) -> list[SourcePayload]:
     """Build SourcePayload list from a list of job dicts (used for fake mode)."""
-    now = datetime.now(tz=timezone.utc)
+    now = datetime.now(tz=UTC)
     result: list[SourcePayload] = []
     for job in jobs:
         raw = json.dumps(job, sort_keys=True).encode("utf-8")
@@ -142,8 +144,8 @@ def _build_payloads(jobs: list[dict]) -> list[SourcePayload]:
 
 
 async def _fetch_board(
-    source: str, token: str, max_updated_at: str, limit: int, guard: "FetchGuard"
-) -> tuple[list[dict], str]:
+    source: str, token: str, max_updated_at: str, limit: int, guard: FetchGuard
+) -> tuple[list[dict[str, Any]], str]:
     """Dispatch to the right board API and return ``(jobs, latest_updated_at)``."""
     if source == "greenhouse":
         return await _fetch_greenhouse(token, max_updated_at, limit, guard)
@@ -154,7 +156,9 @@ async def _fetch_board(
     return [], ""
 
 
-async def _fetch_greenhouse(token: str, since: str, limit: int, guard: "FetchGuard") -> tuple[list[dict], str]:
+async def _fetch_greenhouse(
+    token: str, since: str, limit: int, guard: FetchGuard
+) -> tuple[list[dict[str, Any]], str]:
     url = f"https://api.greenhouse.io/v1/boards/{token}/jobs"
     await guard.check(url)
     try:
@@ -166,8 +170,8 @@ async def _fetch_greenhouse(token: str, since: str, limit: int, guard: "FetchGua
     except (aiohttp.ClientError, TimeoutError, ValueError):
         return [], ""
 
-    jobs_raw: list[dict] = data.get("jobs", []) if isinstance(data, dict) else []
-    jobs: list[dict] = []
+    jobs_raw: list[dict[str, Any]] = data.get("jobs", []) if isinstance(data, dict) else []
+    jobs: list[dict[str, Any]] = []
     latest = ""
     for j in jobs_raw:
         updated_at: str = j.get("updated_at", "")
@@ -190,7 +194,9 @@ async def _fetch_greenhouse(token: str, since: str, limit: int, guard: "FetchGua
     return jobs, latest
 
 
-async def _fetch_lever(company: str, since: str, limit: int, guard: "FetchGuard") -> tuple[list[dict], str]:
+async def _fetch_lever(
+    company: str, since: str, limit: int, guard: FetchGuard
+) -> tuple[list[dict[str, Any]], str]:
     url = f"https://api.lever.co/v0/postings/{company}"
     await guard.check(url)
     try:
@@ -202,8 +208,8 @@ async def _fetch_lever(company: str, since: str, limit: int, guard: "FetchGuard"
     except (aiohttp.ClientError, TimeoutError, ValueError):
         return [], ""
 
-    jobs_raw: list[dict] = data if isinstance(data, list) else []
-    jobs: list[dict] = []
+    jobs_raw: list[dict[str, Any]] = data if isinstance(data, list) else []
+    jobs: list[dict[str, Any]] = []
     latest = ""
     for j in jobs_raw:
         created_at: str = str(j.get("createdAt", ""))
@@ -226,7 +232,9 @@ async def _fetch_lever(company: str, since: str, limit: int, guard: "FetchGuard"
     return jobs, latest
 
 
-async def _fetch_ashby(name: str, since: str, limit: int, guard: "FetchGuard") -> tuple[list[dict], str]:
+async def _fetch_ashby(
+    name: str, since: str, limit: int, guard: FetchGuard
+) -> tuple[list[dict[str, Any]], str]:
     url = f"https://api.ashbyhq.com/posting-api/job-board/{name}"
     await guard.check(url)
     try:
@@ -238,8 +246,8 @@ async def _fetch_ashby(name: str, since: str, limit: int, guard: "FetchGuard") -
     except (aiohttp.ClientError, TimeoutError, ValueError):
         return [], ""
 
-    jobs_raw: list[dict] = data.get("jobPostings", []) if isinstance(data, dict) else []
-    jobs: list[dict] = []
+    jobs_raw: list[dict[str, Any]] = data.get("jobPostings", []) if isinstance(data, dict) else []
+    jobs: list[dict[str, Any]] = []
     latest = ""
     for j in jobs_raw:
         updated_at: str = j.get("updatedAt", "")

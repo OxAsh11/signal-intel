@@ -1,5 +1,5 @@
 'use client';
-import { useState, useActionState, useEffect } from 'react';
+import { useState, useActionState } from 'react';
 import { Button } from '@signal/ui';
 import { saveBriefDraft } from '@/app/actions/briefs';
 
@@ -18,16 +18,22 @@ type Props = {
 export function ChipField({ briefId, fieldName, label, required, disabled, isEmpty: isEmptyFn, currentConfig, renderValue, renderEditor }: Props) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(currentConfig);
-  const [state, formAction, isPending] = useActionState(saveBriefDraft, {});
+  // A successful save closes the chip.
+  const [state, formAction, isPending] = useActionState(
+    async (prev: Awaited<ReturnType<typeof saveBriefDraft>>, form: FormData) => {
+      const result = await saveBriefDraft(prev, form);
+      if ((result as { ok?: boolean }).ok) setOpen(false);
+      return result;
+    },
+    {},
+  );
 
-  // Resync from server state whenever the chip is closed, preventing stale-draft overwrites.
-  useEffect(() => {
+  // Opening starts from the latest server state, so a stale draft never overwrites it.
+  const toggle = () => {
+    if (disabled) return;
     if (!open) setDraft(currentConfig);
-  }, [currentConfig, open]);
-
-  useEffect(() => {
-    if ((state as { ok?: boolean }).ok) setOpen(false);
-  }, [state]);
+    setOpen((o) => !o);
+  };
 
   const isEmpty = isEmptyFn
     ? isEmptyFn(currentConfig)
@@ -37,7 +43,7 @@ export function ChipField({ briefId, fieldName, label, required, disabled, isEmp
 
   return (
     <div className={`rounded-md border ${open ? 'border-accent' : 'border-line'} bg-surface`}>
-      <button type="button" onClick={() => !disabled && setOpen(o => !o)}
+      <button type="button" onClick={toggle}
         disabled={disabled}
         className="flex w-full items-center justify-between px-4 py-3 text-left disabled:opacity-60">
         <div className="flex items-center gap-2">

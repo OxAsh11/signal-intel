@@ -7,9 +7,8 @@ from uuid import uuid4
 
 import pytest
 
-from signal_core.modules.m17_health import check_completeness, PIPELINES
 from signal_core.metering import CallContext
-
+from signal_core.modules.m17_health import PIPELINES, check_completeness
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -111,7 +110,6 @@ async def test_check_completeness_runs_all_four_pipelines():
     }
 
     pool = _make_pool_enabled(org_id, counts)
-    rpc_calls = []
 
     # Track RPC calls by intercepting cur.execute calls on RPC connections
     # We'll patch is_enabled and then verify via result dict length.

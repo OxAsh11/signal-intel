@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import Any
 from uuid import UUID
+
+from psycopg_pool import AsyncConnectionPool
 
 from signal_core.ai_gateway.errors import AiNotConfigured
 from signal_core.ai_gateway.gateway import AiGateway
@@ -17,7 +20,7 @@ CHUNK_SIZE = 1500
 CHUNK_STEP = 1300  # 200-char overlap
 
 # Module-level handle wired by build_app()
-index_chunk_embed_job: object | None = None
+index_chunk_embed_job: Any | None = None
 
 
 def chunk_text(text: str) -> list[str]:
@@ -34,7 +37,7 @@ def chunk_text(text: str) -> list[str]:
 
 
 async def index_source_record(
-    pool: object,
+    pool: AsyncConnectionPool,
     gateway: AiGateway,
     source_id: UUID,
     workspace_id: UUID,
@@ -45,11 +48,13 @@ async def index_source_record(
     Returns the number of chunks written, or 0 if no content or embedder not configured.
     """
     # 1. Fetch source record from DB
-    async with pool.connection() as conn:  # type: ignore[union-attr]
+    async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT org_id, url, scope, created_at"
-                " FROM public.source_record WHERE id = %s",
+                "SELECT sr.org_id, coalesce(sp.content, sr.url), sr.scope, sr.created_at"
+                " FROM public.source_record sr"
+                " LEFT JOIN public.source_payload sp ON sp.source_record_id = sr.id"
+                " WHERE sr.id = %s",
                 (str(source_id),),
             )
             row = await cur.fetchone()
@@ -60,7 +65,7 @@ async def index_source_record(
         return 0
 
     org_id = row[0]
-    content = row[1] or ""  # url as Phase 1 text proxy (matches m03._content_text)
+    content = row[1] or ""  # stored text; the URL when a record has none
     scope = row[2]
     occurred_at = row[3]
     entity_id = None  # source_record has no entity_id
@@ -91,9 +96,9 @@ async def index_source_record(
 
     # 7. Persist each chunk
     count = 0
-    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings)):
+    for i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=False)):
         await upsert_memory_chunk(
-            pool,  # type: ignore[arg-type]
+            pool,
             org_id,
             workspace_id,
             entity_id,

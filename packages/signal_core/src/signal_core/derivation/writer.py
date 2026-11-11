@@ -19,8 +19,8 @@ async def upsert_verdict(
     entity_id: UUID,
     value: str,
     claim_ids: list[UUID],
-    quotes: list[dict],
-    inputs: dict,
+    quotes: list[dict[str, Any]],
+    inputs: dict[str, Any],
 ) -> UUID:
     """Call app.upsert_verdict RPC and return the verdict UUID."""
     sql = (
@@ -39,6 +39,7 @@ async def upsert_verdict(
     async with pool.connection() as conn:
         cur = await conn.execute(sql, params)
         row = await cur.fetchone()
+    assert row is not None
     return UUID(str(row[0]))
 
 
@@ -54,14 +55,15 @@ async def upsert_score(
     priority: float,
     readiness: int,
     band: str,
-    gates: list,
-    explanation: dict,
-    inputs: dict,
+    gates: list[Any],
+    explanation: dict[str, Any],
+    inputs: dict[str, Any],
 ) -> UUID:
     """Call app.upsert_score RPC and return the score UUID."""
     sql = (
         "SELECT app.upsert_score("
-        "%s, %s, %s, %s, %s, %s, %s, %s, %s, %s::public.band, %s::jsonb, %s::jsonb, %s::jsonb"
+        "%s, %s, %s::smallint, %s::smallint, %s::smallint, %s::smallint, %s::smallint,"
+        " %s::numeric, %s::smallint, %s::public.band, %s::jsonb, %s::jsonb, %s::jsonb"
         ")"
     )
     params = (
@@ -82,6 +84,7 @@ async def upsert_score(
     async with pool.connection() as conn:
         cur = await conn.execute(sql, params)
         row = await cur.fetchone()
+    assert row is not None
     return UUID(str(row[0]))
 
 
@@ -91,14 +94,10 @@ async def upsert_label(
     brief_version_id: UUID,
     kind: str,
     value: str,
-    inputs: dict,
+    inputs: dict[str, Any],
 ) -> UUID:
     """Call app.upsert_label RPC and return the label UUID."""
-    sql = (
-        "SELECT app.upsert_label("
-        "%s, %s, %s, %s, %s::jsonb"
-        ")"
-    )
+    sql = "SELECT app.upsert_label(%s, %s, %s, %s, %s::jsonb)"
     params = (
         str(account_id),
         str(brief_version_id),
@@ -109,7 +108,25 @@ async def upsert_label(
     async with pool.connection() as conn:
         cur = await conn.execute(sql, params)
         row = await cur.fetchone()
+    assert row is not None
     return UUID(str(row[0]))
+
+
+async def prune_labels(
+    pool: AsyncConnectionPool,
+    account_id: UUID,
+    brief_version_id: UUID,
+    kinds: list[str],
+    values: list[str],
+) -> int:
+    """Remove the account's labels under this Brief version that are not in (kinds, values)."""
+    async with pool.connection() as conn:
+        cur = await conn.execute(
+            "SELECT app.prune_labels(%s, %s, %s::text[], %s::text[])",
+            (str(account_id), str(brief_version_id), kinds, values),
+        )
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 async def upsert_memory_chunk(
@@ -151,4 +168,5 @@ async def upsert_memory_chunk(
     async with pool.connection() as conn:
         cur = await conn.execute(sql, params)
         row = await cur.fetchone()
+    assert row is not None
     return UUID(str(row[0]))

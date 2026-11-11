@@ -1,27 +1,31 @@
-"""M5 Verdict computation — per entity per brief_version.
+"""M5 Verdict computation — per entity, per Brief version.
 
 Flow:
-  1. Find the latest published brief_version for the workspace (early-return if none).
-  2. Fetch entity display_name + all active claims linked to the entity in the workspace.
-  3. If no claims → Unverified without AI call.
-  4. Otherwise run AI (Capability.JUDGE) with the verdict prompt.
-  5. Write verdict via app.upsert_verdict (through derivation writer).
-  6. Defer account_card_generate_job if wired.
+  1. Take the current version of every Pilot/Active Brief in the workspace (none → return None).
+  2. Fetch the entity's claims that still count: active and not expired (F3 "claims age").
+  3. For each Brief version: no claims → Unverified without an AI call; otherwise judge the
+     claims against that Brief's hypothesis (Capability.JUDGE) and store the verdict with the
+     claim ids and quotes it rests on.
+  4. Queue the account card.
+
+AI failures are re-raised so the job retries: a verdict is never downgraded because a call failed.
 """
 
 from __future__ import annotations
 
 import contextlib
-from typing import Literal
+from dataclasses import replace
+from typing import Any, Literal
 from uuid import UUID
 
+from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
 
 import signal_core.modules.m15_account_card as _m15
-
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
+from signal_core.briefs import ActiveBrief, active_brief_versions
 from signal_core.derivation.writer import upsert_verdict
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
@@ -29,8 +33,19 @@ from signal_core.metering import CallContext
 log = get_logger(__name__)
 
 # Module-level handles wired by build_app()
-verdict_compute_job: object | None = None
-account_card_generate_job: object | None = None
+verdict_compute_job: Any | None = None
+account_card_generate_job: Any | None = None
+
+# Claims that count towards a verdict: active and not past their expiry.
+LIVE_CLAIMS_SQL = """
+    SELECT c.id, p.key, c.value, c.quote, c.confidence
+      FROM public.claim c
+      JOIN public.predicate p ON p.id = c.predicate_id
+     WHERE c.entity_id = %s
+       AND c.status = 'active'
+       AND (c.expires_at IS NULL OR c.expires_at > now())
+     ORDER BY c.observed_at DESC
+"""
 
 
 class VerdictOutput(BaseModel):
@@ -40,187 +55,129 @@ class VerdictOutput(BaseModel):
 
 
 async def compute_verdict(
-    pool: object,
+    pool: AsyncConnectionPool,
     gateway: AiGateway,
     entity_id: UUID,
     workspace_id: UUID,
     ctx: CallContext,
 ) -> str | None:
-    """Compute and persist a verdict for the given entity in the workspace.
+    """Compute and store the entity's verdict under every active Brief version in the workspace.
 
-    Returns the verdict value string, or None if no published brief_version is found.
+    Returns the verdict under the most recently published Brief, or None when the workspace has
+    no active Brief.
     """
-    # 1. Find latest published brief_version for this workspace
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT bv.id, bv.config->>'hypothesis'
-                FROM public.brief_version bv
-                WHERE bv.workspace_id = %s
-                ORDER BY bv.published_at DESC
-                LIMIT 1
-                """,
-                (str(workspace_id),),
-            )
-            row = await cur.fetchone()
-
-    if row is None:
+    briefs = await active_brief_versions(pool, workspace_id)
+    if not briefs:
         log.info("verdict.no_brief_version", workspace_id=str(workspace_id))
         return None
 
-    brief_version_id = UUID(str(row[0]))
-    hypothesis: str = row[1] or ""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT display_name FROM public.entity WHERE id = %s", (str(entity_id),))
+        entity_row = await cur.fetchone()
+        display_name: str = (entity_row[0] if entity_row else None) or "unknown"
 
-    # 2. Fetch entity display_name
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT display_name FROM public.entity WHERE id = %s",
-                (str(entity_id),),
-            )
-            entity_row = await cur.fetchone()
+        await cur.execute(LIVE_CLAIMS_SQL, (str(entity_id),))
+        claims = await cur.fetchall()
 
-    display_name: str = (entity_row[0] if entity_row else None) or "unknown"
-
-    # 3. Fetch active claims for this entity in the workspace
-    async with pool.connection() as conn:  # type: ignore[union-attr]
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT c.id, p.key, c.value, c.quote, c.confidence
-                FROM public.claim c
-                JOIN public.predicate p ON p.id = c.predicate_id
-                WHERE c.entity_id = %s AND c.status = 'active'
-                """,
-                (str(entity_id),),
-            )
-            claims = await cur.fetchall()
-
-    # 4. No claims → Unverified without AI call
-    if len(claims) == 0:
-        await upsert_verdict(
-            pool,  # type: ignore[arg-type]
-            brief_version_id,
+    values = [
+        await _verdict_for_brief(
+            pool,
+            gateway,
+            brief,
             entity_id,
-            "Unverified",
-            [],
-            [],
-            {"reason": "no_claims"},
+            display_name,
+            claims,
+            replace(ctx, brief_id=brief.brief_id),
         )
-        # Defer account card generation if job handle is wired
-        await _defer_account_card(pool, entity_id, workspace_id)
+        for brief in briefs
+    ]
+
+    await _defer_account_card(pool, entity_id, workspace_id)
+    return values[0]
+
+
+async def _verdict_for_brief(
+    pool: AsyncConnectionPool,
+    gateway: AiGateway,
+    brief: ActiveBrief,
+    entity_id: UUID,
+    display_name: str,
+    claims: list[tuple[Any, ...]],
+    ctx: CallContext,
+) -> str:
+    if not claims:
+        await upsert_verdict(
+            pool, brief.brief_version_id, entity_id, "Unverified", [], [], {"reason": "no_claims"}
+        )
         return "Unverified"
 
-    # 5. Build claims_text
     claims_text = "\n".join(
         f"[{i}] {c[1]}: {c[2]} (confidence: {c[4]}) | quote: {c[3] or 'N/A'}"
         for i, c in enumerate(claims)
     )
-
-    # 6. Load verdict prompt
-    prompt = load_prompt("verdict", 1)
-
-    # 7. Call AI gateway
     try:
         result = await gateway.run(
             Capability.JUDGE,
-            prompt,
+            load_prompt("verdict", 1),
             {
-                "hypothesis": hypothesis,
+                "hypothesis": brief.hypothesis,
                 "entity_name": display_name,
                 "claims_text": claims_text,
             },
             VerdictOutput,
             ctx,
         )
-    except AiProviderError as exc:
-        # Transient failure — let Procrastinate retry; never write a verdict.
+    except (AiProviderError, AiOutputInvalid) as exc:
         log.warning(
-            "verdict.provider_error",
+            "verdict.ai_failed",
             entity_id=str(entity_id),
-            workspace_id=str(workspace_id),
+            brief_version_id=str(brief.brief_version_id),
             error=str(exc),
         )
         raise
 
-    except AiOutputInvalid as exc:
-        # Permanent AI failure — re-raise so we never downgrade an existing verdict.
-        log.warning(
-            "verdict.output_invalid",
-            entity_id=str(entity_id),
-            workspace_id=str(workspace_id),
-            error=str(exc),
-        )
-        raise
-
-    # 8. Map supporting_claim_indices to claim_ids
-    supporting_claim_rows = [
-        claims[i] for i in result.value.supporting_claim_indices if 0 <= i < len(claims)
-    ]
-
-    # 9. Downgrade Confirmed → Likely if no supporting claims (guards against prompt bug)
+    supporting = [claims[i] for i in result.value.supporting_claim_indices if 0 <= i < len(claims)]
+    # Confirmed needs at least one quoted claim behind it (M5); otherwise it is only Likely.
     final_value: str = result.value.value
-    if final_value == "Confirmed" and len(supporting_claim_rows) == 0:
+    if final_value == "Confirmed" and not any(c[3] for c in supporting):
         final_value = "Likely"
 
-    # 10. Build quotes list from supporting claims with non-null quote
-    quotes = [
-        {"claim_id": str(claims[i][0]), "quote": claims[i][3]}
-        for i in result.value.supporting_claim_indices
-        if 0 <= i < len(claims) and claims[i][3]
-    ]
-
-    # 11. Build inputs dict
-    inputs = {
-        "prompt_name": "verdict",
-        "prompt_version": 1,
-        "extractor_version_id": str(result.extractor_version_id),
-    }
-
-    # 12. Persist verdict
-    claim_ids = [UUID(str(c[0])) for c in supporting_claim_rows]
     await upsert_verdict(
-        pool,  # type: ignore[arg-type]
-        brief_version_id,
+        pool,
+        brief.brief_version_id,
         entity_id,
         final_value,
-        claim_ids,
-        quotes,
-        inputs,
+        [UUID(str(c[0])) for c in supporting],
+        [{"claim_id": str(c[0]), "quote": c[3]} for c in supporting if c[3]],
+        {
+            "prompt_name": "verdict",
+            "prompt_version": 1,
+            "extractor_version_id": str(result.extractor_version_id),
+        },
     )
-
-    # 13. Defer account card generation if job handle is wired
-    await _defer_account_card(pool, entity_id, workspace_id)
-
     return final_value
 
 
 async def _defer_account_card(
-    pool: object,
+    pool: AsyncConnectionPool,
     entity_id: UUID,
     workspace_id: UUID,
 ) -> None:
-    """Resolve account_id from entity_id + workspace_id and defer account card job."""
-    if _m15.account_card_generate_job is None:
+    """Queue the account card for the entity's account in this workspace, if the job is wired."""
+    job = _m15.account_card_generate_job
+    if job is None:
         return
 
-    # Resolve account_id from entity_id + workspace_id
-    account_id: UUID | None = None
-    org_id: UUID | None = None
+    row = None
     with contextlib.suppress(Exception):
-        async with pool.connection() as conn:  # type: ignore[union-attr]
-            async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT a.id, a.org_id FROM public.account a WHERE a.entity_id = %s AND a.workspace_id = %s LIMIT 1",
-                    (str(entity_id), str(workspace_id)),
-                )
-                row = await cur.fetchone()
-        if row is not None:
-            account_id = UUID(str(row[0]))
-            org_id = UUID(str(row[1]))
-
-    if account_id is None:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT a.id, a.org_id FROM public.account a"
+                " WHERE a.entity_id = %s AND a.workspace_id = %s LIMIT 1",
+                (str(entity_id), str(workspace_id)),
+            )
+            row = await cur.fetchone()
+    if row is None:
         log.info(
             "verdict.no_account_for_entity",
             entity_id=str(entity_id),
@@ -229,8 +186,8 @@ async def _defer_account_card(
         return
 
     with contextlib.suppress(Exception):
-        await _m15.account_card_generate_job.defer_async(  # type: ignore[union-attr]
-            account_id=str(account_id),
+        await job.configure(queueing_lock=f"card:{row[0]}").defer_async(
+            account_id=str(row[0]),
             workspace_id=str(workspace_id),
-            org_id=str(org_id),
+            org_id=str(row[1]),
         )

@@ -8,7 +8,7 @@ import os
 import socket
 import time
 import urllib.robotparser
-from urllib.parse import urlparse
+from urllib.parse import ParseResult, urlparse
 
 import aiohttp
 
@@ -101,7 +101,7 @@ class FetchGuard:
                     f"URL resolves to private/reserved address {ip} — SSRF guard blocked"
                 )
 
-    async def _check_robots(self, url: str, parsed) -> None:
+    async def _check_robots(self, url: str, parsed: ParseResult) -> None:
         """Raise FetchDisallowed if robots.txt blocks the path."""
         origin = f"{parsed.scheme}://{parsed.netloc}"
         path = parsed.path or "/"
@@ -110,13 +110,9 @@ class FetchGuard:
         if parser is None:
             return  # no rules → allow
         if not parser.can_fetch(_USER_AGENT, path):
-            raise FetchDisallowed(
-                f"robots.txt at {origin} disallows {_USER_AGENT!r} from {path!r}"
-            )
+            raise FetchDisallowed(f"robots.txt at {origin} disallows {_USER_AGENT!r} from {path!r}")
 
-    async def _get_robots_parser(
-        self, origin: str
-    ) -> urllib.robotparser.RobotFileParser | None:
+    async def _get_robots_parser(self, origin: str) -> urllib.robotparser.RobotFileParser | None:
         """Return cached (or freshly fetched) robots parser for *origin*."""
         cached = self._robots_cache.get(origin)
         now = time.monotonic()

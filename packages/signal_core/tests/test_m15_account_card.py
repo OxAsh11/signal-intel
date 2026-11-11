@@ -4,15 +4,16 @@ from __future__ import annotations
 
 import datetime
 import json
-import pytest
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import pytest
+
+from signal_core.metering import CallContext
 from signal_core.modules.m15_account_card import (
     AccountCardOutput,
     generate_account_card,
 )
-from signal_core.metering import CallContext
 
 
 def _make_pool(*query_results):
@@ -70,8 +71,8 @@ async def test_generate_account_card_existing_current_card_returns_early():
     entity_id = uuid4()
     card_id = uuid4()
 
-    card_time = datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
-    verdict_time = datetime.datetime(2026, 5, 1, 12, 0, 0, tzinfo=datetime.timezone.utc)
+    card_time = datetime.datetime(2026, 6, 1, 12, 0, 0, tzinfo=datetime.UTC)
+    verdict_time = datetime.datetime(2026, 5, 1, 12, 0, 0, tzinfo=datetime.UTC)
 
     pool = _make_pool(
         # 1. brief_version
@@ -168,15 +169,15 @@ async def test_generate_account_card_bullets_format():
     conn.cursor.return_value.__aexit__ = AsyncMock(return_value=False)
 
     fetchone_responses = [
-        (bv_id, org_id, "hypothesis"),    # brief_version
-        (entity_id,),                      # account entity_id
-        ("Test Corp",),                    # display_name
-        None,                              # no existing card
-        ("Likely", []),                    # verdict
-        ("B", 75, 70, 65, 60, 55),         # score
-        ("lead",),                         # stage
-        (2,),                              # contact coverage
-        (new_card_id,),                    # upsert result
+        (bv_id, org_id, "hypothesis"),  # brief_version
+        (entity_id,),  # account entity_id
+        ("Test Corp",),  # display_name
+        None,  # no existing card
+        ("Likely", []),  # verdict
+        ("B", 75, 70, 65, 60, 55),  # score
+        ("lead",),  # stage
+        (2,),  # contact coverage
+        (new_card_id,),  # upsert result
     ]
     fetchall_responses = [
         [],  # no claims

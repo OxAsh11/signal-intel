@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import pytest
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4, UUID
+from uuid import UUID, uuid4
 
-from signal_core.modules.m11_stage import advance_stage, mark_dormant_accounts, TRANSITIONS
+import pytest
+
 from signal_core.metering import CallContext
-
+from signal_core.modules.m11_stage import advance_stage, mark_dormant_accounts
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -107,12 +107,10 @@ async def test_advance_stage_message_sent_untouched_to_contacted():
     """message_sent on an Untouched account should advance to Contacted."""
     account_id = uuid4()
     workspace_id = uuid4()
-    pool, org_id = _make_pool_for_advance("Untouched")
+    pool, _org_id = _make_pool_for_advance("Untouched")
     ctx = _make_ctx()
 
-    result = await advance_stage(
-        pool, account_id, None, "message_sent", workspace_id, ctx
-    )
+    result = await advance_stage(pool, account_id, None, "message_sent", workspace_id, ctx)
 
     assert result == "Contacted"
     # Verify the upsert RPC was called with the right stage value.
@@ -128,9 +126,7 @@ async def test_advance_stage_no_matching_transition_returns_none():
     pool, _ = _make_pool_for_advance("Untouched")
     ctx = _make_ctx()
 
-    result = await advance_stage(
-        pool, account_id, None, "reply_received", workspace_id, ctx
-    )
+    result = await advance_stage(pool, account_id, None, "reply_received", workspace_id, ctx)
 
     assert result is None
     # Upsert RPC should NOT have been called.
@@ -147,9 +143,7 @@ async def test_advance_stage_disqualified_from_any_stage():
     pool, _ = _make_pool_for_advance("Engaged")
     ctx = _make_ctx()
 
-    result = await advance_stage(
-        pool, account_id, None, "marked_disqualified", workspace_id, ctx
-    )
+    result = await advance_stage(pool, account_id, None, "marked_disqualified", workspace_id, ctx)
 
     assert result == "Disqualified"
 
@@ -170,17 +164,13 @@ async def test_advance_stage_idempotent_double_call():
 
     # First call: Untouched → Contacted.
     pool1, org_id = _make_pool_for_advance("Untouched")
-    result1 = await advance_stage(
-        pool1, account_id, activity_id, "message_sent", workspace_id, ctx
-    )
+    result1 = await advance_stage(pool1, account_id, activity_id, "message_sent", workspace_id, ctx)
     assert result1 == "Contacted"
 
     # Second call: stage is now Contacted; message_sent maps Untouched→Contacted
     # and Queued→Contacted, NOT Contacted→anything, so returns None.
     pool2, _ = _make_pool_for_advance("Contacted", org_id)
-    result2 = await advance_stage(
-        pool2, account_id, activity_id, "message_sent", workspace_id, ctx
-    )
+    result2 = await advance_stage(pool2, account_id, activity_id, "message_sent", workspace_id, ctx)
     assert result2 is None
 
 

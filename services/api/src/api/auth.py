@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from dataclasses import dataclass
-from enum import Enum
+from enum import StrEnum
 from typing import Annotated
 from uuid import UUID
 
@@ -14,7 +14,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
-class TokenScope(str, Enum):
+class TokenScope(StrEnum):
     read = "read"
     write = "write"
     admin = "admin"
@@ -43,27 +43,26 @@ async def get_token(
     token_hash = _hash_token(credentials.credentials)
     pool = request.app.state.pool
 
-    async with pool.connection() as conn:
-        async with conn.cursor() as cur:
-            await cur.execute(
-                "SELECT id, org_id, workspace_id, scope FROM public.api_token"
-                " WHERE token_hash = %s AND revoked_at IS NULL"
-                " AND (expires_at IS NULL OR expires_at > now())",
-                (token_hash,),
-            )
-            row = await cur.fetchone()
-            if row is None:
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, org_id, workspace_id, scope FROM public.api_token"
+            " WHERE token_hash = %s AND revoked_at IS NULL"
+            " AND (expires_at IS NULL OR expires_at > now())",
+            (token_hash,),
+        )
+        row = await cur.fetchone()
+        if row is None:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-            token = ApiToken(
-                id=row[0],
-                org_id=row[1],
-                workspace_id=row[2],
-                scope=str(row[3]) if row[3] else "Read",
-            )
+        token = ApiToken(
+            id=row[0],
+            org_id=row[1],
+            workspace_id=row[2],
+            scope=str(row[3]) if row[3] else "Read",
+        )
 
-            # Update last_used_at via SECURITY DEFINER RPC (S8 write discipline).
-            await cur.execute("SELECT app.touch_api_token(%s)", (str(token.id),))
+        # Update last_used_at via SECURITY DEFINER RPC (S8 write discipline).
+        await cur.execute("SELECT app.touch_api_token(%s)", (str(token.id),))
 
     return token
 

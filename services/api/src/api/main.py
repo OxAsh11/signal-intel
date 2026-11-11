@@ -13,12 +13,22 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import api.mcp_server as mcp_module
 from api.mcp_server import BearerAuthMiddleware, mcp
-from api.routes import accounts, activity, briefs, campaigns, claims, entities, meetings, tasks
+from api.routes import (
+    accounts,
+    activity,
+    admin,
+    briefs,
+    campaigns,
+    claims,
+    entities,
+    meetings,
+    tasks,
+)
 from api.webhooks_inbound import router as webhooks_router
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+async def lifespan(app: FastAPI) -> AsyncGenerator[None]:
     """Open the connection pool on startup and close it on shutdown."""
     database_url = os.environ.get("DATABASE_URL_SESSION", "")
     if database_url:
@@ -26,7 +36,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
             from psycopg_pool import AsyncConnectionPool
 
             async def configure_connection(conn):  # type: ignore[no-untyped-def]
+                await conn.execute("SET search_path TO public, extensions")
                 await conn.execute("SET app.channel = 'api'")
+                # The pool discards a connection that configure leaves inside a transaction.
+                await conn.commit()
 
             pool = AsyncConnectionPool(
                 conninfo=database_url,
@@ -88,6 +101,7 @@ def build_app() -> FastAPI:
         activity.router,
         tasks.router,
         meetings.router,
+        admin.router,
     ):
         app.include_router(router, prefix="/v1")
 
