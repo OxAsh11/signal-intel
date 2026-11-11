@@ -1,7 +1,9 @@
 """MCP server — read-only Signal Intel tools for LLM clients.
 
 Mounts at /mcp as an SSE sub-app alongside the FastAPI REST service.
-All queries run under service_role with SET app.channel = 'mcp'.
+All queries run under service_role with SET LOCAL app.channel = 'mcp'
+inside an explicit transaction so the channel never leaks to recycled
+pool connections.
 Auth: Bearer token validated against public.api_token before each request.
 """
 
@@ -79,7 +81,8 @@ class BearerAuthMiddleware:
 
 
 # ---------------------------------------------------------------------------
-# MCP tools
+# MCP tools — each uses SET LOCAL inside a transaction so the channel
+# setting is transaction-scoped and never leaks back to the pool.
 # ---------------------------------------------------------------------------
 
 
@@ -88,23 +91,24 @@ async def get_account_card(account_id: str, workspace_id: str) -> dict:
     """Return the account card, verdict, score band, and display name for one account."""
     pool = get_pool()
     async with pool.connection() as conn:
-        await conn.execute("SET app.channel = 'mcp'")
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT ac.content, e.display_name, v.value, s.band
-                FROM public.account_card ac
-                JOIN public.account a ON a.id = ac.account_id
-                JOIN public.entity e ON e.id = a.entity_id
-                LEFT JOIN public.verdict v ON v.entity_id = a.entity_id
-                LEFT JOIN public.score s ON s.account_id = a.id
-                WHERE a.id = %s AND a.workspace_id = %s
-                ORDER BY v.computed_at DESC, s.computed_at DESC
-                LIMIT 1
-                """,
-                (account_id, workspace_id),
-            )
-            row = await cur.fetchone()
+        async with conn.transaction():
+            await conn.execute("SET LOCAL app.channel = 'mcp'")
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT ac.content, e.display_name, v.value, s.band
+                    FROM public.account_card ac
+                    JOIN public.account a ON a.id = ac.account_id
+                    JOIN public.entity e ON e.id = a.entity_id
+                    LEFT JOIN public.verdict v ON v.entity_id = a.entity_id
+                    LEFT JOIN public.score s ON s.account_id = a.id
+                    WHERE a.id = %s AND a.workspace_id = %s
+                    ORDER BY v.computed_at DESC, s.computed_at DESC
+                    LIMIT 1
+                    """,
+                    (account_id, workspace_id),
+                )
+                row = await cur.fetchone()
     if row is None:
         return {}
     content, display_name, verdict_value, score_band = row
@@ -122,28 +126,29 @@ async def search_account(query: str, workspace_id: str, limit: int = 10) -> list
     """Full-text search accounts by entity display_name or alias value."""
     pool = get_pool()
     async with pool.connection() as conn:
-        await conn.execute("SET app.channel = 'mcp'")
-        async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT a.id, e.display_name, a.stage
-                FROM public.account a
-                JOIN public.entity e ON e.id = a.entity_id
-                WHERE a.workspace_id = %s
-                  AND (
-                      e.display_name ILIKE %s
-                      OR EXISTS (
-                          SELECT 1 FROM public.entity_alias ea
-                          WHERE ea.entity_id = a.entity_id
-                            AND ea.value_normalised ILIKE %s
+        async with conn.transaction():
+            await conn.execute("SET LOCAL app.channel = 'mcp'")
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """
+                    SELECT a.id, e.display_name, a.stage
+                    FROM public.account a
+                    JOIN public.entity e ON e.id = a.entity_id
+                    WHERE a.workspace_id = %s
+                      AND (
+                          e.display_name ILIKE %s
+                          OR EXISTS (
+                              SELECT 1 FROM public.entity_alias ea
+                              WHERE ea.entity_id = a.entity_id
+                                AND ea.value_normalised ILIKE %s
+                          )
                       )
-                  )
-                ORDER BY e.display_name
-                LIMIT %s
-                """,
-                (workspace_id, f"%{query}%", f"%{query}%", limit),
-            )
-            rows = await cur.fetchall()
+                    ORDER BY e.display_name
+                    LIMIT %s
+                    """,
+                    (workspace_id, f"%{query}%", f"%{query}%", limit),
+                )
+                rows = await cur.fetchall()
     return [
         {"account_id": str(row[0]), "display_name": row[1], "stage": row[2]}
         for row in rows
@@ -157,39 +162,40 @@ async def get_claims(
     """Return active claims for an entity in a workspace, optionally filtered by predicate key."""
     pool = get_pool()
     async with pool.connection() as conn:
-        await conn.execute("SET app.channel = 'mcp'")
-        async with conn.cursor() as cur:
-            workspace_check = (
-                "AND EXISTS ("
-                "SELECT 1 FROM public.account a "
-                "WHERE a.entity_id = c.entity_id AND a.workspace_id = %s"
-                ")"
-            )
-            if predicate_key is not None:
-                await cur.execute(
-                    f"""
-                    SELECT c.id, p.key, c.value, c.quote, c.source_record_id
-                    FROM public.claim c
-                    JOIN public.predicate p ON p.id = c.predicate_id
-                    WHERE c.entity_id = %s AND p.key = %s AND c.status = 'active'
-                      {workspace_check}
-                    ORDER BY c.created_at DESC
-                    """,
-                    (entity_id, predicate_key, workspace_id),
+        async with conn.transaction():
+            await conn.execute("SET LOCAL app.channel = 'mcp'")
+            async with conn.cursor() as cur:
+                workspace_check = (
+                    "AND EXISTS ("
+                    "SELECT 1 FROM public.account a "
+                    "WHERE a.entity_id = c.entity_id AND a.workspace_id = %s"
+                    ")"
                 )
-            else:
-                await cur.execute(
-                    f"""
-                    SELECT c.id, p.key, c.value, c.quote, c.source_record_id
-                    FROM public.claim c
-                    JOIN public.predicate p ON p.id = c.predicate_id
-                    WHERE c.entity_id = %s AND c.status = 'active'
-                      {workspace_check}
-                    ORDER BY p.key, c.created_at DESC
-                    """,
-                    (entity_id, workspace_id),
-                )
-            rows = await cur.fetchall()
+                if predicate_key is not None:
+                    await cur.execute(
+                        f"""
+                        SELECT c.id, p.key, c.value, c.quote, c.source_record_id
+                        FROM public.claim c
+                        JOIN public.predicate p ON p.id = c.predicate_id
+                        WHERE c.entity_id = %s AND p.key = %s AND c.status = 'active'
+                          {workspace_check}
+                        ORDER BY c.created_at DESC
+                        """,
+                        (entity_id, predicate_key, workspace_id),
+                    )
+                else:
+                    await cur.execute(
+                        f"""
+                        SELECT c.id, p.key, c.value, c.quote, c.source_record_id
+                        FROM public.claim c
+                        JOIN public.predicate p ON p.id = c.predicate_id
+                        WHERE c.entity_id = %s AND c.status = 'active'
+                          {workspace_check}
+                        ORDER BY p.key, c.created_at DESC
+                        """,
+                        (entity_id, workspace_id),
+                    )
+                rows = await cur.fetchall()
     return [
         {
             "claim_id": str(row[0]),
@@ -212,35 +218,36 @@ async def find_accounts(
     """List accounts in a workspace, optionally filtered by score band and/or stage."""
     pool = get_pool()
     async with pool.connection() as conn:
-        await conn.execute("SET app.channel = 'mcp'")
-        async with conn.cursor() as cur:
-            where = "a.workspace_id = %s"
-            params: list = [workspace_id]
-            if band is not None:
-                where += " AND latest_s.band = %s"
-                params.append(band)
-            if stage is not None:
-                where += " AND a.stage = %s"
-                params.append(stage)
-            params.append(limit)
-            await cur.execute(
-                f"""
-                WITH latest_s AS (
-                    SELECT DISTINCT ON (account_id) account_id, band
-                    FROM public.score
-                    ORDER BY account_id, computed_at DESC
+        async with conn.transaction():
+            await conn.execute("SET LOCAL app.channel = 'mcp'")
+            async with conn.cursor() as cur:
+                where = "a.workspace_id = %s"
+                params: list = [workspace_id]
+                if band is not None:
+                    where += " AND latest_s.band = %s"
+                    params.append(band)
+                if stage is not None:
+                    where += " AND a.stage = %s"
+                    params.append(stage)
+                params.append(limit)
+                await cur.execute(
+                    f"""
+                    WITH latest_s AS (
+                        SELECT DISTINCT ON (account_id) account_id, band
+                        FROM public.score
+                        ORDER BY account_id, computed_at DESC
+                    )
+                    SELECT a.id, e.display_name, a.stage, latest_s.band
+                    FROM public.account a
+                    JOIN public.entity e ON e.id = a.entity_id
+                    LEFT JOIN latest_s ON latest_s.account_id = a.id
+                    WHERE {where}
+                    ORDER BY e.display_name
+                    LIMIT %s
+                    """,
+                    tuple(params),
                 )
-                SELECT a.id, e.display_name, a.stage, latest_s.band
-                FROM public.account a
-                JOIN public.entity e ON e.id = a.entity_id
-                LEFT JOIN latest_s ON latest_s.account_id = a.id
-                WHERE {where}
-                ORDER BY e.display_name
-                LIMIT %s
-                """,
-                tuple(params),
-            )
-            rows = await cur.fetchall()
+                rows = await cur.fetchall()
     return [
         {
             "account_id": str(row[0]),
