@@ -6,7 +6,7 @@
 CREATE OR REPLACE FUNCTION app.create_activity(
     p_org_id         uuid,
     p_workspace_id   uuid,
-    p_account_id     uuid        DEFAULT NULL,
+    p_account_id     uuid,
     p_kind           text,
     p_occurred_at    timestamptz DEFAULT now(),
     p_integration_id uuid        DEFAULT NULL,
