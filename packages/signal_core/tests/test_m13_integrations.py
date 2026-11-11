@@ -341,16 +341,20 @@ async def test_replay_uses_stored_payload(
     target_url = "https://example.com/hook"
     stored_payload = {"key": "value"}
     stored_signature = "abc123"
+    # Row: id, subscription_id, event_id, event_type, payload, signature, status, url
     delivery_row = (
         str(delivery_id),
         str(uuid4()),
+        str(uuid4()),
+        "score.band_changed",
         stored_payload,
         stored_signature,
-        "failed",  # status not 'delivered'
+        "failed",
         target_url,
     )
-
-    pool = _make_simple_pool({0: delivery_row})
+    # delivery_row connection + record_delivery connection
+    delivery_uuid_row = (str(uuid4()),)
+    pool = _make_simple_pool({0: delivery_row, 1: delivery_uuid_row})
 
     mock_response = MagicMock()
     mock_response.status_code = 200
@@ -367,10 +371,10 @@ async def test_replay_uses_stored_payload(
     assert status == "delivered"
     mock_client.post.assert_called_once()
 
-    # Verify the body matches the stored payload bytes exactly.
+    # Verify the body matches sort_keys canonical bytes (matches delivery signing).
     _args, kwargs = mock_client.post.call_args
     sent_body = kwargs.get("content", b"")
-    assert sent_body == json.dumps(stored_payload).encode()
+    assert sent_body == json.dumps(stored_payload, sort_keys=True).encode()
 
     # Verify the stored signature was reused (not re-signed).
     headers = kwargs.get("headers", {})
@@ -384,12 +388,15 @@ async def test_replay_idempotent_for_delivered(
     """replay_webhook_delivery returns 'delivered' immediately without HTTP call
     when the delivery already has status='delivered'."""
     target_url = "https://example.com/hook"
+    # Row: id, subscription_id, event_id, event_type, payload, signature, status, url
     delivery_row = (
         str(delivery_id),
         str(uuid4()),
+        str(uuid4()),
+        "score.band_changed",
         {"k": "v"},
         "sig",
-        "delivered",  # already delivered
+        "delivered",
         target_url,
     )
 
@@ -403,7 +410,6 @@ async def test_replay_idempotent_for_delivered(
         status = await replay_webhook_delivery(pool, delivery_id)
 
     assert status == "delivered"
-    # No HTTP call should have been made.
     mock_client.post.assert_not_called()
 
 
@@ -417,3 +423,40 @@ async def test_replay_delivery_not_found(
     status = await replay_webhook_delivery(pool, delivery_id)
 
     assert status == "failed"
+
+
+@pytest.mark.asyncio
+async def test_deliver_webhook_retries_on_5xx_then_succeeds(
+    sub_id: UUID,
+    event_id: UUID,
+) -> None:
+    """deliver_webhook retries after a 5xx response and returns 'delivered' on success."""
+    target_url = "https://example.com/hook"
+    secret = "mysecret"
+    sub_row = (str(sub_id), str(uuid4()), target_url, secret, True)
+    delivery_row = (str(uuid4()),)
+
+    # connection 0: load sub; connection 1: record failed attempt; connection 2: record success
+    pool = _make_simple_pool({0: sub_row, 1: delivery_row, 2: delivery_row})
+
+    fail_response = MagicMock()
+    fail_response.status_code = 500
+    fail_response.text = "server error"
+
+    ok_response = MagicMock()
+    ok_response.status_code = 200
+    ok_response.text = "ok"
+
+    mock_client = AsyncMock()
+    mock_client.post = AsyncMock(side_effect=[fail_response, ok_response])
+    mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+    mock_client.__aexit__ = AsyncMock(return_value=False)
+
+    with (
+        patch("signal_core.modules.m13_integrations.httpx.AsyncClient", return_value=mock_client),
+        patch("signal_core.modules.m13_integrations.asyncio.sleep", new_callable=AsyncMock),
+    ):
+        status = await deliver_webhook(pool, sub_id, event_id, "score.band_changed", {})
+
+    assert status == "delivered"
+    assert mock_client.post.call_count == 2

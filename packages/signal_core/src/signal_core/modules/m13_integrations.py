@@ -167,8 +167,8 @@ async def deliver_webhook(
         )
         return "failed"
 
-    # 2. Sign payload.
-    payload_bytes = json.dumps(payload_dict).encode()
+    # 2. Sign payload — sort_keys ensures canonical byte order that survives JSONB round-trip.
+    payload_bytes = json.dumps(payload_dict, sort_keys=True).encode()
     signature = hmac.new(secret.encode(), payload_bytes, hashlib.sha256).hexdigest()
     headers = {
         "Content-Type": "application/json",
@@ -265,8 +265,8 @@ async def replay_webhook_delivery(
         async with conn.cursor() as cur:
             await cur.execute(
                 """
-                SELECT d.id, d.subscription_id, d.payload, d.signature, d.status,
-                       s.url
+                SELECT d.id, d.subscription_id, d.event_id, d.event_type,
+                       d.payload, d.signature, d.status, s.url
                 FROM public.webhook_delivery d
                 JOIN public.webhook_subscription s ON s.id = d.subscription_id
                 WHERE d.id = %s
@@ -282,13 +282,8 @@ async def replay_webhook_delivery(
         )
         return "failed"
 
-    _delivery_uuid, _subscription_id, payload, signature, status, url = (
-        row[0],
-        row[1],
-        row[2],
-        row[3],
-        row[4],
-        row[5],
+    _delivery_uuid, subscription_id, event_id, event_type, payload, signature, status, url = (
+        row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7],
     )
 
     # 2. Idempotency guard.
@@ -297,36 +292,62 @@ async def replay_webhook_delivery(
         return "delivered"
 
     # 3. Re-POST stored payload with stored signature; do NOT re-sign.
+    #    Use sort_keys=True so byte order matches the original signed bytes (JSONB
+    #    round-trips do not preserve key order; canonical serialization fixes this).
     payload_bytes = (
-        json.dumps(payload).encode() if isinstance(payload, dict) else payload
+        json.dumps(payload, sort_keys=True).encode() if isinstance(payload, dict) else payload
     )
     headers = {
         "Content-Type": "application/json",
         "X-Signal-Signature": f"sha256={signature}",
     }
 
+    response_status: int | None = None
+    response_body: str | None = None
+    error_message: str | None = None
+
     try:
         async with httpx.AsyncClient() as client:
             response = await client.post(url, content=payload_bytes, headers=headers)
+        response_status = response.status_code
+        response_body = response.text
 
-        if response.status_code == 200:
+        if response_status == 200:
+            await _record_delivery(
+                pool,
+                UUID(str(subscription_id)),
+                UUID(str(event_id)),
+                str(event_type),
+                payload if isinstance(payload, dict) else {},
+                str(signature),
+                response_status=response_status,
+                response_body=response_body,
+            )
             log.info("webhooks.replay_delivered", delivery_id=str(delivery_id))
             return "delivered"
 
-        log.warning(
-            "webhooks.replay_failed",
-            delivery_id=str(delivery_id),
-            status_code=response.status_code,
-        )
-        return "failed"
+        error_message = f"HTTP {response_status}"
 
     except Exception as exc:
-        log.warning(
-            "webhooks.replay_error",
-            delivery_id=str(delivery_id),
-            error=str(exc),
-        )
-        return "failed"
+        error_message = str(exc)
+
+    await _record_delivery(
+        pool,
+        UUID(str(subscription_id)),
+        UUID(str(event_id)),
+        str(event_type),
+        payload if isinstance(payload, dict) else {},
+        str(signature),
+        response_status=response_status,
+        response_body=response_body,
+        error_message=error_message,
+    )
+    log.warning(
+        "webhooks.replay_failed",
+        delivery_id=str(delivery_id),
+        status_code=response_status,
+    )
+    return "failed"
 
 
 # ---------------------------------------------------------------------------
