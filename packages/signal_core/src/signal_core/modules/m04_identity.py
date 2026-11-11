@@ -255,6 +255,11 @@ async def resolve_mention(
     Returns 'attached' | 'queued' | 'created'.
     """
     mention = await _fetch_mention(pool, mention_id)
+
+    # Skip already-resolved mentions (unless provisional — sweep re-processes those).
+    if mention["entity_id"] is not None and mention.get("match_method") != "provisional":
+        return "attached"
+
     org_id = UUID(mention["org_id"])
     source_record_id = mention["source_record_id"]
     entity_type = mention["entity_type"]
