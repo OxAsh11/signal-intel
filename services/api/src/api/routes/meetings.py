@@ -6,7 +6,7 @@ import base64
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.auth import ApiToken, get_token
 
@@ -32,11 +32,16 @@ async def list_meetings(
     after: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
+    # Reject cross-workspace access when the token is scoped to a workspace
+    if token.workspace_id is not None and str(workspace_id) != str(token.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace not permitted")
+
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["workspace_id = %s"]
-    params: list[Any] = [str(workspace_id)]
+    # Tenant isolation: bind to org_id and workspace_id
+    conditions = ["org_id = %s", "workspace_id = %s"]
+    params: list[Any] = [str(token.org_id), str(workspace_id)]
 
     if account_id:
         conditions.append("account_id = %s")
@@ -54,7 +59,7 @@ async def list_meetings(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT id, workspace_id, account_id, title, proof_status, occurred_at, updated_at"
+                f"SELECT id, workspace_id, account_id, proof_status, scheduled_at, held_at"
                 f" FROM public.meeting WHERE {where} ORDER BY id LIMIT %s",
                 params,
             )
@@ -65,10 +70,9 @@ async def list_meetings(
             "id": str(r[0]),
             "workspace_id": str(r[1]),
             "account_id": str(r[2]) if r[2] else None,
-            "title": r[3],
-            "proof_status": r[4],
-            "occurred_at": r[5].isoformat() if r[5] else None,
-            "updated_at": r[6].isoformat() if r[6] else None,
+            "proof_status": r[3],
+            "scheduled_at": r[4].isoformat() if r[4] else None,
+            "held_at": r[5].isoformat() if r[5] else None,
         }
         for r in rows
     ]

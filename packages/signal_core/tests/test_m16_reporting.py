@@ -208,7 +208,7 @@ async def test_get_funnel_returns_all_stages():
 async def test_get_funnel_stage_order():
     """Funnel rows are ordered by STAGE_ORDER."""
     pool = _make_funnel_pool(
-        stage_rows=[("Won", 5), ("Untouched", 200), ("Contacted", 50)],
+        stage_rows=[("Qualified", 5), ("Untouched", 200), ("Contacted", 50)],
         median_rows=[],
     )
     funnel = await get_funnel(pool, ws_id, brief_id)
@@ -219,29 +219,29 @@ async def test_get_funnel_stage_order():
 async def test_get_funnel_counts():
     """Funnel rows include correct stage counts."""
     pool = _make_funnel_pool(
-        stage_rows=[("Untouched", 150), ("Researched", 80), ("Contacted", 40)],
+        stage_rows=[("Untouched", 150), ("Queued", 80), ("Contacted", 40)],
         median_rows=[],
     )
     funnel = await get_funnel(pool, ws_id, brief_id)
     by_stage = {r["stage"]: r for r in funnel}
     assert by_stage["Untouched"]["count"] == 150
-    assert by_stage["Researched"]["count"] == 80
+    assert by_stage["Queued"]["count"] == 80
     assert by_stage["Contacted"]["count"] == 40
     # Stages with no DB rows default to 0
-    assert by_stage["Won"]["count"] == 0
+    assert by_stage["Disqualified"]["count"] == 0
 
 
 @pytest.mark.asyncio
 async def test_get_funnel_conversion_rate():
     """Conversion rate is next_stage_count / current_stage_count."""
     pool = _make_funnel_pool(
-        stage_rows=[("Untouched", 100), ("Researched", 40)],
+        stage_rows=[("Untouched", 100), ("Queued", 40)],
         median_rows=[],
     )
     funnel = await get_funnel(pool, ws_id, brief_id)
     by_stage = {r["stage"]: r for r in funnel}
-    # Researched / Untouched = 40 / 100
-    assert by_stage["Researched"]["conversion_rate"] == pytest.approx(0.4)
+    # Queued / Untouched = 40 / 100
+    assert by_stage["Queued"]["conversion_rate"] == pytest.approx(0.4)
     # Untouched has no predecessor → None
     assert by_stage["Untouched"]["conversion_rate"] is None
 
@@ -255,8 +255,8 @@ async def test_get_funnel_zero_predecessor_conversion_none():
     )
     funnel = await get_funnel(pool, ws_id, brief_id)
     by_stage = {r["stage"]: r for r in funnel}
-    # Untouched=0, Researched's conversion_rate should be None
-    assert by_stage["Researched"]["conversion_rate"] is None
+    # Untouched=0, Queued's conversion_rate should be None
+    assert by_stage["Queued"]["conversion_rate"] is None
 
 
 @pytest.mark.asyncio

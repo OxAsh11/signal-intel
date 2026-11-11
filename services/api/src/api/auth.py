@@ -17,6 +17,7 @@ bearer_scheme = HTTPBearer(auto_error=False)
 class TokenScope(str, Enum):
     read = "read"
     write = "write"
+    admin = "admin"
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,7 @@ class ApiToken:
     id: UUID
     org_id: UUID
     workspace_id: UUID | None
-    scopes: list[str]
+    scope: str
 
 
 def _hash_token(raw: str) -> str:
@@ -45,7 +46,7 @@ async def get_token(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT id, org_id, workspace_id, scopes FROM public.api_token"
+                "SELECT id, org_id, workspace_id, scope FROM public.api_token"
                 " WHERE token_hash = %s AND revoked_at IS NULL"
                 " AND (expires_at IS NULL OR expires_at > now())",
                 (token_hash,),
@@ -58,7 +59,7 @@ async def get_token(
                 id=row[0],
                 org_id=row[1],
                 workspace_id=row[2],
-                scopes=row[3] if row[3] is not None else [],
+                scope=str(row[3]) if row[3] else "Read",
             )
 
             # Update last_used_at via SECURITY DEFINER RPC (S8 write discipline).
@@ -71,8 +72,10 @@ def require_scope(scope: TokenScope):
     """FastAPI dependency factory: raises 403 if the token lacks the required scope."""
 
     async def _check(token: Annotated[ApiToken, Depends(get_token)]) -> ApiToken:
-        if scope == TokenScope.write and "write" not in token.scopes:
+        if scope == TokenScope.write and token.scope.lower() not in ("write", "admin"):
             raise HTTPException(status_code=403, detail="Write scope required")
+        if scope == TokenScope.admin and token.scope.lower() != "admin":
+            raise HTTPException(status_code=403, detail="Admin scope required")
         return token
 
     return _check

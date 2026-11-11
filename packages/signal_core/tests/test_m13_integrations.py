@@ -314,12 +314,12 @@ async def test_deliver_webhook_disables_after_10_failures(
         status = await deliver_webhook(pool, sub_id, event_id, "score.band_changed", {})
 
     assert status == "failed"
-    # Verify disable UPDATE was called.
+    # Verify disable RPC was called (S8 write discipline — now via SECURITY DEFINER RPC).
     disable_sqls = [
-        sql for sql, _ in execute_calls if "SET enabled=false" in sql
+        sql for sql, _ in execute_calls if "disable_webhook_subscription" in sql
     ]
     assert disable_sqls, (
-        f"Expected UPDATE ... SET enabled=false, got execute_calls={execute_calls}"
+        f"Expected app.disable_webhook_subscription RPC, got execute_calls={execute_calls}"
     )
 
 

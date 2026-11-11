@@ -6,7 +6,7 @@ import base64
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.auth import ApiToken, get_token
 
@@ -26,7 +26,6 @@ def _decode_cursor(after: str | None) -> str | None:
 async def list_entities(
     request: Request,
     token: Annotated[ApiToken, Depends(get_token)],
-    workspace_id: UUID = Query(...),
     entity_type: str | None = Query(default=None),
     updated_since: str | None = Query(default=None),
     after: str | None = Query(default=None),
@@ -35,8 +34,9 @@ async def list_entities(
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["workspace_id = %s"]
-    params: list[Any] = [str(workspace_id)]
+    # Tenant isolation: entity has no workspace_id — bind to org_id only
+    conditions = ["org_id = %s"]
+    params: list[Any] = [str(token.org_id)]
 
     if entity_type:
         conditions.append("entity_type = %s")
@@ -54,7 +54,7 @@ async def list_entities(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT id, workspace_id, entity_type, name, domain, updated_at"
+                f"SELECT id, entity_type, display_name, status, updated_at"
                 f" FROM public.entity WHERE {where} ORDER BY id LIMIT %s",
                 params,
             )
@@ -63,11 +63,10 @@ async def list_entities(
     items = [
         {
             "id": str(r[0]),
-            "workspace_id": str(r[1]),
-            "entity_type": r[2],
-            "name": r[3],
-            "domain": r[4],
-            "updated_at": r[5].isoformat() if r[5] else None,
+            "entity_type": r[1],
+            "display_name": r[2],
+            "status": r[3],
+            "updated_at": r[4].isoformat() if r[4] else None,
         }
         for r in rows
     ]
@@ -89,21 +88,19 @@ async def get_entity(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT id, workspace_id, entity_type, name, domain, updated_at"
-                " FROM public.entity WHERE id = %s",
-                (str(entity_id),),
+                "SELECT id, entity_type, display_name, status, updated_at"
+                " FROM public.entity WHERE id = %s AND org_id = %s",
+                (str(entity_id), str(token.org_id)),
             )
             row = await cur.fetchone()
 
     if row is None:
-        from fastapi import HTTPException
         raise HTTPException(status_code=404, detail="Entity not found")
 
     return {
         "id": str(row[0]),
-        "workspace_id": str(row[1]),
-        "entity_type": row[2],
-        "name": row[3],
-        "domain": row[4],
-        "updated_at": row[5].isoformat() if row[5] else None,
+        "entity_type": row[1],
+        "display_name": row[2],
+        "status": row[3],
+        "updated_at": row[4].isoformat() if row[4] else None,
     }

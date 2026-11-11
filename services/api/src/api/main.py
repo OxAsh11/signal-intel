@@ -60,10 +60,10 @@ def build_app() -> FastAPI:
 
     app.add_middleware(
         CORSMiddleware,
-        allow_origins=["*"],
-        allow_credentials=True,
+        allow_origins=os.getenv("CORS_ORIGINS", "*").split(","),
+        allow_credentials=False,  # Bearer token auth — no cookies
         allow_methods=["*"],
-        allow_headers=["*"],
+        allow_headers=["Authorization", "Content-Type"],
     )
 
     @app.middleware("http")

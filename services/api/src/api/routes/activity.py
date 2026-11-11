@@ -6,7 +6,7 @@ import base64
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 
 from api.auth import ApiToken, get_token
 
@@ -33,11 +33,16 @@ async def list_activity(
     after: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
+    # Reject cross-workspace access when the token is scoped to a workspace
+    if token.workspace_id is not None and str(workspace_id) != str(token.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace not permitted")
+
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["workspace_id = %s"]
-    params: list[Any] = [str(workspace_id)]
+    # Tenant isolation: bind to org_id and workspace_id
+    conditions = ["org_id = %s", "workspace_id = %s"]
+    params: list[Any] = [str(token.org_id), str(workspace_id)]
 
     if account_id:
         conditions.append("account_id = %s")

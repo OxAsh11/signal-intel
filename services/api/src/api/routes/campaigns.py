@@ -6,7 +6,7 @@ import base64
 from typing import Annotated, Any
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, Query, Request
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
 from api.auth import ApiToken, TokenScope, get_token, require_scope
@@ -31,11 +31,16 @@ async def list_campaigns(
     after: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
+    # Reject cross-workspace access when the token is scoped to a workspace
+    if token.workspace_id is not None and str(workspace_id) != str(token.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace not permitted")
+
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["workspace_id = %s"]
-    params: list[Any] = [str(workspace_id)]
+    # Tenant isolation: bind to org_id and workspace_id
+    conditions = ["org_id = %s", "workspace_id = %s"]
+    params: list[Any] = [str(token.org_id), str(workspace_id)]
 
     if cursor_id:
         conditions.append("id > %s")
@@ -47,7 +52,7 @@ async def list_campaigns(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT id, workspace_id, name, motion, brief_id, status, updated_at"
+                f"SELECT id, workspace_id, name, motion, brief_id, status, created_at"
                 f" FROM public.campaign WHERE {where} ORDER BY id LIMIT %s",
                 params,
             )
@@ -61,7 +66,7 @@ async def list_campaigns(
             "motion": r[3],
             "brief_id": str(r[4]) if r[4] else None,
             "status": r[5],
-            "updated_at": r[6].isoformat() if r[6] else None,
+            "created_at": r[6].isoformat() if r[6] else None,
         }
         for r in rows
     ]
@@ -86,12 +91,22 @@ async def create_campaign(
     body: CreateCampaignRequest,
     token: Annotated[ApiToken, Depends(require_scope(TokenScope.write))],
 ) -> dict[str, Any]:
+    # Reject cross-workspace access when the token is scoped to a workspace
+    if token.workspace_id is not None and str(body.workspace_id) != str(token.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace not permitted")
+
     pool = request.app.state.pool
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT app.create_campaign(%s, %s, %s, %s)",
-                (str(body.workspace_id), str(body.brief_id), body.name, body.motion),
+                "SELECT app.create_campaign(%s, %s, %s, %s, %s::public.motion, NULL)",
+                (
+                    str(token.org_id),
+                    str(body.workspace_id),
+                    str(body.brief_id),
+                    body.name,
+                    body.motion,
+                ),
             )
             row = await cur.fetchone()
 
@@ -110,8 +125,9 @@ async def list_campaign_members(
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["campaign_id = %s"]
-    params: list[Any] = [str(campaign_id)]
+    # Tenant isolation: campaign_member has org_id
+    conditions = ["campaign_id = %s", "org_id = %s"]
+    params: list[Any] = [str(campaign_id), str(token.org_id)]
 
     if cursor_id:
         conditions.append("id > %s")
@@ -123,7 +139,7 @@ async def list_campaign_members(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT id, campaign_id, account_id, status, updated_at"
+                f"SELECT id, campaign_id, account_id, person_entity_id, created_at"
                 f" FROM public.campaign_member WHERE {where} ORDER BY id LIMIT %s",
                 params,
             )
@@ -134,8 +150,8 @@ async def list_campaign_members(
             "id": str(r[0]),
             "campaign_id": str(r[1]),
             "account_id": str(r[2]) if r[2] else None,
-            "status": r[3],
-            "updated_at": r[4].isoformat() if r[4] else None,
+            "person_entity_id": str(r[3]) if r[3] else None,
+            "created_at": r[4].isoformat() if r[4] else None,
         }
         for r in rows
     ]

@@ -27,25 +27,22 @@ async def list_accounts(
     request: Request,
     token: Annotated[ApiToken, Depends(get_token)],
     workspace_id: UUID = Query(...),
-    brief_id: UUID | None = Query(default=None),
-    band: str | None = Query(default=None),
     stage: str | None = Query(default=None),
     updated_since: str | None = Query(default=None),
     after: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
+    # Reject cross-workspace access when the token is scoped to a workspace
+    if token.workspace_id is not None and str(workspace_id) != str(token.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace not permitted")
+
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["workspace_id = %s"]
-    params: list[Any] = [str(workspace_id)]
+    # Tenant isolation: bind to both org_id and workspace_id
+    conditions = ["org_id = %s", "workspace_id = %s"]
+    params: list[Any] = [str(token.org_id), str(workspace_id)]
 
-    if brief_id:
-        conditions.append("brief_id = %s")
-        params.append(str(brief_id))
-    if band:
-        conditions.append("band = %s")
-        params.append(band)
     if stage:
         conditions.append("stage = %s")
         params.append(stage)
@@ -62,7 +59,7 @@ async def list_accounts(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT id, workspace_id, brief_id, entity_id, band, stage, updated_at"
+                f"SELECT id, workspace_id, entity_id, stage, updated_at"
                 f" FROM public.account WHERE {where} ORDER BY id LIMIT %s",
                 params,
             )
@@ -72,11 +69,9 @@ async def list_accounts(
         {
             "id": str(r[0]),
             "workspace_id": str(r[1]),
-            "brief_id": str(r[2]) if r[2] else None,
-            "entity_id": str(r[3]) if r[3] else None,
-            "band": r[4],
-            "stage": r[5],
-            "updated_at": r[6].isoformat() if r[6] else None,
+            "entity_id": str(r[2]) if r[2] else None,
+            "stage": r[3],
+            "updated_at": r[4].isoformat() if r[4] else None,
         }
         for r in rows
     ]
@@ -98,9 +93,9 @@ async def get_account(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                "SELECT id, workspace_id, brief_id, entity_id, band, stage, updated_at"
-                " FROM public.account WHERE id = %s",
-                (str(account_id),),
+                "SELECT id, workspace_id, entity_id, stage, updated_at"
+                " FROM public.account WHERE id = %s AND org_id = %s",
+                (str(account_id), str(token.org_id)),
             )
             row = await cur.fetchone()
 
@@ -110,9 +105,7 @@ async def get_account(
     return {
         "id": str(row[0]),
         "workspace_id": str(row[1]),
-        "brief_id": str(row[2]) if row[2] else None,
-        "entity_id": str(row[3]) if row[3] else None,
-        "band": row[4],
-        "stage": row[5],
-        "updated_at": row[6].isoformat() if row[6] else None,
+        "entity_id": str(row[2]) if row[2] else None,
+        "stage": row[3],
+        "updated_at": row[4].isoformat() if row[4] else None,
     }

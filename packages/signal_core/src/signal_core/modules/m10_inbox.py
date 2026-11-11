@@ -121,32 +121,28 @@ async def classify_reply(
         source=source,
     )
 
-    # 4. If source == "human", insert a feedback row (ground truth).
+    # 4. If source == "human", insert a feedback row via SECURITY DEFINER RPC (S8).
     if source == "human" and member_id is not None:
         async with pool.connection() as conn:  # type: ignore[union-attr]
             await conn.execute(
-                """INSERT INTO public.feedback
-                       (org_id, workspace_id, member_id, target_type, target_id,
-                        action, corrected_value)
-                   VALUES (%s, %s, %s, 'reply_class', %s, 'correct', %s::jsonb)""",
+                "SELECT app.record_feedback(%s, %s, %s, %s, %s, %s, %s::jsonb)",
                 (
                     str(org_id),
                     str(workspace_id),
                     str(member_id),
+                    "reply_class",
                     str(activity_id),
+                    "correct",
                     json.dumps(reply_class),
                 ),
             )
 
-    # 5. Unsubscribe: add to suppression_list so the person is never pushed again.
+    # 5. Unsubscribe: add to suppression_list via SECURITY DEFINER RPC (S8).
     if reply_class == "Unsubscribe" and person_entity_id is not None:
         async with pool.connection() as conn:  # type: ignore[union-attr]
             await conn.execute(
-                """INSERT INTO public.suppression_list
-                       (org_id, person_entity_id, reason)
-                   VALUES (%s, %s, 'unsubscribe')
-                   ON CONFLICT DO NOTHING""",
-                (str(org_id), str(person_entity_id)),
+                "SELECT app.add_to_suppression_list(%s, %s, %s)",
+                (str(org_id), str(person_entity_id), "unsubscribe"),
             )
         log.info(
             "inbox.suppressed",

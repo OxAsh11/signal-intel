@@ -18,15 +18,17 @@ from signal_core.logging import get_logger
 
 log = get_logger(__name__)
 
-# Canonical stage order for the funnel view
+# Canonical stage order for the funnel view — matches public.stage enum
 STAGE_ORDER: list[str] = [
     "Untouched",
-    "Researched",
+    "Queued",
     "Contacted",
-    "Replied",
+    "Engaged",
+    "Qualified",
     "Meeting",
-    "Won",
-    "Lost",
+    "Handed off",
+    "Dormant",
+    "Disqualified",
 ]
 
 

@@ -228,10 +228,10 @@ async def deliver_webhook(
             if attempt < len(_RETRY_DELAYS) - 1:
                 await asyncio.sleep(delay)
 
-    # All 10 attempts exhausted — disable subscription (operational update, not RPC).
+    # All 10 attempts exhausted — disable subscription via SECURITY DEFINER RPC (S8).
     async with pool.connection() as conn:  # type: ignore[union-attr]
         await conn.execute(
-            "UPDATE public.webhook_subscription SET enabled=false WHERE id=%s",
+            "SELECT app.disable_webhook_subscription(%s)",
             (str(subscription_id),),
         )
     log.warning(

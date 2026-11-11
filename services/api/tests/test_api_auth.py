@@ -94,11 +94,11 @@ def _hash(raw: str) -> str:
 
 def _valid_token_row(raw: str = "test-token") -> tuple[Any, ...]:
     """Row matching the SELECT in auth.get_token for a read-scoped token."""
-    return (uuid4(), ORG_ID, WS_ID, ["read"])
+    return (uuid4(), ORG_ID, WS_ID, "Read")
 
 
 def _write_token_row(raw: str = "write-token") -> tuple[Any, ...]:
-    return (uuid4(), ORG_ID, WS_ID, ["read", "write"])
+    return (uuid4(), ORG_ID, WS_ID, "Write")
 
 
 # ---------------------------------------------------------------------------

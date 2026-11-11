@@ -30,11 +30,16 @@ async def list_briefs(
     after: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=200),
 ) -> dict[str, Any]:
+    # Reject cross-workspace access when the token is scoped to a workspace
+    if token.workspace_id is not None and str(workspace_id) != str(token.workspace_id):
+        raise HTTPException(status_code=403, detail="Workspace not permitted")
+
     pool = request.app.state.pool
     cursor_id = _decode_cursor(after)
 
-    conditions = ["workspace_id = %s"]
-    params: list[Any] = [str(workspace_id)]
+    # Tenant isolation: bind to org_id and workspace_id
+    conditions = ["org_id = %s", "workspace_id = %s"]
+    params: list[Any] = [str(token.org_id), str(workspace_id)]
 
     if cursor_id:
         conditions.append("id > %s")
@@ -46,7 +51,7 @@ async def list_briefs(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                f"SELECT id, workspace_id, name, status, current_version, updated_at"
+                f"SELECT id, workspace_id, name, state, current_version_id, updated_at"
                 f" FROM public.brief WHERE {where} ORDER BY id LIMIT %s",
                 params,
             )
@@ -57,8 +62,8 @@ async def list_briefs(
             "id": str(r[0]),
             "workspace_id": str(r[1]),
             "name": r[2],
-            "status": r[3],
-            "current_version": r[4],
+            "state": r[3],
+            "current_version_id": str(r[4]) if r[4] else None,
             "updated_at": r[5].isoformat() if r[5] else None,
         }
         for r in rows
@@ -94,10 +99,10 @@ async def list_brief_versions(
 
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            # Verify the brief exists first
+            # Verify the brief exists and belongs to this org
             await cur.execute(
-                "SELECT id FROM public.brief WHERE id = %s",
-                (str(brief_id),),
+                "SELECT id FROM public.brief WHERE id = %s AND org_id = %s",
+                (str(brief_id), str(token.org_id)),
             )
             if await cur.fetchone() is None:
                 raise HTTPException(status_code=404, detail="Brief not found")
