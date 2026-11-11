@@ -333,6 +333,7 @@ async def test_suggest_next_step_calls_gateway_and_persists():
         conn.cursor.return_value.__aenter__ = AsyncMock(return_value=cur)
         conn.cursor.return_value.__aexit__ = AsyncMock(return_value=False)
         cur.execute = AsyncMock()
+        cur.fetchall = AsyncMock(return_value=[])
         if idx == 0:
             # Stage fetch
             cur.fetchone = AsyncMock(return_value=("Engaged",))
@@ -386,6 +387,7 @@ async def test_suggest_next_step_strips_whitespace():
         conn.cursor.return_value.__aenter__ = AsyncMock(return_value=cur)
         conn.cursor.return_value.__aexit__ = AsyncMock(return_value=False)
         cur.execute = AsyncMock()
+        cur.fetchall = AsyncMock(return_value=[])
         cur.fetchone = AsyncMock(return_value=("Contacted",) if idx == 0 else None)
 
         async def _exec(sql, params=None):

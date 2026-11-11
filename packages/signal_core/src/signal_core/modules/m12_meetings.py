@@ -202,6 +202,7 @@ async def _find_attribution_campaign(
                 WHERE m.id = %s
                   AND cm.pushed_at >= %s - interval '90 days'
                   AND cm.pushed_at <= %s
+                ORDER BY cm.pushed_at DESC
                 LIMIT 1
                 """,
                 (str(meeting_id), held_at, held_at),
@@ -287,7 +288,7 @@ async def suggest_next_step(
     -------
     The suggested next-step text.
     """
-    # 1. Fetch account context summary.
+    # 1. Fetch account context summary: stage + most recent activity kind.
     stage = "Unknown"
     recent_activity = "No recent activity"
     async with pool.connection() as conn:  # type: ignore[union-attr]
@@ -297,8 +298,22 @@ async def suggest_next_step(
                 (str(account_id),),
             )
             row = await cur.fetchone()
-    if row is not None:
-        stage = str(row[0]) if row[0] is not None else "Unknown"
+            if row is not None:
+                stage = str(row[0]) if row[0] is not None else "Unknown"
+            # Fetch most recent activity kind for richer context.
+            await cur.execute(
+                """SELECT kind, occurred_at FROM public.activity
+                   WHERE account_id = %s
+                   ORDER BY occurred_at DESC
+                   LIMIT 5""",
+                (str(account_id),),
+            )
+            act_rows = await cur.fetchall()
+    if act_rows:
+        recent_activity = "; ".join(
+            f"{r[0]} at {r[1].isoformat() if hasattr(r[1], 'isoformat') else r[1]}"
+            for r in act_rows
+        )
 
     # 2. Call AI gateway.
     suggestion: str = await gateway.write(
