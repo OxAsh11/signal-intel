@@ -1,19 +1,7 @@
--- Phase 1d: Extraction/Identity write paths.
--- Adds:
---   - public.review_item (human-in-the-loop queue for unresolved mentions)
---   - app.update_extraction_status   (service_role only)
---   - app.create_mention             (service_role only)
---   - app.create_claim               (service_role only)
---   - app.create_entity              (service_role only)
---   - app.create_entity_alias        (service_role only)
---   - app.resolve_mention            (service_role only)
---   - app.create_account             (service_role only)
---   - app.merge_entities             (service_role only)
---   - app.create_review_item         (service_role only)
---   - app.resolve_review_item        (authenticated — Editor check inside)
---   - Kill-switch seeds for extraction/identity job types
+-- Migration 0018: review_item table, extraction/identity RPCs, kill-switch seeds.
+-- Phase 1d Task 1: Extraction & Identity worker contract.
 
--- ── 1. review_item table ─────────────────────────────────────────────────────
+-- ── public.review_item ────────────────────────────────────────────────────────
 create table public.review_item (
   id               uuid primary key default gen_random_uuid(),
   org_id           uuid not null references public.organisation (id) on delete restrict,
@@ -29,416 +17,284 @@ create table public.review_item (
 );
 create index review_item_ws_status_idx on public.review_item (workspace_id, status, created_at)
   where status = 'pending';
-
 alter table public.review_item enable row level security;
 
--- Viewer may read; service-role workers insert via app.create_review_item;
--- authenticated Editors call app.resolve_review_item to change status.
--- Direct INSERT by authenticated role is intentionally not permitted.
 create policy review_item_read on public.review_item
-  for select to authenticated
-  using (app.has_workspace_role(workspace_id, 'Viewer'));
+  for select using (app.has_workspace_role(workspace_id, 'Viewer'));
+create policy review_item_write on public.review_item
+  for insert using (app.has_workspace_role(workspace_id, 'Editor'));
 
-grant select on public.review_item to authenticated;
+grant select, insert on public.review_item to authenticated;
 
--- ── 2. app.update_extraction_status ─────────────────────────────────────────
-create function app.update_extraction_status(
-  p_id     uuid,
+-- ── RPC 1: app.update_extraction_status ──────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.update_extraction_status(
+  p_id uuid,
   p_status public.extraction_status,
   p_detail text default null
-) returns void
-language plpgsql security definer set search_path = '' as $$
-begin
-  update public.source_record
-  set extraction_status = p_status,
-      status_detail     = p_detail,
-      updated_at        = now()
-  where id = p_id;
-end $$;
+) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+BEGIN
+  UPDATE public.source_record
+  SET extraction_status = p_status,
+      status_detail = p_detail,
+      updated_at = now()
+  WHERE id = p_id;
+END;
+$$;
 
-revoke execute on function app.update_extraction_status(uuid, public.extraction_status, text)
-  from public, anon, authenticated;
-grant execute on function app.update_extraction_status(uuid, public.extraction_status, text)
-  to postgres, service_role;
+REVOKE EXECUTE ON FUNCTION app.update_extraction_status(uuid, public.extraction_status, text)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.update_extraction_status(uuid, public.extraction_status, text)
+  TO service_role;
 
--- ── 3. app.create_mention ────────────────────────────────────────────────────
-create function app.create_mention(
-  p_org            uuid,
-  p_source_record  uuid,
-  p_entity_type    public.entity_type,
-  p_raw_name       text,
-  p_raw_domain     text,
-  p_raw_country    text,
+-- ── RPC 2: app.create_mention ─────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.create_mention(
+  p_org uuid,
+  p_source_record uuid,
+  p_entity_type public.entity_type,
+  p_raw_name text,
+  p_raw_domain text,
+  p_raw_country text,
   p_raw_attributes jsonb
-) returns uuid
-language plpgsql security definer set search_path = '' as $$
-declare v_id uuid;
-begin
-  insert into public.mention (org_id, source_record_id, entity_type, raw_name, raw_domain, raw_country, raw_attributes)
-  values (p_org, p_source_record, p_entity_type, p_raw_name, p_raw_domain, p_raw_country, coalesce(p_raw_attributes, '{}'))
-  returning id into v_id;
-  return v_id;
-end $$;
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_id uuid;
+BEGIN
+  INSERT INTO public.mention (org_id, source_record_id, entity_type, raw_name, raw_domain, raw_country, raw_attributes)
+  VALUES (p_org, p_source_record, p_entity_type, p_raw_name, p_raw_domain, p_raw_country, p_raw_attributes)
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
 
-revoke execute on function
-  app.create_mention(uuid, uuid, public.entity_type, text, text, text, jsonb)
-  from public, anon, authenticated;
-grant execute on function
-  app.create_mention(uuid, uuid, public.entity_type, text, text, text, jsonb)
-  to postgres, service_role;
+REVOKE EXECUTE ON FUNCTION app.create_mention(uuid, uuid, public.entity_type, text, text, text, jsonb)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.create_mention(uuid, uuid, public.entity_type, text, text, text, jsonb)
+  TO service_role;
 
--- ── 4. app.create_claim ──────────────────────────────────────────────────────
-create function app.create_claim(
-  p_org               uuid,
-  p_entity            uuid,
-  p_predicate         uuid,
-  p_value             jsonb,
-  p_quote             text,
-  p_quote_original    text,
-  p_quote_language    text,
-  p_source_record     uuid,
-  p_observed_at       timestamptz,
+-- ── RPC 3: app.create_claim ───────────────────────────────────────────────────
+-- Note: the claim table column is extractor_version_id (not extractor_version).
+CREATE OR REPLACE FUNCTION app.create_claim(
+  p_org uuid,
+  p_entity uuid,
+  p_predicate uuid,
+  p_value jsonb,
+  p_quote text,
+  p_quote_original text,
+  p_quote_language text,
+  p_source_record uuid,
+  p_observed_at timestamptz,
   p_extractor_version uuid,
-  p_confidence        smallint
-) returns uuid
-language plpgsql security definer set search_path = '' as $$
-declare v_id uuid;
-begin
-  insert into public.claim (org_id, entity_id, predicate_id, value, quote, quote_original, quote_language,
-                             source_record_id, observed_at, extractor_version_id, confidence)
-  values (p_org, p_entity, p_predicate, p_value, p_quote, p_quote_original, p_quote_language,
-          p_source_record, p_observed_at, p_extractor_version, p_confidence)
-  returning id into v_id;
-  return v_id;
-end $$;
+  p_confidence smallint
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_id uuid;
+BEGIN
+  INSERT INTO public.claim (org_id, entity_id, predicate_id, value, quote, quote_original, quote_language,
+    source_record_id, observed_at, extractor_version_id, confidence)
+  VALUES (p_org, p_entity, p_predicate, p_value, p_quote, p_quote_original, p_quote_language,
+    p_source_record, p_observed_at, p_extractor_version, p_confidence)
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
 
-revoke execute on function
-  app.create_claim(uuid, uuid, uuid, jsonb, text, text, text, uuid, timestamptz, uuid, smallint)
-  from public, anon, authenticated;
-grant execute on function
-  app.create_claim(uuid, uuid, uuid, jsonb, text, text, text, uuid, timestamptz, uuid, smallint)
-  to postgres, service_role;
+REVOKE EXECUTE ON FUNCTION app.create_claim(uuid, uuid, uuid, jsonb, text, text, text, uuid, timestamptz, uuid, smallint)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.create_claim(uuid, uuid, uuid, jsonb, text, text, text, uuid, timestamptz, uuid, smallint)
+  TO service_role;
 
--- ── 5. app.create_entity ─────────────────────────────────────────────────────
-create function app.create_entity(
-  p_org         uuid,
+-- ── RPC 4: app.create_entity ──────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.create_entity(
+  p_org uuid,
   p_entity_type public.entity_type,
   p_display_name text,
-  p_scope       public.data_scope default 'tenant'
-) returns uuid
-language plpgsql security definer set search_path = '' as $$
-declare v_id uuid;
-begin
-  insert into public.entity (org_id, entity_type, display_name, scope)
-  values (p_org, p_entity_type, p_display_name, p_scope)
-  returning id into v_id;
-
-  perform app.audit(p_org, null, 'entity.created', 'entity', v_id, null,
-    jsonb_build_object('entity_type', p_entity_type::text, 'display_name', p_display_name, 'scope', p_scope::text));
-
-  return v_id;
-end $$;
-
-revoke execute on function
-  app.create_entity(uuid, public.entity_type, text, public.data_scope)
-  from public, anon, authenticated;
-grant execute on function
-  app.create_entity(uuid, public.entity_type, text, public.data_scope)
-  to postgres, service_role;
-
--- ── 6. app.create_entity_alias ───────────────────────────────────────────────
-create function app.create_entity_alias(
-  p_org              uuid,
-  p_entity           uuid,
-  p_alias_type       public.alias_type,
-  p_value_normalised text,
-  p_confidence       smallint,
-  p_source_record    uuid
-) returns uuid
-language plpgsql security definer set search_path = '' as $$
-declare v_id uuid;
-begin
-  insert into public.entity_alias (org_id, entity_id, alias_type, value_normalised, confidence, source_record_id)
-  values (p_org, p_entity, p_alias_type, p_value_normalised, p_confidence, p_source_record)
-  on conflict (org_id, alias_type, value_normalised, entity_id)
-  do update set confidence = greatest(entity_alias.confidence, excluded.confidence)
-  returning id into v_id;
-  return v_id;
-end $$;
-
-revoke execute on function
-  app.create_entity_alias(uuid, uuid, public.alias_type, text, smallint, uuid)
-  from public, anon, authenticated;
-grant execute on function
-  app.create_entity_alias(uuid, uuid, public.alias_type, text, smallint, uuid)
-  to postgres, service_role;
-
--- ── 7. app.resolve_mention ───────────────────────────────────────────────────
-create function app.resolve_mention(
-  p_mention          uuid,
-  p_entity           uuid,
-  p_match_method     text,
-  p_match_confidence smallint
-) returns void
-language plpgsql security definer set search_path = '' as $$
-begin
-  update public.mention
-  set entity_id        = p_entity,
-      match_method     = p_match_method,
-      match_confidence = p_match_confidence
-  where id = p_mention;
-end $$;
-
-revoke execute on function
-  app.resolve_mention(uuid, uuid, text, smallint)
-  from public, anon, authenticated;
-grant execute on function
-  app.resolve_mention(uuid, uuid, text, smallint)
-  to postgres, service_role;
-
--- ── 8. app.create_account ────────────────────────────────────────────────────
-create function app.create_account(
-  p_org       uuid,
-  p_workspace uuid,
-  p_entity    uuid
-) returns uuid
-language plpgsql security definer set search_path = '' as $$
-declare v_id uuid;
-begin
-  insert into public.account (org_id, workspace_id, entity_id)
-  values (p_org, p_workspace, p_entity)
-  on conflict (workspace_id, entity_id) do nothing
-  returning id into v_id;
-
-  if v_id is null then
-    -- Duplicate: return existing id.
-    select id into v_id from public.account where workspace_id = p_workspace and entity_id = p_entity;
-  end if;
-
-  return v_id;
-end $$;
-
-revoke execute on function
-  app.create_account(uuid, uuid, uuid)
-  from public, anon, authenticated;
-grant execute on function
-  app.create_account(uuid, uuid, uuid)
-  to postgres, service_role;
-
--- ── 9. app.merge_entities ────────────────────────────────────────────────────
-create function app.merge_entities(
-  p_winner uuid,
-  p_loser  uuid,
-  p_actor  uuid
-) returns void
-language plpgsql security definer set search_path = '' as $$
-declare
-  v_org      uuid;
-  v_loser_org uuid;
-begin
-  select org_id into v_org from public.entity where id = p_winner;
-  select org_id into v_loser_org from public.entity where id = p_loser;
-
-  -- Self-merge guard.
-  if p_winner = p_loser then
-    raise exception 'cannot merge entity with itself' using errcode = '22023';
-  end if;
-
-  -- Reject cross-org merges (IS DISTINCT FROM handles NULL safely).
-  if v_org is distinct from v_loser_org then
-    raise exception 'entities from different orgs cannot be merged' using errcode = '22023';
-  end if;
-
-  -- Winner must not already be merged.
-  if (select status from public.entity where id = p_winner) = 'merged' then
-    raise exception 'winner entity is already merged' using errcode = '22023';
-  end if;
-
-  -- Re-point all mentions of the loser to the winner.
-  update public.mention set entity_id = p_winner where entity_id = p_loser;
-
-  -- Re-point aliases; skip if winner already has an identical alias.
-  update public.entity_alias set entity_id = p_winner
-  where entity_id = p_loser
-    and not exists (
-      select 1 from public.entity_alias ea2
-      where ea2.entity_id = p_winner
-        and ea2.org_id = entity_alias.org_id
-        and ea2.alias_type = entity_alias.alias_type
-        and ea2.value_normalised = entity_alias.value_normalised
-    );
-  -- Delete duplicates that couldn't be re-pointed.
-  delete from public.entity_alias where entity_id = p_loser;
-
-  -- Re-point claims.
-  update public.claim set entity_id = p_winner where entity_id = p_loser;
-
-  -- Re-point accounts (skip workspace+entity duplicates).
-  update public.account set entity_id = p_winner where entity_id = p_loser
-    and not exists (
-      select 1 from public.account a2
-      where a2.entity_id = p_winner and a2.workspace_id = account.workspace_id
-    );
-  delete from public.account where entity_id = p_loser;
-
-  -- Mark the loser as merged.
-  update public.entity
-  set status = 'merged', merged_into = p_winner, updated_at = now()
-  where id = p_loser;
-
-  perform app.audit(v_org, null, 'entity.merged', 'entity', p_loser,
-    jsonb_build_object('loser', p_loser, 'winner', p_winner),
-    jsonb_build_object('merged_into', p_winner, 'actor', p_actor));
-end $$;
-
-revoke execute on function
-  app.merge_entities(uuid, uuid, uuid)
-  from public, anon, authenticated;
-grant execute on function
-  app.merge_entities(uuid, uuid, uuid)
-  to postgres, service_role;
-
--- ── 10. app.create_review_item ───────────────────────────────────────────────
-create function app.create_review_item(
-  p_org              uuid,
-  p_workspace        uuid,
-  p_mention          uuid,
-  p_candidate_entity uuid,
-  p_match_method     text,
-  p_match_confidence smallint
-) returns uuid
-language plpgsql security definer set search_path = '' as $$
-declare v_id uuid;
-begin
-  insert into public.review_item (org_id, workspace_id, mention_id, candidate_entity, match_method, match_confidence)
-  values (p_org, p_workspace, p_mention, p_candidate_entity, p_match_method, p_match_confidence)
-  returning id into v_id;
-  return v_id;
-end $$;
-
-revoke execute on function
-  app.create_review_item(uuid, uuid, uuid, uuid, text, smallint)
-  from public, anon, authenticated;
-grant execute on function
-  app.create_review_item(uuid, uuid, uuid, uuid, text, smallint)
-  to postgres, service_role;
-
--- ── 11. app.resolve_review_item ──────────────────────────────────────────────
--- Callable by authenticated clients; performs its own Editor role check.
--- action: 'merge' | 'skip' | 'create_new'
-create function app.resolve_review_item(
-  p_id              uuid,
-  p_action          text,
-  p_new_entity_name text default null
-) returns void
-language plpgsql security definer set search_path = '' as $$
-declare
-  r         public.review_item%rowtype;
-  v_entity  uuid;
-  v_org     uuid;
-  v_ws      uuid;
-begin
-  select * into r from public.review_item where id = p_id;
-
-  if not found then
-    raise exception 'review_item not found' using errcode = 'P0002';
-  end if;
-
-  -- Editor check.
-  if not app.has_workspace_role(r.workspace_id, 'Editor') then
-    raise exception 'permission denied' using errcode = '42501';
-  end if;
-
-  if r.status <> 'pending' then
-    raise exception 'review_item is not pending' using errcode = '23514';
-  end if;
-
-  if p_action not in ('merge', 'skip', 'create_new') then
-    raise exception 'invalid action: %', p_action using errcode = '22023';
-  end if;
-
-  -- Verify mention belongs to the same org.
-  if not exists (select 1 from public.mention where id = r.mention_id and org_id = r.org_id) then
-    raise exception 'mention does not belong to this org' using errcode = '42501';
-  end if;
-  -- Verify candidate_entity (if set) belongs to the same org.
-  if r.candidate_entity is not null and not exists (
-    select 1 from public.entity where id = r.candidate_entity and org_id = r.org_id
-  ) then
-    raise exception 'candidate entity does not belong to this org' using errcode = '42501';
-  end if;
-
-  -- Merge requires a candidate entity to be set.
-  if p_action = 'merge' and r.candidate_entity is null then
-    raise exception 'cannot merge: no candidate entity on this review item' using errcode = '22023';
-  end if;
-
-  -- Fetch context.
-  select org_id into v_org from public.organisation o
-    join public.workspace w on w.org_id = o.id
-    where w.id = r.workspace_id;
-  v_ws := r.workspace_id;
-
-  if p_action = 'merge' then
-    declare v_provisional uuid;
-    begin
-      -- Capture provisional entity before re-pointing.
-      select entity_id into v_provisional from public.mention where id = r.mention_id;
-      perform app.resolve_mention(r.mention_id, r.candidate_entity, r.match_method, r.match_confidence);
-      perform app.create_account(v_org, v_ws, r.candidate_entity);
-      -- Merge provisional into winner so claims transfer.
-      if v_provisional is not null and v_provisional is distinct from r.candidate_entity then
-        perform app.merge_entities(r.candidate_entity, v_provisional, app.current_member_id(v_org));
-      end if;
-    end;
-  elsif p_action = 'create_new' then
-    declare
-      v_mention_entity_type public.entity_type;
-    begin
-      select entity_type into v_mention_entity_type from public.mention where id = r.mention_id;
-      -- Reuse provisional entity M3 already created; fall back to new entity if none.
-      select entity_id into v_entity from public.mention where id = r.mention_id;
-      if v_entity is null then
-        v_entity := app.create_entity(v_org, v_mention_entity_type, coalesce(p_new_entity_name, ''), 'tenant');
-      elsif p_new_entity_name is not null and p_new_entity_name <> '' then
-        update public.entity set display_name = p_new_entity_name, updated_at = now() where id = v_entity;
-      end if;
-    end;
-    perform app.resolve_mention(r.mention_id, v_entity, 'manual_create', 100);
-    perform app.create_account(v_org, v_ws, v_entity);
-  end if;
-  -- 'skip': no entity action needed.
-
-  update public.review_item
-  set status      = case p_action
-                      when 'merge'      then 'merged'
-                      when 'skip'       then 'skipped'
-                      when 'create_new' then 'created_new'
-                    end,
-      resolved_by = app.current_member_id(v_org),
-      resolved_at = now()
-  where id = p_id;
-end $$;
-
-revoke execute on function
-  app.resolve_review_item(uuid, text, text)
-  from public, anon, authenticated;
-grant execute on function
-  app.resolve_review_item(uuid, text, text)
-  to authenticated;
-
--- Public wrapper so clients can call it via PostgREST RPC.
-create function public.resolve_review_item(p_id uuid, p_action text, p_new_entity_name text default null)
-  returns void language sql security definer set search_path = '' as $$
-  select app.resolve_review_item(p_id, p_action, p_new_entity_name)
+  p_scope public.data_scope default 'tenant'
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_id uuid;
+BEGIN
+  INSERT INTO public.entity (org_id, entity_type, display_name, scope)
+  VALUES (p_org, p_entity_type, trim(p_display_name), p_scope)
+  RETURNING id INTO v_id;
+  INSERT INTO public.audit_log (org_id, actor_id, action, target_type, target_id)
+  VALUES (p_org, NULL, 'entity.created', 'entity', v_id);
+  RETURN v_id;
+END;
 $$;
-revoke execute on function public.resolve_review_item(uuid, text, text) from public, anon, authenticated;
-grant execute on function public.resolve_review_item(uuid, text, text) to authenticated;
 
--- ── 12. Kill-switch seeds ────────────────────────────────────────────────────
-insert into public.job_type_config (job_type, enabled) values
+REVOKE EXECUTE ON FUNCTION app.create_entity(uuid, public.entity_type, text, public.data_scope)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.create_entity(uuid, public.entity_type, text, public.data_scope)
+  TO service_role;
+
+-- ── RPC 5: app.create_entity_alias ───────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.create_entity_alias(
+  p_org uuid,
+  p_entity uuid,
+  p_alias_type public.alias_type,
+  p_value_normalised text,
+  p_confidence smallint,
+  p_source_record uuid
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_id uuid;
+BEGIN
+  INSERT INTO public.entity_alias (org_id, entity_id, alias_type, value_normalised, confidence, source_record_id)
+  VALUES (p_org, p_entity, p_alias_type, p_value_normalised, p_confidence, p_source_record)
+  ON CONFLICT (org_id, alias_type, value_normalised, entity_id)
+  DO UPDATE SET confidence = greatest(entity_alias.confidence, excluded.confidence)
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.create_entity_alias(uuid, uuid, public.alias_type, text, smallint, uuid)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.create_entity_alias(uuid, uuid, public.alias_type, text, smallint, uuid)
+  TO service_role;
+
+-- ── RPC 6: app.resolve_mention ────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.resolve_mention(
+  p_mention uuid,
+  p_entity uuid,
+  p_match_method text,
+  p_match_confidence smallint
+) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+BEGIN
+  UPDATE public.mention
+  SET entity_id = p_entity,
+      match_method = p_match_method,
+      match_confidence = p_match_confidence
+  WHERE id = p_mention;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.resolve_mention(uuid, uuid, text, smallint)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.resolve_mention(uuid, uuid, text, smallint)
+  TO service_role;
+
+-- ── RPC 7: app.create_account ─────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.create_account(
+  p_org uuid,
+  p_workspace uuid,
+  p_entity uuid
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_id uuid;
+BEGIN
+  INSERT INTO public.account (org_id, workspace_id, entity_id)
+  VALUES (p_org, p_workspace, p_entity)
+  ON CONFLICT (workspace_id, entity_id) DO NOTHING
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.create_account(uuid, uuid, uuid)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.create_account(uuid, uuid, uuid)
+  TO service_role;
+
+-- ── RPC 8: app.merge_entities ─────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.merge_entities(
+  p_winner uuid,
+  p_loser uuid,
+  p_actor uuid
+) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_org uuid;
+BEGIN
+  SELECT org_id INTO v_org FROM public.entity WHERE id = p_winner;
+  UPDATE public.mention SET entity_id = p_winner WHERE entity_id = p_loser;
+  UPDATE public.entity_alias SET entity_id = p_winner WHERE entity_id = p_loser;
+  UPDATE public.entity SET status = 'merged', merged_into = p_winner WHERE id = p_loser;
+  INSERT INTO public.audit_log (org_id, actor_id, action, target_type, target_id, detail)
+  VALUES (v_org, p_actor, 'entity.merged', 'entity', p_loser, jsonb_build_object('winner', p_winner));
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.merge_entities(uuid, uuid, uuid)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.merge_entities(uuid, uuid, uuid)
+  TO service_role;
+
+-- ── RPC 9: app.create_review_item ────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION app.create_review_item(
+  p_org uuid,
+  p_workspace uuid,
+  p_mention uuid,
+  p_candidate_entity uuid,
+  p_match_method text,
+  p_match_confidence smallint
+) RETURNS uuid
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE v_id uuid;
+BEGIN
+  INSERT INTO public.review_item (org_id, workspace_id, mention_id, candidate_entity, match_method, match_confidence)
+  VALUES (p_org, p_workspace, p_mention, p_candidate_entity, p_match_method, p_match_confidence)
+  RETURNING id INTO v_id;
+  RETURN v_id;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.create_review_item(uuid, uuid, uuid, uuid, text, smallint)
+  FROM public, anon, authenticated;
+GRANT EXECUTE ON FUNCTION app.create_review_item(uuid, uuid, uuid, uuid, text, smallint)
+  TO service_role;
+
+-- ── RPC 10: app.resolve_review_item ──────────────────────────────────────────
+-- Granted to authenticated (Editor role gate is enforced inside the function body).
+CREATE OR REPLACE FUNCTION app.resolve_review_item(
+  p_id uuid,
+  p_action text,
+  p_new_entity_name text default null
+) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, app AS $$
+DECLARE
+  v_item public.review_item;
+  v_new_entity uuid;
+BEGIN
+  SELECT * INTO v_item FROM public.review_item WHERE id = p_id;
+  IF v_item IS NULL THEN RAISE EXCEPTION 'review_item not found' USING ERRCODE = 'P0002'; END IF;
+  IF v_item.status <> 'pending' THEN RAISE EXCEPTION 'review_item already resolved' USING ERRCODE = '23514'; END IF;
+  IF NOT app.has_workspace_role(v_item.workspace_id, 'Editor') THEN
+    RAISE EXCEPTION 'insufficient role' USING ERRCODE = '42501';
+  END IF;
+
+  IF p_action = 'merge' THEN
+    PERFORM app.resolve_mention(v_item.mention_id, v_item.candidate_entity, 'manual_merge', 100);
+    PERFORM app.create_account(v_item.org_id, v_item.workspace_id, v_item.candidate_entity);
+  ELSIF p_action = 'create_new' THEN
+    SELECT entity_type INTO v_item.candidate_entity FROM public.mention WHERE id = v_item.mention_id;
+    v_new_entity := app.create_entity(v_item.org_id,
+      (SELECT entity_type FROM public.mention WHERE id = v_item.mention_id),
+      coalesce(p_new_entity_name, (SELECT raw_name FROM public.mention WHERE id = v_item.mention_id)));
+    PERFORM app.resolve_mention(v_item.mention_id, v_new_entity, 'manual_create', 100);
+    PERFORM app.create_account(v_item.org_id, v_item.workspace_id, v_new_entity);
+  END IF;
+  -- 'skip' falls through — just updates status below
+
+  UPDATE public.review_item
+  SET status = p_action,
+      resolved_by = auth.uid(),
+      resolved_at = now()
+  WHERE id = p_id;
+END;
+$$;
+
+REVOKE EXECUTE ON FUNCTION app.resolve_review_item(uuid, text, text)
+  FROM public, anon;
+GRANT EXECUTE ON FUNCTION app.resolve_review_item(uuid, text, text)
+  TO authenticated;
+
+-- ── Kill-switch seeds ─────────────────────────────────────────────────────────
+INSERT INTO public.job_type_config (job_type, enabled)
+VALUES
   ('extract.relevance_judge', true),
-  ('extract.structured',      true),
-  ('identity.resolve',        true),
+  ('extract.structured', true),
+  ('identity.resolve', true),
   ('identity.duplicate_sweep', true)
-on conflict do nothing;
+ON CONFLICT (job_type) DO NOTHING;
