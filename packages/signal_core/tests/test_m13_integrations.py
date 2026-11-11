@@ -116,10 +116,6 @@ async def test_create_integration_passes_name_category(ctx: IntegrationCtx) -> N
     new_id = uuid4()
     pool = _make_simple_pool({0: (str(new_id),)})
 
-    conn_calls: list[tuple] = []
-
-    orig_connection = pool.connection
-
     # Capture the execute call to verify parameters.
     execute_calls: list[tuple] = []
 
@@ -185,7 +181,7 @@ async def test_deliver_webhook_calls_url(
     assert status == "delivered"
     mock_client.post.assert_called_once()
     call_args = mock_client.post.call_args
-    assert call_args.args[0] == target_url or call_args.kwargs.get("url") == target_url or call_args[0][0] == target_url
+    assert call_args.args[0] == target_url
 
 
 @pytest.mark.asyncio
@@ -213,7 +209,7 @@ async def test_deliver_webhook_includes_signature_header(
     with patch("signal_core.modules.m13_integrations.httpx.AsyncClient", return_value=mock_client):
         await deliver_webhook(pool, sub_id, event_id, "score.band_changed", {"foo": "bar"})
 
-    _args, kwargs = mock_client.post.call_args
+    kwargs = mock_client.post.call_args.kwargs
     headers = kwargs.get("headers", {})
     assert "X-Signal-Signature" in headers
     assert headers["X-Signal-Signature"].startswith("sha256=")
@@ -275,7 +271,6 @@ async def test_deliver_webhook_disables_after_10_failures(
 
     # Capture execute calls to verify the disable UPDATE.
     execute_calls: list[tuple] = []
-    orig_connection = pool.connection
     call_count = [0]
 
     def _make_conn(idx: int) -> MagicMock:
@@ -372,7 +367,7 @@ async def test_replay_uses_stored_payload(
     mock_client.post.assert_called_once()
 
     # Verify the body matches sort_keys canonical bytes (matches delivery signing).
-    _args, kwargs = mock_client.post.call_args
+    kwargs = mock_client.post.call_args.kwargs
     sent_body = kwargs.get("content", b"")
     assert sent_body == json.dumps(stored_payload, sort_keys=True).encode()
 
