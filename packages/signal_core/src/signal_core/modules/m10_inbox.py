@@ -4,8 +4,8 @@ Flow for classify_reply:
   1. Load the activity row from public.activity.
   2. If the row's payload["reply_class_source"] == "human" and source != "human",
      return immediately (human mark wins; AI/sequencer cannot override).
-  3. UPDATE activity.payload with reply_class and reply_class_source via
-     a direct service_role UPDATE (operational payload patch, S8 compliant).
+  3. Call app.patch_activity_reply_class RPC — SECURITY DEFINER, gates the
+     activity_append_only trigger via a transaction-local set_config flag.
   4. If source == "human" and member_id is provided, insert a feedback row.
   5. If reply_class == "Unsubscribe", insert person_entity_id into suppression_list.
   6. Emit reply.classified via app.emit.
@@ -15,11 +15,6 @@ Flow for get_inbox:
   2. Apply optional filters (unclassified_only, min_age_days).
   3. Compute is_overdue = occurred_at < now() - 2 working days.
   4. Return list of dicts.
-
-Note: public.activity has an append_only trigger that blocks UPDATE.
-      In production this requires either a dedicated patch RPC or the trigger
-      to be disabled for service_role. The UPDATE below is correct Python;
-      a companion migration (app.patch_activity_reply_class) is recommended.
 """
 
 from __future__ import annotations
@@ -110,19 +105,13 @@ async def classify_reply(
         )
         return
 
-    # 3. UPDATE activity.payload with reply_class and reply_class_source.
-    #    This is a service_role operational payload patch (S8).
-    #    Note: public.activity has an activity_append_only trigger; a companion
-    #    migration with app.patch_activity_reply_class is needed for production.
+    # 3. Patch activity.payload via SECURITY DEFINER RPC.
+    #    app.patch_activity_reply_class gates the activity_append_only trigger
+    #    using a transaction-local set_config flag (migration 0024).
     async with pool.connection() as conn:  # type: ignore[union-attr]
         await conn.execute(
-            """UPDATE public.activity
-               SET payload = jsonb_set(
-                   jsonb_set(payload, '{reply_class}', to_jsonb(%s::text)),
-                   '{reply_class_source}', to_jsonb(%s::text)
-               )
-               WHERE id = %s""",
-            (reply_class, source, str(activity_id)),
+            "SELECT app.patch_activity_reply_class(%s, %s::public.reply_class, %s)",
+            (str(activity_id), reply_class, source),
         )
 
     log.info(
