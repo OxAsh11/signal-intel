@@ -12,6 +12,7 @@ from fastapi import FastAPI, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 
 from api.routes import accounts, activity, briefs, campaigns, claims, entities, meetings, tasks
+from api.webhooks_inbound import router as webhooks_router
 
 
 @asynccontextmanager
@@ -86,6 +87,9 @@ def build_app() -> FastAPI:
         meetings.router,
     ):
         app.include_router(router, prefix="/v1")
+
+    # Inbound webhook ingestion (no Bearer auth — HMAC-signed per integration)
+    app.include_router(webhooks_router, prefix="/v1")
 
     return app
 
