@@ -15,6 +15,30 @@ async function call(fn: string, args: Record<string, unknown>, path: string): Pr
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
+// ── API tokens (M13) ──────────────────────────────────────────────────────────
+
+export type TokenState = { token?: string; error?: string };
+
+/** The token is generated in the database, stored only as a hash and returned once. */
+export async function createApiToken(_: TokenState, form: FormData): Promise<TokenState> {
+  const name = text(form, 'name');
+  if (!name) return { error: 'Enter a name for the token.' };
+  const supabase = await createClient();
+  if (!supabase) return { error: 'Supabase is not configured.' };
+  const { data, error } = await supabase.rpc('create_api_token', {
+    p_workspace_id: text(form, 'workspace'),
+    p_name: name,
+    p_scope: text(form, 'scope') || 'Read',
+  });
+  if (error) return { error: friendlyError(error.message) };
+  revalidatePath('/settings');
+  return { token: String(data) };
+}
+
+export async function revokeApiToken(tokenId: string): Promise<void> {
+  await call('revoke_api_token', { p_token_id: tokenId }, '/settings');
+}
+
 // ── Inbox (M10) ───────────────────────────────────────────────────────────────
 
 /** A human mark always wins and is stored as feedback. */

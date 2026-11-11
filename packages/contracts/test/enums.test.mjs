@@ -9,7 +9,9 @@ test('enums match PRD Appendix A', () => {
   assert.deepEqual(enums.Band.values, ['High', 'Medium', 'Low', 'Excluded']);
   assert.equal(enums.Stage.values.length, 9);
   assert.equal(enums.ActivityKind.values.length, 15);
-  assert.equal(enums.EventType.values.length, 20);
+  // Appendix A.4's twenty, plus two reviewed additions that queue work from the interface:
+  // brief.intake_requested (0015) and radar.fetch_queued (0017).
+  assert.equal(enums.EventType.values.length, 22);
   assert.deepEqual(enums.GateOutcome.values, ['applied', 'review queue', 'digest']);
 });
 
