@@ -277,8 +277,16 @@ BEGIN
   END IF;
   -- 'skip' falls through — just updates status below
 
+  IF p_action NOT IN ('merge', 'skip', 'create_new') THEN
+    RAISE EXCEPTION 'invalid action: %', p_action USING ERRCODE = '22023';
+  END IF;
+
   UPDATE public.review_item
-  SET status = p_action,
+  SET status = CASE p_action
+                 WHEN 'merge'      THEN 'merged'
+                 WHEN 'skip'       THEN 'skipped'
+                 ELSE 'created_new'
+               END,
       resolved_by = auth.uid(),
       resolved_at = now()
   WHERE id = p_id;
