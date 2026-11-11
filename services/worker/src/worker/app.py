@@ -32,6 +32,11 @@ from signal_core.modules.m03_extraction import extract_structured, judge_relevan
 import signal_core.modules.m03_extraction as _m03_extraction
 from signal_core.modules.m04_identity import duplicate_sweep, resolve_mention
 import signal_core.modules.m04_identity as _m04_identity
+from signal_core.modules.m09_activation import push_campaign_batch
+from signal_core.modules.m10_inbox import classify_reply as _classify_reply, get_inbox as _get_inbox
+from signal_core.modules.m12_meetings import sync_meeting as _sync_meeting, suggest_next_step as _suggest_next_step
+from signal_core.modules.m13_integrations import deliver_webhook as _deliver_webhook
+from signal_core.modules.m16_reporting import compute_metric as _compute_metric
 from worker.health import HealthState
 
 log = get_logger(__name__)
@@ -42,6 +47,8 @@ RELEASE_STALE_CRON = "*/5 * * * *"
 RADAR_HEALTH_CRON = "30 * * * *"  # every hour at :30
 IDENTITY_SWEEP_CRON = "0 2 * * *"  # daily, 02:00 UTC
 HEALTH_CHECK_CRON = "0 6 * * *"  # daily at 06:00 UTC
+INBOX_RECONCILE_CRON = "*/15 * * * *"   # every 15 min
+NEXT_STEP_CRON = "0 7 * * *"             # daily 07:00 UTC
 RESUME_BATCH = 50
 
 
@@ -709,6 +716,140 @@ def build_app(
     _m11_stage.stage_advance_job = stage_advance_task
     _m05_verdict.account_card_generate_job = account_card_generate_task
     _m15_account_card.account_card_generate_job = account_card_generate_task
+
+    # ------------------------------------------------------------------
+    # Phase 3 jobs (activation, inbox, meetings, webhooks, reporting)
+    # ------------------------------------------------------------------
+
+    @job(app, type="campaign.push", kill_switch=kill_switch, queue="compute", retry=2)
+    async def campaign_push_task(*, campaign_id: str, workspace_id: str, org_id: str, **_: Any) -> dict:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        ctx = CallContext(
+            org_id=_UUID(org_id),
+            workspace_id=_UUID(workspace_id),
+            brief_id=None,
+            job_id=None,
+            job_type="campaign.push",
+            job_args={"campaign_id": campaign_id, "workspace_id": workspace_id, "org_id": org_id},
+        )
+        return await push_campaign_batch(pool, gateway, _UUID(campaign_id), ctx)
+
+    @job(app, type="reply.classify", kill_switch=kill_switch, queue="compute", retry=1)
+    async def reply_classify_task(*, activity_id: str, reply_class: str, member_id: str | None = None, source: str = "ai", **_: Any) -> None:
+        assert pool is not None, "pool required"
+        from uuid import UUID as _UUID
+        await _classify_reply(
+            pool,
+            _UUID(activity_id),
+            reply_class,
+            _UUID(member_id) if member_id else None,
+            source,  # type: ignore[arg-type]
+        )
+
+    @app.periodic(cron=INBOX_RECONCILE_CRON, periodic_id="inbox.reconcile")
+    @job(app, type="inbox.reconcile", kill_switch=kill_switch, queue="compute", retry=0)
+    async def inbox_reconcile_cron(timestamp: int) -> int:
+        if pool is None:
+            return 0
+        from uuid import UUID as _UUID
+        async with pool.connection() as db_conn:
+            async with db_conn.cursor() as cur:
+                await cur.execute("SELECT id FROM public.workspace")
+                rows = await cur.fetchall()
+        total = 0
+        for row in rows:
+            ws_id = _UUID(str(row[0]))
+            result = await _get_inbox(pool, ws_id, limit=100)
+            total += len(result)
+            log.info("inbox.reconcile.workspace", workspace_id=str(ws_id), items=len(result))
+        return total
+
+    @job(app, type="meeting.sync", kill_switch=kill_switch, queue="compute", retry=2)
+    async def meeting_sync_task(*, org_id: str, workspace_id: str, integration_id: str, external_id: str, scheduled_at: str, attendee_domains: list[str], **_: Any) -> str:
+        assert pool is not None, "pool required"
+        from uuid import UUID as _UUID
+        from datetime import datetime
+        dt = datetime.fromisoformat(scheduled_at)
+        meeting_id = await _sync_meeting(
+            pool, _UUID(org_id), _UUID(workspace_id), _UUID(integration_id),
+            external_id, dt, attendee_domains,
+        )
+        log.info("meeting.sync.done", meeting_id=str(meeting_id))
+        return str(meeting_id)
+
+    @job(app, type="next_step.suggest", kill_switch=kill_switch, queue="compute", retry=1)
+    async def next_step_suggest_task(*, account_id: str, workspace_id: str, org_id: str, **_: Any) -> str:
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        from uuid import UUID as _UUID
+        suggestion = await _suggest_next_step(pool, gateway, _UUID(account_id), _UUID(workspace_id))
+        log.info("next_step.suggest.done", account_id=account_id)
+        return suggestion
+
+    @job(app, type="webhook.deliver", kill_switch=kill_switch, queue="default", retry=3)
+    async def webhook_deliver_task(*, subscription_id: str, event_id: str, event_type: str, payload: dict, **_: Any) -> str:
+        assert pool is not None, "pool required"
+        from uuid import UUID as _UUID
+        return await _deliver_webhook(pool, _UUID(subscription_id), _UUID(event_id), event_type, payload)
+
+    @job(app, type="metric.snapshot", kill_switch=kill_switch, queue="compute", retry=1)
+    async def metric_snapshot_task(*, workspace_id: str, brief_id: str, org_id: str, **_: Any) -> dict:
+        assert pool is not None, "pool required"
+        from uuid import UUID as _UUID
+        async with pool.connection() as db_conn:
+            async with db_conn.cursor() as cur:
+                await cur.execute(
+                    "SELECT key FROM public.metric_definition WHERE workspace_id = %s",
+                    (workspace_id,),
+                )
+                rows = await cur.fetchall()
+        results = {}
+        for row in rows:
+            key = row[0]
+            try:
+                result = await _compute_metric(pool, _UUID(workspace_id), _UUID(brief_id), key)
+                results[key] = result.get("value")
+            except ValueError:
+                log.warning("metric.snapshot.unknown", key=key)
+        log.info("metric.snapshot.done", workspace_id=workspace_id, count=len(results))
+        return results
+
+    @app.periodic(cron=NEXT_STEP_CRON, periodic_id="next_step.cron")
+    @job(app, type="next_step.cron", kill_switch=kill_switch, queue="compute", retry=0)
+    async def next_step_cron(timestamp: int) -> int:
+        if pool is None or gateway is None:
+            return 0
+        from uuid import UUID as _UUID
+        async with pool.connection() as db_conn:
+            async with db_conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT a.id, a.workspace_id, a.org_id
+                       FROM public.account a
+                       WHERE a.stage IN ('Contacted', 'Engaged', 'Qualified')
+                         AND NOT EXISTS (
+                             SELECT 1 FROM public.next_step ns
+                             WHERE ns.account_id = a.id
+                               AND ns.updated_at > now() - interval '24 hours'
+                         )
+                       LIMIT 500"""
+                )
+                rows = await cur.fetchall()
+        queued = 0
+        for row in rows:
+            account_id = str(row[0])
+            workspace_id = str(row[1])
+            org_id = str(row[2])
+            with contextlib.suppress(AlreadyEnqueued):
+                await app.tasks["next_step.suggest"].configure(
+                    queueing_lock=f"nss:{account_id}"
+                ).defer_async(
+                    account_id=account_id,
+                    workspace_id=workspace_id,
+                    org_id=org_id,
+                )
+            queued += 1
+        log.info("next_step.cron.done", queued=queued)
+        return queued
 
     # ------------------------------------------------------------------
     # Dispatch router (updated for Phase 1c events)
