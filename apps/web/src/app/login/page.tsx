@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Suspense } from 'react';
 import { NotConfigured } from '@/components/not-configured';
 import { getProviderStatus, type OAuthProvider } from '@/lib/auth-providers';
+import { EmailLinkForm } from './email-link-form';
 import { SignInButtons } from './sign-in-buttons';
 
 export const metadata: Metadata = { title: 'Sign in' };
@@ -29,13 +30,20 @@ const PROVIDERS: { id: OAuthProvider; name: string; setup: string[] }[] = [
 
 async function SignInOptions() {
   const status = await getProviderStatus();
-  // Unknown (Supabase unreachable): show the buttons; the provider reports its own error.
+  // Unknown (Supabase unreachable): show every option; the provider reports its own error.
+  const emailEnabled = status === null || status.email;
   const enabled = PROVIDERS.filter((p) => status === null || status[p.id]).map((p) => p.id);
   const missing = PROVIDERS.filter((p) => status !== null && !status[p.id]);
   return (
     <div className="flex flex-col gap-3">
-      {enabled.length > 0 ? <SignInButtons providers={enabled} /> : null}
-      {enabled.length === 0 ? (
+      {emailEnabled ? <EmailLinkForm /> : null}
+      {emailEnabled && enabled.length > 0 ? (
+        <p className="m-0 text-center text-ink-muted" aria-hidden="true">
+          or
+        </p>
+      ) : null}
+      {enabled.length > 0 ? <SignInButtons providers={enabled} showUrlError={!emailEnabled} /> : null}
+      {!emailEnabled && enabled.length === 0 ? (
         <p className="m-0 text-ink-muted">Sign-in isn&apos;t available yet. It appears here once a provider is switched on.</p>
       ) : null}
       {missing.map((p) => (
