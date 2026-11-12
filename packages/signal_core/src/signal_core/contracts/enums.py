@@ -198,6 +198,7 @@ class EventType(StrEnum):
     HEALTH_INCIDENT_OPENED = "health.incident_opened"
     HEALTH_INCIDENT_RESOLVED = "health.incident_resolved"
     RADAR_FETCH_QUEUED = "radar.fetch_queued"
+    BRIEF_PREVIEW_REQUESTED = "brief.preview_requested"
 
 
 class UsageUnit(StrEnum):

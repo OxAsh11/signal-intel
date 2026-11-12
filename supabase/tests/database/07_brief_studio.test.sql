@@ -287,6 +287,12 @@ select public.save_brief_draft_ui(
     "examples":{"positive":["Dassault Systemes","PTC Inc","Siemens NX"],"negative":["Microsoft","Google"]},
     "sources":{"radar_types":["job_postings"]}}'::jsonb
 );
+-- Migration 0032: a published Brief needs a ready preview of the exact draft before publishing.
+insert into ids select 'prev2', public.request_brief_preview((select v from ids where k = 'brief_a'));
+reset role;
+select app.complete_brief_preview((select v from ids where k = 'prev2'), 'Redefine', true, '{}', 0, 0, false);
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000aa02","role":"authenticated"}', true);
 insert into ids select 'vid2', public.publish_brief((select v from ids where k = 'brief_a'));
 reset role;
 
