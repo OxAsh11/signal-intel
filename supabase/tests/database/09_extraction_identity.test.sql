@@ -69,7 +69,7 @@ insert into ids select 'men_loser',
     (select v from ids where k = 'sr'),
     'company'::public.entity_type,
     'Acme Duplicate', null, null, '{}'::jsonb);
-select app.resolve_mention((select v from ids where k = 'men_loser'), (select v from ids where k = 'ent_loser'), 'provisional', 0);
+select app.resolve_mention((select v from ids where k = 'men_loser'), (select v from ids where k = 'ent_loser'), 'provisional', 0::smallint);
 
 -- Review item for resolve tests (service_role; mention 'men' + candidate entity 'ent')
 insert into ids select 'rev',
@@ -78,7 +78,7 @@ insert into ids select 'rev',
     (select v from ids where k = 'ws'),
     (select v from ids where k = 'men'),
     (select v from ids where k = 'ent'),
-    'name_country', 75);
+    'name_country', 75::smallint);
 
 -- ── Test 1: authenticated cannot call app.update_extraction_status ───────────
 set local role authenticated;
@@ -135,11 +135,11 @@ begin
   v_id1 := app.create_entity_alias(
     (select v from ids where k = 'org'),
     (select v from ids where k = 'ent'),
-    'domain'::public.alias_type, 'acme.com', 60, (select v from ids where k = 'sr'));
+    'domain'::public.alias_type, 'acme.com', 60::smallint, (select v from ids where k = 'sr'));
   v_id2 := app.create_entity_alias(
     (select v from ids where k = 'org'),
     (select v from ids where k = 'ent'),
-    'domain'::public.alias_type, 'acme.com', 90, (select v from ids where k = 'sr'));
+    'domain'::public.alias_type, 'acme.com', 90::smallint, (select v from ids where k = 'sr'));
   -- Second insert should upsert (same entity+type+value_normalised) → confidence updated.
   select confidence into v_conf from public.entity_alias
   where entity_id = (select v from ids where k = 'ent')

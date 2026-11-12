@@ -13,7 +13,7 @@
     "test": "turbo run test",
     "codegen": "pnpm --filter @signal/contracts gen && pnpm --filter @signal/ui build:tokens",
     "codegen:check": "pnpm --filter @signal/contracts gen:check && pnpm --filter @signal/ui build:tokens:check",
-    "db:check": "node scripts/check-migrations.mjs && node scripts/check-sql.mjs",
+    "db:check": "node scripts/check-migrations.mjs && node scripts/check-sql.mjs && node scripts/check-pgtap.mjs",
     "db:types": "supabase gen types typescript --project-id \"$SUPABASE_PROJECT_REF\" --schema public,app > packages/db-types/src/database.ts",
     "py:check": "uv run ruff check . && uv run ruff format --check . && uv run mypy && uv run pytest",
     "format": "prettier --write .",

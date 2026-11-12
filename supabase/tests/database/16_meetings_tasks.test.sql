@@ -25,7 +25,7 @@ insert into public.account (id, org_id, workspace_id, entity_id, stage)
           (select v from ids where k = 'org'),
           (select v from ids where k = 'ws'),
           (select v from ids where k = 'ent'),
-          'Identified');
+          'Untouched');
 insert into ids select 'account', id from public.account
   where entity_id = (select v from ids where k = 'ent');
 

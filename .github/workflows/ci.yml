@@ -21,6 +21,12 @@ jobs:
           node-version: 24
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # db:check also prepares every SQL statement in the Python code, which it extracts with uv.
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: "0.12.5"
+          enable-cache: true
+      - run: uv sync --frozen
       - run: pnpm codegen:check
       - run: pnpm lint
       - run: pnpm typecheck
@@ -38,6 +44,13 @@ jobs:
           version: "0.12.5"
           enable-cache: true
       - run: uv sync --frozen
+      # The end-to-end pipeline test runs against an in-memory Postgres started with node.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
       - run: uv run ruff check .
       - run: uv run ruff format --check .
       - run: uv run mypy

@@ -170,7 +170,7 @@ select throws_ok(
       (SELECT v FROM ids WHERE k = 'doc1'),
       0,
       'test content guard',
-      ('[' || repeat('0.1,', 1023) || '0.1]')::extensions.vector,
+      array_fill(0.1::real, array[1024])::extensions.vector,
       'test-model',
       'tenant'::public.data_scope
     )
@@ -255,7 +255,7 @@ select isnt_empty(
       (SELECT v FROM ids WHERE k = 'doc1'),
       0,
       'test content first',
-      ('[' || repeat('0.1,', 1023) || '0.1]')::extensions.vector,
+      array_fill(0.1::real, array[1024])::extensions.vector,
       'test-model',
       'tenant'::public.data_scope,
       now()
@@ -277,7 +277,7 @@ select isnt_empty(
       (SELECT v FROM ids WHERE k = 'doc1'),
       0,
       'test content updated',
-      ('[' || repeat('0.2,', 1023) || '0.2]')::extensions.vector,
+      array_fill(0.2::real, array[1024])::extensions.vector,
       'test-model',
       'tenant'::public.data_scope,
       now()

@@ -23,8 +23,8 @@ const SUPABASE_STUB = `
   grant execute on function auth.uid() to anon, authenticated, service_role;
 `;
 
-export async function openMigratedDb() {
-  const db = await PGlite.create({ extensions: { vector, pg_trgm, unaccent, pgcrypto } });
+export async function openMigratedDb(extra = {}) {
+  const db = await PGlite.create({ extensions: { vector, pg_trgm, unaccent, pgcrypto, ...extra } });
   await db.exec(SUPABASE_STUB);
   const migDir = resolve(repo, 'supabase/migrations');
   for (const file of readdirSync(migDir).filter((f) => f.endsWith('.sql')).sort()) {
