@@ -32,12 +32,14 @@ Three systems, wired once: **GitHub** (code and CI), **Supabase** (database, aut
 
 ## 3. Railway
 
-1. New project → **Deploy from GitHub repo** → pick the repo. Create two services from the same repo:
+1. New project → **Deploy from GitHub repo** → pick the repo. Create two services from the same repo. Railway no longer accepts a config file path (`railway.json` is deprecated), so set these on each service directly (Settings, or the `serviceInstanceUpdate` API). The values mirror `apps/web/railway.json` and `services/worker/railway.json`, which stay in the repo as the reference:
 
-| Service | Settings → Source → Config file path | Root directory |
-|---|---|---|
-| `web` | `apps/web/railway.json` | `/` (repo root) |
-| `worker` | `services/worker/railway.json` | `/` (repo root) |
+| Service | Dockerfile path | Health check | Restart policy | Region |
+|---|---|---|---|---|
+| `web` | `apps/web/Dockerfile` | `/api/health` (60 s) | on failure, 5 retries | same as Supabase or nearest |
+| `worker` | `services/worker/Dockerfile` | `/healthz` (90 s) | always, 1 replica | same as `web` |
+
+Copy the watch patterns from each `railway.json` so a change to one service doesn't rebuild the other. Don't add `--mount=type=cache` lines to the Dockerfiles: Railway rejects cache mounts without its own `s/<service-id>-` id prefix.
 
 2. Create environments `staging` (deploys `main`) and `production` (deploys from release tags or a manual promote).
 3. Variables per service (the names match `.env.example`):

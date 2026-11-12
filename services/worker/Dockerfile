@@ -6,7 +6,7 @@ WORKDIR /repo
 COPY pyproject.toml uv.lock .python-version ./
 COPY packages/signal_core packages/signal_core
 COPY services/worker services/worker
-RUN --mount=type=cache,target=/root/.cache/uv uv sync --frozen --no-dev --package worker
+RUN uv sync --frozen --no-dev --package worker
 RUN useradd --create-home app && chown -R app /repo
 USER app
 ENV PORT=8080

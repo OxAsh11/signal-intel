@@ -10,7 +10,7 @@ ARG NEXT_PUBLIC_SUPABASE_URL
 ARG NEXT_PUBLIC_SUPABASE_ANON_KEY
 ARG NEXT_PUBLIC_SITE_URL
 COPY . .
-RUN --mount=type=cache,id=pnpm,target=/pnpm/store pnpm install --frozen-lockfile --filter "web..."
+RUN pnpm install --frozen-lockfile --filter "web..."
 RUN pnpm --filter web build
 
 FROM base AS run
