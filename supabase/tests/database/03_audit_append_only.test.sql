@@ -9,7 +9,12 @@ select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000
 select public.create_organisation('Alpha Engineering');
 reset role;
 
-select is((select count(*)::int from public.audit_log), 2, 'organisation + workspace creation are audited');
+select is(
+  (select count(*)::int from public.audit_log
+     where org_id = (select id from public.organisation where name = 'Alpha Engineering')),
+  2,
+  'organisation + workspace creation are audited'
+);
 select throws_ok($$ update public.audit_log set action = 'tampered' $$, '42501', null, 'audit_log rejects UPDATE');
 select throws_ok($$ delete from public.audit_log $$, '42501', null, 'audit_log rejects DELETE');
 

@@ -24,4 +24,4 @@ jobs:
         with:
           version: 2.122.1
       - run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF_DEV }}"
-      - run: supabase db push
+      - run: supabase db push --linked
