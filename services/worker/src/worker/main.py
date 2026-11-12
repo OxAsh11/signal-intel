@@ -66,13 +66,16 @@ async def amain() -> None:
     connector = PsycopgConnector(
         conninfo=conninfo, configure=configure_worker_connection, kwargs={"prepare_threshold": None}
     )
+    gateway = build_gateway(settings, pool)
     app = build_app(
         connector,
         DbKillSwitch(pool),
         state,
         PgHealthStore(pool),
-        ai_configured=build_gateway(settings, pool).configured,
+        ai_configured=gateway.configured,
         approvals=PgApprovalStore(pool),
+        gateway=gateway,
+        pool=pool,
     )
 
     stop = asyncio.Event()
@@ -98,7 +101,19 @@ async def amain() -> None:
         )
         worker = asyncio.create_task(
             app.run_worker_async(
-                queues=["system", "events", "default"], install_signal_handlers=False
+                queues=[
+                    "system",
+                    "events",
+                    "briefs",
+                    "fetch",
+                    "extract",
+                    "identity",
+                    "derive",
+                    "compute",
+                    "health",
+                    "default",
+                ],
+                install_signal_handlers=False,
             )
         )
         waiter = asyncio.create_task(stop.wait())

@@ -15,7 +15,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             Signal Intel
           </Link>
         </div>
-        <NavLinks screens={SCREENS.map(({ href, label }) => ({ href, label }))} />
+        {/* The nav reads the pathname, which is request data on dynamic routes. */}
+        <Suspense fallback={null}>
+          <NavLinks screens={SCREENS.map(({ href, label }) => ({ href, label }))} />
+        </Suspense>
       </aside>
       <div className="flex min-w-0 flex-col">
         <header className="sticky top-0 z-10 flex h-14 items-center justify-between gap-3 border-b border-line bg-paper/90 px-4 backdrop-blur md:px-8">
@@ -29,7 +32,10 @@ export function AppShell({ children }: { children: ReactNode }) {
             <MembershipGate />
           </Suspense>
         </header>
-        <main className="flex min-w-0 flex-col gap-6 px-4 py-6 md:px-8">{children}</main>
+        <main className="flex min-w-0 flex-col gap-6 px-4 py-6 md:px-8">
+          {/* Screens read the session and the workspace, so they stream in behind the shell. */}
+          <Suspense fallback={<p className="m-0 text-ink-muted">Loading…</p>}>{children}</Suspense>
+        </main>
       </div>
     </div>
   );

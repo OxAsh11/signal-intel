@@ -2,17 +2,18 @@
 name = "signal-intel"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
-dependencies = ["signal-core", "worker"]
+dependencies = ["signal-core", "worker", "api"]
 
 [tool.uv]
 package = false
 
 [tool.uv.workspace]
-members = ["packages/signal_core", "services/worker"]
+members = ["packages/signal_core", "services/worker", "services/api"]
 
 [tool.uv.sources]
 signal-core = { workspace = true }
 worker = { workspace = true }
+api = { workspace = true }
 
 [dependency-groups]
 dev = [
@@ -25,13 +26,20 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py313"
-extend-exclude = ["node_modules", ".next", "apps", "design"]
+extend-exclude = ["node_modules", ".next", "apps", "design", "docs"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "B", "UP", "SIM", "ASYNC", "RUF"]
+# SIM117: `async with pool.connection()` / `async with conn.cursor()` nest on purpose in many
+# modules where the connection outlives one cursor.
+ignore = ["SIM117"]
+
+[tool.ruff.lint.per-file-ignores]
+"services/api/**" = ["B008"]  # FastAPI declares parameters with Query(...) / Depends(...) defaults
+"**/tests/**" = ["E501", "RUF002"]
 
 [tool.ruff.lint.isort]
-known-first-party = ["signal_core", "worker"]
+known-first-party = ["signal_core", "worker", "api"]
 
 [tool.mypy]
 python_version = "3.13"
@@ -45,7 +53,7 @@ module = ["procrastinate.*"]
 ignore_missing_imports = true
 
 [tool.pytest.ini_options]
-testpaths = ["packages/signal_core/tests", "services/worker/tests"]
+testpaths = ["packages/signal_core/tests", "services/worker/tests", "services/api/tests"]
 asyncio_mode = "auto"
 addopts = "--import-mode=importlib"
 markers = ["db: needs a real database (DATABASE_URL_SESSION)"]

@@ -177,6 +177,7 @@ class EventType(StrEnum):
     """Closed event catalogue (A.4). Adding an event is a reviewed change."""
 
     BRIEF_VERSION_PUBLISHED = "brief.version_published"
+    BRIEF_INTAKE_REQUESTED = "brief.intake_requested"
     SOURCE_RECORD_CREATED = "source_record.created"
     CLAIM_CREATED = "claim.created"
     CLAIM_RETRACTED = "claim.retracted"
@@ -196,6 +197,7 @@ class EventType(StrEnum):
     TASK_CREATED = "task.created"
     HEALTH_INCIDENT_OPENED = "health.incident_opened"
     HEALTH_INCIDENT_RESOLVED = "health.incident_resolved"
+    RADAR_FETCH_QUEUED = "radar.fetch_queued"
 
 
 class UsageUnit(StrEnum):

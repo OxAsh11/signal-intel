@@ -671,6 +671,46 @@ check('memory_chunk full-text search works', (await one(
   }
 }
 
+// ── Phase 1b: brief studio (0015) ────────────────────────────────────────────
+{
+  // exclusion_list exists and has RLS enabled.
+  const { rows: rlsRows } = await db.query(
+    `select c.relrowsecurity from pg_class c join pg_namespace n on n.oid = c.relnamespace
+     where n.nspname = 'public' and c.relname = 'exclusion_list'`,
+  );
+  check('exclusion_list table exists', rlsRows.length === 1, 'table not found');
+  check('exclusion_list has RLS enabled', rlsRows.length === 1 && rlsRows[0].relrowsecurity === true);
+
+  // brief.draft_config column exists on public.brief.
+  const { rows: colRows } = await db.query(
+    `select 1 from information_schema.columns
+     where table_schema = 'public' and table_name = 'brief' and column_name = 'draft_config'`,
+  );
+  check('brief.draft_config column exists on public.brief', colRows.length === 1);
+
+  // Required RPC functions exist in app schema.
+  for (const fn of ['create_brief', 'publish_brief', 'save_brief_draft']) {
+    const { rows } = await db.query(
+      `select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+       where n.nspname = 'app' and p.proname = $1`,
+      [fn],
+    );
+    check(`app.${fn} function exists`, rows.length >= 1);
+  }
+
+  // public.list_briefs exists and is callable by an authenticated user (Viewer C in wsA).
+  const { rows: lbRows } = await db.query(
+    `select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
+     where n.nspname = 'public' and p.proname = 'list_briefs'`,
+  );
+  check('public.list_briefs function exists', lbRows.length === 1);
+
+  check(
+    'public.list_briefs is callable by a workspace Viewer',
+    !(await throws(() => asUser(C, (tx) => tx.query(`select * from public.list_briefs($1)`, [wsA])))),
+  );
+}
+
 await db.close();
 if (failures.length) {
   console.error(`\n${failures.length} check(s) failed.`);
