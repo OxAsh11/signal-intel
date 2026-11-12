@@ -118,7 +118,8 @@ def test_retry_schedule_covers_most_of_a_day() -> None:
 def _pool(entity_row: Any, claims: list[tuple[Any, ...]]) -> MagicMock:
     cur = MagicMock()
     cur.execute = AsyncMock()
-    cur.fetchone = AsyncMock(return_value=entity_row)
+    # First the entity's name; after that "no verdict stored yet" for each Brief.
+    cur.fetchone = AsyncMock(side_effect=[entity_row, *([None] * 8)])
     cur.fetchall = AsyncMock(return_value=claims)
     conn = MagicMock()
     conn.cursor.return_value.__aenter__ = AsyncMock(return_value=cur)
@@ -324,3 +325,20 @@ def test_new_prompts_render_with_the_variables_their_callers_pass() -> None:
         {"account_name": "Acme", "stage": "Engaged", "recent_activity": "none"},
     )
     assert "hello" in render(load_prompt("reply_classify", 1), {"reply_text": "hello"})
+
+
+def test_conflicting_claims_need_two_and_catch_opposite_answers() -> None:
+    from uuid import UUID
+
+    from signal_core.modules.m05_verdict import conflicting_claims
+
+    a, b, c = (UUID(int=i) for i in (1, 2, 3))
+    claims = [
+        (a, "uses_revit", True, "q", 90),
+        (b, "uses_revit", False, "q", 80),
+        (c, "sites", 12, None, 70),
+    ]
+    assert conflicting_claims(claims, []) == [a, b]  # a yes/no predicate holding both answers
+    assert conflicting_claims(claims, [0, 2]) == [a, b, c]  # plus what the judge flagged
+    assert conflicting_claims(claims[2:], [0]) == []  # one claim cannot conflict
+    assert conflicting_claims(claims[:1] + claims[2:], [7, -1]) == []  # bad indices are ignored

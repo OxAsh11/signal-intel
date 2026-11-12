@@ -37,6 +37,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import api.mcp_server as mcp_server
+import signal_core.modules.m05_verdict as m05
 import signal_core.modules.m13_integrations as m13
 from api.main import build_app as build_api
 from signal_core.ai_gateway.gateway import Result
@@ -835,6 +836,74 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         assert (await app.tasks["inbox.reconcile"](timestamp=0))["queued"] == 0
         assert await app.tasks["account.dormancy_sweep"](timestamp=0) == 0
         assert await app.tasks["health.check"](timestamp=0)
+
+        # ── Verdict review: weekly sample, a human mark that holds, conflicting claims ──
+        verdict_id = await db.one(
+            "select id from public.verdict where entity_id = %s and brief_version_id = %s",
+            (entity, brief_version),
+        )
+        assert await app.tasks["verdict.sample_weekly"](timestamp=0) == 1
+        assert await app.tasks["verdict.sample_weekly"](timestamp=0) == 0, "one sample a week"
+        review = await db.one(
+            "select id from public.verdict_review where verdict_id = %s and reason = 'sample'"
+            " and status = 'pending'",
+            (verdict_id,),
+        )
+        assert review is not None
+        await db.as_user(
+            "select public.resolve_verdict_review(%s, 'correct', 'Likely', 'one source only')",
+            (review,),
+        )
+        assert (
+            await db.admin(
+                "select v.value::text, r.status, r.corrected_value::text"
+                "  from public.verdict_review r join public.verdict v on v.id = r.verdict_id"
+                " where r.id = %s",
+                (review,),
+            )
+        )[0] == ("Likely", "corrected", "Likely")
+        assert (
+            await db.one(
+                "select action from public.feedback where target_type = 'verdict' and target_id = %s",
+                (verdict_id,),
+            )
+            == "correct"
+        )
+        await _drain(app, connector, pool)
+
+        # The judge would say Confirmed again; the human mark holds while the claims are the same.
+        judged = gateway.calls.count("verdict")
+        assert await m05.compute_verdict(pool, gateway, entity, WS, ctx) == "Likely"  # type: ignore[arg-type]
+        assert gateway.calls.count("verdict") == judged
+
+        # A new claim that says the opposite: the verdict is judged again and goes to review
+        # with both claims.
+        await db.admin(
+            "select app.create_claim(%s, %s, (select id from public.predicate where key = 'uses_revit'"
+            " and workspace_id = %s), 'false'::jsonb, 'moved every project off Revit', null, null, %s,"
+            " now(), %s, 85::smallint)",
+            (ORG, entity, WS, source_record, CANARY_EXTRACTOR_VERSION),
+        )
+        assert await m05.compute_verdict(pool, gateway, entity, WS, ctx) == "Confirmed"  # type: ignore[arg-type]
+        assert gateway.calls.count("verdict") == judged + 1
+        assert (
+            await db.one(
+                "select cardinality(claim_ids) from public.verdict_review"
+                " where verdict_id = %s and reason = 'conflict' and status = 'pending'",
+                (verdict_id,),
+            )
+            == 2
+        )
+        # Asking again about the same two claims does not add a second item.
+        await m05.compute_verdict(pool, gateway, entity, WS, ctx)  # type: ignore[arg-type]
+        assert (
+            await db.one(
+                "select count(*) from public.verdict_review where verdict_id = %s and reason = 'conflict'",
+                (verdict_id,),
+            )
+            == 1
+        )
+        await _drain(app, connector, pool)
 
         # ── Removing a member revokes their tokens at once ────────────────────
         await db.admin("update public.member set status = 'removed' where id = %s", (MEMBER,))

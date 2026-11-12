@@ -52,6 +52,29 @@ class VerdictOutput(BaseModel):
     value: Literal["Confirmed", "Likely", "Unverified", "Contradicted"]
     reasoning: str
     supporting_claim_indices: list[int]
+    conflicting_claim_indices: list[int] = []
+
+
+def conflicting_claims(claims: list[tuple[Any, ...]], flagged: list[int]) -> list[UUID]:
+    """Claims that disagree: those the judge flagged, plus any yes/no predicate holding both
+    answers. Fewer than two claims is not a conflict."""
+    ids = {str(claims[i][0]) for i in flagged if 0 <= i < len(claims)}
+    answers: dict[str, dict[bool, list[str]]] = {}
+    for c in claims:
+        if isinstance(c[2], bool):
+            answers.setdefault(str(c[1]), {}).setdefault(c[2], []).append(str(c[0]))
+    for by_answer in answers.values():
+        if len(by_answer) == 2:
+            ids.update(i for group in by_answer.values() for i in group)
+    return [UUID(i) for i in sorted(ids)] if len(ids) >= 2 else []
+
+
+async def sample_for_review(pool: AsyncConnectionPool, workspace_id: UUID) -> int:
+    """Queue this week's sample of new Confirmed verdicts for human review (M5)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute("SELECT app.sample_verdicts_for_review(%s)", (str(workspace_id),))
+        row = await cur.fetchone()
+    return int(row[0]) if row else 0
 
 
 async def compute_verdict(
@@ -111,6 +134,21 @@ async def _verdict_for_brief(
         )
         return "Unverified"
 
+    # A human mark holds until the entity's claims change (M5 human checks).
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT value, inputs FROM public.verdict"
+            " WHERE brief_version_id = %s AND entity_id = %s",
+            (str(brief.brief_version_id), str(entity_id)),
+        )
+        existing = await cur.fetchone()
+    if existing is not None:
+        inputs = existing[1] if isinstance(existing[1], dict) else {}
+        if inputs.get("human_override") and set(inputs.get("live_claim_ids") or []) == {
+            str(c[0]) for c in claims
+        }:
+            return str(existing[0])
+
     claims_text = "\n".join(
         f"[{i}] {c[1]}: {c[2]} (confidence: {c[4]}) | quote: {c[3] or 'N/A'}"
         for i, c in enumerate(claims)
@@ -118,7 +156,7 @@ async def _verdict_for_brief(
     try:
         result = await gateway.run(
             Capability.JUDGE,
-            load_prompt("verdict", 1),
+            load_prompt("verdict", 2),
             {
                 "hypothesis": brief.hypothesis,
                 "entity_name": display_name,
@@ -142,7 +180,7 @@ async def _verdict_for_brief(
     if final_value == "Confirmed" and not any(c[3] for c in supporting):
         final_value = "Likely"
 
-    await upsert_verdict(
+    verdict_id = await upsert_verdict(
         pool,
         brief.brief_version_id,
         entity_id,
@@ -151,10 +189,19 @@ async def _verdict_for_brief(
         [{"claim_id": str(c[0]), "quote": c[3]} for c in supporting if c[3]],
         {
             "prompt_name": "verdict",
-            "prompt_version": 1,
+            "prompt_version": 2,
             "extractor_version_id": str(result.extractor_version_id),
         },
     )
+
+    # Conflicting claims never cancel silently: a person decides, with the claims shown.
+    conflict = conflicting_claims(claims, result.value.conflicting_claim_indices)
+    if conflict:
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute(
+                "SELECT app.queue_verdict_review(%s, 'conflict', %s::uuid[])",
+                (str(verdict_id), [str(c) for c in conflict]),
+            )
     return final_value
 
 

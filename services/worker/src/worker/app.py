@@ -32,6 +32,7 @@ from signal_core.modules.m02_radar import create_source_records, upsert_radar_qu
 from signal_core.modules.m02_radar_ai import generate_radar_queries
 from signal_core.modules.m03_extraction import extract_structured, judge_relevance
 from signal_core.modules.m04_identity import duplicate_sweep, resolve_mention
+from signal_core.modules.m05_verdict import sample_for_review as _sample_verdicts_for_review
 from signal_core.modules.m09_activation import KillSwitchError, campaigns_due, push_campaign_batch
 from signal_core.modules.m10_inbox import (
     GENUINE_REPLY_CLASSES,
@@ -70,6 +71,7 @@ INBOX_RECONCILE_CRON = "*/15 * * * *"  # every 15 min
 NEXT_STEP_CRON = "0 7 * * *"  # daily 07:00 UTC
 CAMPAIGN_PUSH_CRON = "*/15 * * * *"  # the sync cycle: a pause takes effect within one cycle (M9)
 DORMANCY_CRON = "30 4 * * *"  # daily, 04:30 UTC
+VERDICT_SAMPLE_CRON = "0 6 * * 1"  # weekly, Monday 06:00 UTC
 RADAR_REFETCH_HOURS = 24
 RESUME_BATCH = 50
 # Bands that earn a research document automatically (M6), when the verdict supports them.
@@ -994,6 +996,21 @@ def build_app(
             )
             marked += await _mark_dormant_accounts(pool, UUID(str(row[0])), ctx)
         return marked
+
+    @app.periodic(cron=VERDICT_SAMPLE_CRON, periodic_id="verdict.sample_weekly")
+    @job(app, type="verdict.sample_weekly", kill_switch=kill_switch, queue="compute", retry=0)
+    async def verdict_sample_cron(timestamp: int) -> int:
+        """A sample of the week's new Confirmed verdicts goes to the review queue (M5)."""
+        if pool is None:
+            return 0
+        async with pool.connection() as db_conn, db_conn.cursor() as cur:
+            await cur.execute("SELECT id FROM public.workspace")
+            rows = await cur.fetchall()
+        queued = 0
+        for row in rows:
+            queued += await _sample_verdicts_for_review(pool, UUID(str(row[0])))
+        log.info("verdict.sample_weekly", queued=queued)
+        return queued
 
     @job(app, type="meeting.sync", kill_switch=kill_switch, queue="compute", retry=2)
     async def meeting_sync_task(

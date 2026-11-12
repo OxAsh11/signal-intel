@@ -35,10 +35,12 @@ export default async function HomePage() {
     return error ? null : (n ?? 0);
   };
 
-  const [accounts, reviewItems, unclassified, openTasks, unconfirmed, activeCampaigns, pausedCampaigns, troubledRadars, stageRows] =
+  const [accounts, reviewItems, verdictReviews, unmatchedMeetings, unclassified, openTasks, unconfirmed, activeCampaigns, pausedCampaigns, troubledRadars, stageRows] =
     await Promise.all([
       count(rows('account')),
       count(rows('review_item').eq('status', 'pending')),
+      count(rows('verdict_review').eq('status', 'pending')),
+      count(rows('meeting').is('account_id', null)),
       count(rows('activity').eq('kind', 'reply_received').is('payload->>reply_class', null)),
       count(rows('task').eq('status', 'open')),
       count(rows('meeting').eq('proof_status', 'unconfirmed')),
@@ -62,6 +64,8 @@ export default async function HomePage() {
         <h2 className="m-0 text-lg font-semibold">Waiting for a person</h2>
         <div className="flex flex-wrap gap-3">
           <Tile label="Identity matches to review" value={reviewItems} href="/review" />
+          <Tile label="Verdicts to review" value={verdictReviews} href="/review" />
+          <Tile label="Meetings to match" value={unmatchedMeetings} href="/review" />
           <Tile label="Replies to classify" value={unclassified} href={`${base}/inbox`} />
           <Tile label="Meetings to confirm" value={unconfirmed} href={`${base}/meetings`} />
           <Tile label="Open tasks" value={openTasks} href={`${base}/meetings`} />
