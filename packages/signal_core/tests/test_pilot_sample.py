@@ -99,3 +99,32 @@ async def test_activation_ignores_a_brief_in_pilot() -> None:
         await m09.push_campaign_batch(pool, uuid4(), _ctx())
     sql = cur.execute.call_args_list[0].args[0]
     assert "b.state = 'Active'" in sql
+
+
+# ── Re-derivation after publish ───────────────────────────────────────────────
+
+
+async def test_rederive_scores_copied_verdicts_and_judges_the_rest() -> None:
+    from signal_core.briefs import rederive_plan
+
+    a1, e1, a2, e2, ws, org = (str(uuid4()) for _ in range(6))
+    pool, _ = _pool([("Active", 20, 0)], [(a1, e1, ws, org, True), (a2, e2, ws, org, False)])
+
+    plan = await rederive_plan(pool, uuid4())
+
+    assert plan == [
+        ("score.compute", {"account_id": a1, "workspace_id": ws, "org_id": org}),
+        ("verdict.compute", {"entity_id": e2, "workspace_id": ws, "org_id": org}),
+    ]
+
+
+async def test_rederive_pilot_judges_only_the_free_slots() -> None:
+    from signal_core.briefs import rederive_plan
+
+    ws, org = str(uuid4()), str(uuid4())
+    rows = [(str(uuid4()), str(uuid4()), ws, org, has) for has in (True, False, False)]
+    pool, _ = _pool([("Pilot", 2, 1)], rows)
+
+    plan = await rederive_plan(pool, uuid4())
+
+    assert [kind for kind, _ in plan] == ["score.compute", "verdict.compute"]

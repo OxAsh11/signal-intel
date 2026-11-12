@@ -79,3 +79,58 @@ async def holds_pilot_slot(
             (str(version_id), str(entity_id)),
         )
         return await cur.fetchone() is not None
+
+
+_REDERIVE_BRIEF_SQL = """
+    SELECT b.state, s.pilot_sample_size,
+           (SELECT count(*) FROM public.pilot_sample ps WHERE ps.brief_version_id = bv.id)
+      FROM public.brief_version bv
+      JOIN public.brief b ON b.id = bv.brief_id
+      JOIN public.workspace_settings s ON s.workspace_id = bv.workspace_id
+     WHERE bv.id = %s
+"""
+
+# The workspace's accounts; ones a pilot of this Brief already sampled come first.
+_REDERIVE_ACCOUNTS_SQL = """
+    SELECT a.id, a.entity_id, a.workspace_id, a.org_id,
+           EXISTS (SELECT 1 FROM public.verdict v
+                    WHERE v.entity_id = a.entity_id AND v.brief_version_id = bv.id)
+      FROM public.brief_version bv
+      JOIN public.account a ON a.workspace_id = bv.workspace_id
+     WHERE bv.id = %s
+     ORDER BY EXISTS (SELECT 1 FROM public.pilot_sample ps
+                        JOIN public.brief_version pv ON pv.id = ps.brief_version_id
+                       WHERE ps.entity_id = a.entity_id AND pv.brief_id = bv.brief_id) DESC,
+              a.created_at, a.id
+"""
+
+
+async def rederive_plan(
+    pool: AsyncConnectionPool, version_id: UUID
+) -> list[tuple[str, dict[str, str]]]:
+    """Jobs that bring a newly published Brief version up to date (M1).
+
+    Accounts whose verdict was carried over are only re-scored; the rest are judged. A Pilot
+    version judges no more accounts than its sample has free slots.
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(_REDERIVE_BRIEF_SQL, (str(version_id),))
+        brief_row = await cur.fetchone()
+        if brief_row is None:
+            return []
+        await cur.execute(_REDERIVE_ACCOUNTS_SQL, (str(version_id),))
+        accounts = await cur.fetchall()
+    state, sample_size, taken = brief_row
+    free = int(sample_size or 0) - int(taken or 0) if state == "Pilot" else None
+
+    plan: list[tuple[str, dict[str, str]]] = []
+    for account_id, entity_id, workspace_id, org_id, has_verdict in accounts:
+        if has_verdict:
+            kwargs = {"account_id": str(account_id), "workspace_id": str(workspace_id)}
+            plan.append(("score.compute", {**kwargs, "org_id": str(org_id)}))
+        elif free is None or free > 0:
+            kwargs = {"entity_id": str(entity_id), "workspace_id": str(workspace_id)}
+            plan.append(("verdict.compute", {**kwargs, "org_id": str(org_id)}))
+            if free is not None:
+                free -= 1
+    return plan

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(31);
+select plan(32);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- J = Editor, K = Viewer, B = owner of a second organisation.
@@ -122,6 +122,8 @@ select is((select count(*)::int from public.verdict where brief_version_id = (se
   1, '16. verdicts are copied when the edit needs no re-judging');
 select is((select state from public.brief where id = (select v from ids where k = 'a')),
   'Pilot'::public.brief_state, '17. publishing during a pilot keeps the Brief in Pilot');
+select is((select count(*)::int from public.pilot_sample where brief_version_id = (select v from ids where k = 'v2')),
+  2, '17b. copied verdicts keep their pilot slots in the new version');
 
 -- ── Over budget needs an approval ────────────────────────────────────────────
 set local role authenticated;

@@ -138,6 +138,12 @@ begin
       perform app.upsert_verdict(v_vid, r.entity_id, r.value, r.claim_ids, r.quotes,
                                  r.inputs || jsonb_build_object('copied_from', b.current_version_id));
     end loop;
+    -- A pilot keeps its sample: the copied verdicts are the accounts it is calibrating.
+    if b.state = 'Pilot' then
+      insert into public.pilot_sample (brief_version_id, entity_id, slot, org_id, workspace_id)
+      select v_vid, entity_id, slot, org_id, workspace_id
+        from public.pilot_sample where brief_version_id = b.current_version_id;
+    end if;
   end if;
 
   update public.brief

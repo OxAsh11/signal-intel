@@ -240,6 +240,47 @@ def build_app(
         log.info("brief.intake.done", brief_id=brief_id)
 
     # ------------------------------------------------------------------
+    # Brief pilot and edit preview (M1)
+    # ------------------------------------------------------------------
+
+    @job(app, type="brief.preview", kill_switch=kill_switch, queue="briefs", retry=1)
+    async def brief_preview_task(*, preview_id: str, **_: Any) -> None:
+        assert pool is not None, "pool required for brief.preview"
+        from signal_core.modules.m01_preview import build_preview
+
+        await build_preview(pool, UUID(preview_id))
+
+    @job(app, type="brief.rederive", kill_switch=kill_switch, queue="briefs", retry=1)
+    async def brief_rederive_task(*, brief_version_id: str, **_: Any) -> int:
+        """Re-score carried-over verdicts and judge the rest under a new Brief version."""
+        assert pool is not None, "pool required for brief.rederive"
+        from signal_core.briefs import rederive_plan
+
+        plan = await rederive_plan(pool, UUID(brief_version_id))
+        for task_name, kwargs in plan:
+            target = kwargs.get("account_id") or kwargs.get("entity_id")
+            with contextlib.suppress(AlreadyEnqueued):
+                await (
+                    app.tasks[task_name]
+                    .configure(queueing_lock=f"rederive:{brief_version_id}:{target}")
+                    .defer_async(**kwargs)
+                )
+        log.info("brief.rederive.queued", brief_version_id=brief_version_id, jobs=len(plan))
+        return len(plan)
+
+    @job(app, type="brief.publish", kill_switch=kill_switch, queue="briefs", retry=0)
+    async def brief_publish_task(
+        *, brief_id: str, preview_id: str, approval_id: str | None = None, **_: Any
+    ) -> str | None:
+        """Publish an over-budget Brief edit once its approval is granted (resumed by budget)."""
+        assert pool is not None, "pool required for brief.publish"
+        async with pool.connection() as conn, conn.cursor() as cur:
+            await cur.execute("SELECT app.publish_brief_approved(%s, %s)", (brief_id, preview_id))
+            row = await cur.fetchone()
+        log.info("brief.publish.done", brief_id=brief_id, approval_id=approval_id)
+        return str(row[0]) if row else None
+
+    # ------------------------------------------------------------------
     # Source fetch jobs (Phase 1c)
     # ------------------------------------------------------------------
 
@@ -1318,9 +1359,23 @@ def build_app(
                 payload["workspace_id"],
                 payload["brief_id"],
             )
+        elif evt == "brief.preview_requested":
+            with contextlib.suppress(AlreadyEnqueued):
+                await (
+                    app.tasks["brief.preview"]
+                    .configure(queueing_lock=f"preview:{payload['preview_id']}")
+                    .defer_async(preview_id=payload["preview_id"])
+                )
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")
             version = payload.get("version")
+            if payload.get("brief_version_id"):
+                with contextlib.suppress(AlreadyEnqueued):
+                    await (
+                        app.tasks["brief.rederive"]
+                        .configure(queueing_lock=f"rederive:{payload['brief_version_id']}")
+                        .defer_async(brief_version_id=payload["brief_version_id"])
+                    )
             if brief_id:
                 # Fetch workspace_id from the brief table — the payload only carries
                 # {brief_id, version} and does NOT include workspace_id.
