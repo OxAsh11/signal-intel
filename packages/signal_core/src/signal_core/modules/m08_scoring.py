@@ -20,7 +20,7 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
-from signal_core.briefs import ActiveBrief, active_brief_versions
+from signal_core.briefs import ActiveBrief, active_brief_versions, holds_pilot_slot
 from signal_core.derivation.writer import prune_labels, upsert_label, upsert_score
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
@@ -83,7 +83,7 @@ async def compute_score(
         await _score_for_brief(pool, brief, account_id, entity_id, claims, valid_contacts, ctx)
         for brief in briefs
     ]
-    return bands[0]
+    return next((b for b in bands if b is not None), None)
 
 
 async def _score_for_brief(
@@ -94,7 +94,12 @@ async def _score_for_brief(
     claims: list[tuple[Any, ...]],
     valid_contacts: int,
     ctx: CallContext,
-) -> str:
+) -> str | None:
+    # A Pilot Brief scores only the accounts in its sample (M1); M5 fills the sample.
+    if brief.state == "Pilot" and not await holds_pilot_slot(
+        pool, brief.brief_version_id, entity_id, claim=False
+    ):
+        return None
     now = datetime.now(UTC)
 
     async with pool.connection() as conn, conn.cursor() as cur:
