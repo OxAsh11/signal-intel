@@ -10,7 +10,12 @@ export function StateControls({ brief }: { brief: Brief }) {
     return (
       <div className="flex gap-2 items-start">
         <ActionForm action={goLive} fields={{ brief: brief.id }} label="Go live" />
-        <ActionForm action={updateBriefState} fields={to('Archived')} label="Archive" variant="danger" />
+        <ActionForm
+          action={updateBriefState}
+          fields={to('Archived')}
+          label="Archive"
+          variant="danger"
+        />
       </div>
     );
   }
@@ -18,7 +23,12 @@ export function StateControls({ brief }: { brief: Brief }) {
     return (
       <div className="flex gap-2 items-start">
         <ActionForm action={updateBriefState} fields={to('Paused')} label="Pause" variant="quiet" />
-        <ActionForm action={updateBriefState} fields={to('Archived')} label="Archive" variant="danger" />
+        <ActionForm
+          action={updateBriefState}
+          fields={to('Archived')}
+          label="Archive"
+          variant="danger"
+        />
       </div>
     );
   }
@@ -26,7 +36,12 @@ export function StateControls({ brief }: { brief: Brief }) {
     return (
       <div className="flex gap-2 items-start">
         <ActionForm action={updateBriefState} fields={to('Active')} label="Resume" />
-        <ActionForm action={updateBriefState} fields={to('Archived')} label="Archive" variant="danger" />
+        <ActionForm
+          action={updateBriefState}
+          fields={to('Archived')}
+          label="Archive"
+          variant="danger"
+        />
       </div>
     );
   }

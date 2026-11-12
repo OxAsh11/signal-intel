@@ -117,7 +117,9 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
         <Link href={`/briefs/${id}`} className="text-sm text-ink-muted hover:text-ink">
           ← {brief.name}
         </Link>
-        <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">Pilot results</h1>
+        <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">
+          Pilot results
+        </h1>
         <p className="m-0 max-w-[65ch] text-ink-muted">
           Mark each verdict right or wrong. Your marks measure accuracy and can teach the Brief new
           examples. Go live from the Brief page when you are satisfied.
@@ -142,14 +144,14 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
 
       {accuracy != null && accuracy < settings.pilot_accuracy_target_pct ? (
         <p className="m-0 text-[13px] text-caution">
-          Accuracy is below target. Correct the wrong verdicts and add them as examples, then preview
-          and publish the changes before going live.
+          Accuracy is below target. Correct the wrong verdicts and add them as examples, then
+          preview and publish the changes before going live.
         </p>
       ) : null}
       {confirmedPct != null && judged >= 5 && confirmedPct < settings.pilot_min_confirmed_pct ? (
         <p className="m-0 text-[13px] text-caution">
-          Few Confirmed accounts in the pilot ({confirmedPct}%). This industry may leave little public
-          trace.
+          Few Confirmed accounts in the pilot ({confirmedPct}%). This industry may leave little
+          public trace.
         </p>
       ) : null}
 
@@ -167,11 +169,16 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
       ) : (
         <div className="flex flex-col gap-3">
           {rows.map((r) => (
-            <div key={r.entityId} className="flex flex-col gap-2 rounded-md border border-line bg-surface p-4">
+            <div
+              key={r.entityId}
+              className="flex flex-col gap-2 rounded-md border border-line bg-surface p-4"
+            >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[15px] font-semibold">{r.name}</span>
                 {r.verdict ? (
-                  <span className={`si-chip si-verdict-${r.verdict.toLowerCase()}`}>{r.verdict}</span>
+                  <span className={`si-chip si-verdict-${r.verdict.toLowerCase()}`}>
+                    {r.verdict}
+                  </span>
                 ) : (
                   <span className="text-[13px] text-ink-muted">Judging…</span>
                 )}

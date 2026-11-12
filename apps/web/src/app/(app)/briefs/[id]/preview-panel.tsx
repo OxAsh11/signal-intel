@@ -34,7 +34,9 @@ const TIER_HINT: Record<string, string> = {
 function stable(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(stable).join(',')}]`;
   if (value && typeof value === 'object') {
-    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) => a.localeCompare(b));
+    const entries = Object.entries(value as Record<string, unknown>).sort(([a], [b]) =>
+      a.localeCompare(b),
+    );
     return `{${entries.map(([k, v]) => `${JSON.stringify(k)}:${stable(v)}`).join(',')}}`;
   }
   return JSON.stringify(value);
@@ -140,11 +142,13 @@ export async function PreviewPanel({
     <>
       <div className="flex flex-wrap items-center gap-2">
         <span className="si-chip">{current.tier ?? 'No change'}</span>
-        <span className="text-[13px] text-ink-muted">{current.tier ? TIER_HINT[current.tier] : ''}</span>
+        <span className="text-[13px] text-ink-muted">
+          {current.tier ? TIER_HINT[current.tier] : ''}
+        </span>
       </div>
       <p className="m-0 text-[14px]">
-        {totals.entering} entering · {totals.leaving} leaving · {totals.band_changes} changing band
-        {' '}(of {r.accounts ?? 0} scored accounts)
+        {totals.entering} entering · {totals.leaving} leaving · {totals.band_changes} changing band{' '}
+        (of {r.accounts ?? 0} scored accounts)
       </p>
       <p className="m-0 text-[14px]">
         Estimated cost ${cost.toFixed(2)} · {duration(current.duration_minutes)}
@@ -157,18 +161,30 @@ export async function PreviewPanel({
       <ChangeList title="Band changes" items={r.band_changes ?? []} total={totals.band_changes} />
       {current.over_budget && approval !== 'approved' ? (
         approval === 'pending' ? (
-          <p className="m-0 text-[13px] text-ink-muted">Over budget: waiting for an Owner or Admin to approve.</p>
+          <p className="m-0 text-[13px] text-ink-muted">
+            Over budget: waiting for an Owner or Admin to approve.
+          </p>
         ) : (
           <div className="flex flex-col gap-1">
-            <p className="m-0 text-[13px] text-caution">This edit is over budget and needs an approval.</p>
+            <p className="m-0 text-[13px] text-caution">
+              This edit is over budget and needs an approval.
+            </p>
             <div>
-              <ActionForm action={requestPublishApproval} fields={{ preview: current.id }} label="Request approval" />
+              <ActionForm
+                action={requestPublishApproval}
+                fields={{ preview: current.id }}
+                label="Request approval"
+              />
             </div>
           </div>
         )
       ) : (
         <div>
-          <ActionForm action={publishBrief} fields={{ brief: briefId }} label={`Publish version ${nextVersion}`} />
+          <ActionForm
+            action={publishBrief}
+            fields={{ brief: briefId }}
+            label={`Publish version ${nextVersion}`}
+          />
         </div>
       )}
     </>,
