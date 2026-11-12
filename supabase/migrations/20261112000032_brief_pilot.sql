@@ -122,6 +122,11 @@ declare
 begin
   select * into b from public.brief where id = p_brief for update;
   select * into p from public.brief_preview where id = p_preview;
+  -- Re-checked under the row lock: a draft saved after the caller's check is not this preview.
+  if b.draft_config is null or md5(b.draft_config::text) <> p.draft_hash
+     or b.current_version_id is distinct from p.base_version_id then
+    raise exception 'the draft changed after this preview' using errcode = '55000';
+  end if;
   perform app.assert_brief_publishable(b.draft_config);
 
   select coalesce(max(version), 0) + 1 into v_ver from public.brief_version where brief_id = p_brief;
@@ -292,6 +297,11 @@ begin
   update public.brief set state = 'Active', updated_at = now() where id = p_brief;
   perform app.audit(b.org_id, b.workspace_id, 'brief.state_changed', 'brief', p_brief,
                     jsonb_build_object('state', 'Pilot'), jsonb_build_object('state', 'Active'));
+  -- The live version must now cover the whole workspace, not just a sample or a pause.
+  perform app.emit('brief.version_published'::public.event_type, b.org_id, b.workspace_id,
+                   'brief_version', b.current_version_id,
+                   jsonb_build_object('brief_id', p_brief, 'brief_version_id', b.current_version_id,
+                                      'rederive_only', true));
 end $$;
 
 -- Takes a slot in the version's pilot sample. True when the entity holds one (now or already).
@@ -349,6 +359,13 @@ begin
   perform app.audit(b.org_id, b.workspace_id, 'brief.state_changed', 'brief', p_brief,
                     jsonb_build_object('state', b.state),
                     jsonb_build_object('state', p_new_state));
+  if b.state = 'Paused' and p_new_state = 'Active' then
+    -- The live version must now cover the whole workspace, not just a sample or a pause.
+    perform app.emit('brief.version_published'::public.event_type, b.org_id, b.workspace_id,
+                     'brief_version', b.current_version_id,
+                     jsonb_build_object('brief_id', p_brief, 'brief_version_id', b.current_version_id,
+                                        'rederive_only', true));
+  end if;
 end $$;
 
 -- ── 9. Preview requests ──────────────────────────────────────────────────────

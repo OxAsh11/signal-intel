@@ -1,6 +1,7 @@
 import asyncio
 import json
 from typing import Any
+from unittest.mock import MagicMock
 from uuid import UUID, uuid4
 
 import procrastinate
@@ -464,3 +465,37 @@ async def test_dispatch_brief_preview_requested_queues_the_preview() -> None:
     (preview,) = [j for j in connector.jobs.values() if j["task_name"] == "brief.preview"]
     assert preview["args"] == {"preview_id": preview_id}
     assert {"brief.rederive", "brief.publish"} <= set(app.tasks)
+
+
+async def test_dispatch_rederive_only_skips_collection() -> None:
+    """Going live or resuming re-derives the version without new collection or backfill."""
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=MagicMock(),
+    )
+    version_id = str(uuid4())
+    async with app.open_async():
+        await app.tasks[DISPATCH_TASK].defer_async(
+            event="brief.version_published",
+            event_id=str(uuid4()),
+            payload={
+                "brief_id": str(uuid4()),
+                "brief_version_id": version_id,
+                "rederive_only": True,
+            },
+        )
+        await app.run_worker_async(queues=["events"], wait=False, install_signal_handlers=False)
+
+    names = [j["task_name"] for j in connector.jobs.values()]
+    assert [j["status"] for j in connector.jobs.values() if j["task_name"] == DISPATCH_TASK] == [
+        "succeeded"
+    ]
+    assert "brief.rederive" in names
+    assert "extract.backfill" not in names
+    assert "radar.generate_queries" not in names

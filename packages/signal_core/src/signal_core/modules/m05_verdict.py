@@ -83,13 +83,19 @@ async def compute_verdict(
     entity_id: UUID,
     workspace_id: UUID,
     ctx: CallContext,
+    *,
+    only_version: UUID | None = None,
 ) -> str | None:
     """Compute and store the entity's verdict under every active Brief version in the workspace.
+
+    With only_version, judge under that Brief version alone (re-derivation after an edit).
 
     Returns the verdict under the most recently published Brief that judged it, or None when
     no Brief did (no active Brief, or only pilots whose sample is full).
     """
     briefs = await active_brief_versions(pool, workspace_id)
+    if only_version is not None:
+        briefs = [b for b in briefs if b.brief_version_id == only_version]
     if not briefs:
         log.info("verdict.no_brief_version", workspace_id=str(workspace_id))
         return None

@@ -109,12 +109,14 @@ async def test_rederive_scores_copied_verdicts_and_judges_the_rest() -> None:
 
     a1, e1, a2, e2, ws, org = (str(uuid4()) for _ in range(6))
     pool, _ = _pool([("Active", 20, 0)], [(a1, e1, ws, org, True), (a2, e2, ws, org, False)])
+    version = uuid4()
 
-    plan = await rederive_plan(pool, uuid4())
+    plan = await rederive_plan(pool, version)
 
+    judge = {"entity_id": e2, "workspace_id": ws, "org_id": org, "brief_version_id": str(version)}
     assert plan == [
         ("score.compute", {"account_id": a1, "workspace_id": ws, "org_id": org}),
-        ("verdict.compute", {"entity_id": e2, "workspace_id": ws, "org_id": org}),
+        ("verdict.compute", judge),
     ]
 
 
@@ -128,3 +130,33 @@ async def test_rederive_pilot_judges_only_the_free_slots() -> None:
     plan = await rederive_plan(pool, uuid4())
 
     assert [kind for kind, _ in plan] == ["score.compute", "verdict.compute"]
+
+
+async def test_verdict_for_one_version_judges_only_that_brief(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    edited, other = _brief("Active"), _brief("Active")
+    monkeypatch.setattr(m05, "active_brief_versions", AsyncMock(return_value=[other, edited]))
+    monkeypatch.setattr(m05, "_defer_account_card", AsyncMock())
+    upsert = AsyncMock()
+    monkeypatch.setattr(m05, "upsert_verdict", upsert)
+    pool, _ = _pool([("Acme",), *([None] * 4)])
+
+    await m05.compute_verdict(
+        pool, MagicMock(), uuid4(), uuid4(), _ctx(), only_version=edited.brief_version_id
+    )
+
+    assert [c.args[1] for c in upsert.call_args_list] == [edited.brief_version_id]
+
+
+async def test_rederive_judges_under_the_new_version_only() -> None:
+    from signal_core.briefs import rederive_plan
+
+    version = uuid4()
+    ws, org = str(uuid4()), str(uuid4())
+    pool, _ = _pool([("Active", 20, 0)], [(str(uuid4()), str(uuid4()), ws, org, False)])
+
+    ((kind, kwargs),) = await rederive_plan(pool, version)
+
+    assert kind == "verdict.compute"
+    assert kwargs["brief_version_id"] == str(version)

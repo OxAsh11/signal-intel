@@ -665,7 +665,13 @@ def build_app(
 
     @job(app, type="verdict.compute", kill_switch=kill_switch, queue="derive", retry=2)
     async def verdict_compute_task(
-        *, entity_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_: Any
+        *,
+        entity_id: str,
+        workspace_id: str,
+        org_id: str,
+        approval_id: str | None = None,
+        brief_version_id: str | None = None,
+        **_: Any,
     ) -> str | None:
         assert pool is not None and gateway is not None, "pool and gateway required"
         from uuid import UUID as _UUID
@@ -679,6 +685,8 @@ def build_app(
         }
         if approval_id is not None:
             job_args["approval_id"] = approval_id
+        if brief_version_id is not None:
+            job_args["brief_version_id"] = brief_version_id
         ctx = CallContext(
             org_id=_UUID(org_id),
             workspace_id=_UUID(workspace_id),
@@ -688,7 +696,12 @@ def build_app(
             job_args=job_args,
         )
         return await _m05_verdict.compute_verdict(
-            pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx
+            pool,
+            gateway,
+            _UUID(entity_id),
+            _UUID(workspace_id),
+            ctx,
+            only_version=_UUID(brief_version_id) if brief_version_id else None,
         )
 
     # ------------------------------------------------------------------
@@ -1376,6 +1389,9 @@ def build_app(
                         .configure(queueing_lock=f"rederive:{payload['brief_version_id']}")
                         .defer_async(brief_version_id=payload["brief_version_id"])
                     )
+            if payload.get("rederive_only"):
+                # Going live or resuming: the version is unchanged, so no new collection.
+                brief_id = None
             if brief_id:
                 # Fetch workspace_id from the brief table — the payload only carries
                 # {brief_id, version} and does NOT include workspace_id.

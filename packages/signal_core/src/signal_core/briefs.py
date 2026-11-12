@@ -130,7 +130,12 @@ async def rederive_plan(
             plan.append(("score.compute", {**kwargs, "org_id": str(org_id)}))
         elif free is None or free > 0:
             kwargs = {"entity_id": str(entity_id), "workspace_id": str(workspace_id)}
-            plan.append(("verdict.compute", {**kwargs, "org_id": str(org_id)}))
+            plan.append(
+                (
+                    "verdict.compute",
+                    {**kwargs, "org_id": str(org_id), "brief_version_id": str(version_id)},
+                )
+            )
             if free is not None:
                 free -= 1
     return plan

@@ -17,8 +17,9 @@ FIT_PREDICATES = {"vertical", "size", "geography", "commercial_role"}
 QUANTITY_PREDICATES = {"sites", "seats", "units"}
 LABEL_PREDICATES = ("vertical", "geography", "commercial_role")
 TIMING_WINDOW_DAYS = 90
-# Claim predicate → the Brief's ICP list it must match (when that list is set).
-ICP_LISTS = {"vertical": "verticals", "geography": "geographies", "size": "size_bands"}
+# Claim predicate → the Brief's ICP list it must match (when that list is set). Size is left out:
+# size claims are free text and size bands are ranges, so exact matching would wrongly exclude.
+ICP_LISTS = {"vertical": "verticals", "geography": "geographies"}
 
 DEFAULT_WEIGHTS: dict[str, float] = {"fit": 0.25, "evidence": 0.25, "scale": 0.25, "timing": 0.25}
 DEFAULT_THRESHOLDS: dict[str, float] = {"High": 70.0, "Medium": 40.0}

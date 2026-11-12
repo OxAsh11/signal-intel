@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(32);
+select plan(35);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- J = Editor, K = Viewer, B = owner of a second organisation.
@@ -189,10 +189,40 @@ select is((select state from public.brief where id = (select v from ids where k 
 select is((select state from public.brief where id = (select v from ids where k = 'd')),
   'Archived'::public.brief_state, '30. a pilot Brief can be archived');
 
+-- ── Review fixes ─────────────────────────────────────────────────────────────
+select is((select count(*)::int from public.outbox where event = 'brief.version_published'
+             and payload ->> 'brief_id' = (select v::text from ids where k = 'c')
+             and (payload ->> 'rederive_only')::boolean),
+  1, '32. go_live queues re-derivation of the whole workspace');
+
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000ca02","role":"authenticated"}', true);
+select public.update_brief_state((select v from ids where k = 'c'), 'Paused');
+select public.update_brief_state((select v from ids where k = 'c'), 'Active');
+reset role;
+select is((select count(*)::int from public.outbox where event = 'brief.version_published'
+             and payload ->> 'brief_id' = (select v::text from ids where k = 'c')
+             and (payload ->> 'rederive_only')::boolean),
+  2, '33. resuming a paused Brief re-derives its current version');
+
+-- A draft saved after the preview check must not publish under that preview.
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000ca02","role":"authenticated"}', true);
+select public.save_brief_draft_ui((select v from ids where k = 'c'),
+  (select v || '{"icp":{"geographies":["Spain"]}}' from cfg where k = 'full'));
+insert into ids select 'pc', public.request_brief_preview((select v from ids where k = 'c'));
+reset role;
+select app.complete_brief_preview((select v from ids where k = 'pc'), 'Narrow', false, '{}', 0, 0, false);
+update public.brief set draft_config = (select v || '{"hypothesis":"Something else"}' from cfg where k = 'full')
+ where id = (select v from ids where k = 'c');
+select throws_ok(format('select app.publish_from_preview(%L::uuid, %L::uuid, null)',
+    (select v from ids where k = 'c'), (select v from ids where k = 'pc')),
+  '55000', null, '34. publish_from_preview refuses a draft that no longer matches its preview');
+
 -- ── Isolation ────────────────────────────────────────────────────────────────
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000cb01","role":"authenticated"}', true);
-select is((select count(*)::int from public.brief_preview), 0, '31. another organisation cannot read previews');
+select is((select count(*)::int from public.brief_preview), 0, '35. another organisation cannot read previews');
 reset role;
 
 select * from finish();

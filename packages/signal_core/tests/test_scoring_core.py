@@ -67,3 +67,12 @@ def test_contradicted_gate_wins_over_icp() -> None:
     )
     assert result.gates[0] == {"reason": "verdict_contradicted"}
     assert result.band == "Excluded"
+
+
+def test_size_is_never_matched_as_text() -> None:
+    # Size claims are free text ("120 employees") and bands are ranges ("51-200"): no exact match.
+    config = {"icp": {"size_bands": ["51-200"]}}
+    result = score_account(
+        config, {}, ScoreInputs([_claim("size", "120 employees")], "Confirmed", 0, False), NOW
+    )
+    assert all(g["reason"] != "outside_icp" for g in result.gates)
