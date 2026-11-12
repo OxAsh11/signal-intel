@@ -29,6 +29,10 @@ insert into public.predicate (id, key, label, value_type, allowed_values)
 select is((select app.run_canary() ->> 'status'), 'ok', 'canary passes end to end');
 select is((select app.run_canary() ->> 'new_entity'), 'false', 'canary second run reuses the resolved entity');
 
+-- The canary is a derivation writer for the rest of its transaction (migration 0009). Clear the
+-- flag so the guards below are tested from a transaction that is not one.
+select set_config('app.writer', '', true);
+
 -- Typed predicates (F3)
 select lives_ok($$ insert into public.claim (org_id, entity_id, predicate_id, value, source_record_id, observed_at, extractor_version_id, confidence)
   select org_a, '00000000-0000-4000-9000-000000000003', '00000000-0000-4000-9000-000000000004', '"Revit"',
