@@ -25,4 +25,4 @@ jobs:
       - run: supabase link --project-ref "${{ secrets.SUPABASE_PROJECT_REF_PROD }}"
       - name: Show pending migrations
         run: supabase migration list
-      - run: supabase db push
+      - run: supabase db push --linked
