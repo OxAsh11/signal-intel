@@ -13,6 +13,7 @@ Both read the text stored with the source record (public.source_payload).
 from __future__ import annotations
 
 import json
+import unicodedata
 from typing import Any, Literal
 from uuid import UUID
 
@@ -119,6 +120,31 @@ def _content_text(source_record: dict[str, Any]) -> str:
     return text[:MAX_CONTENT_CHARS]
 
 
+def _fold(text: str) -> str:
+    return unicodedata.normalize("NFKC", text).casefold()
+
+
+def passes_lexicon(text: str, lexicon: list[str]) -> bool:
+    """M2 pre-filter: True when any lexicon term occurs in *text*; an empty lexicon passes all."""
+    terms = [_fold(t).strip() for t in lexicon if t and t.strip()]
+    if not terms:
+        return True
+    folded = _fold(text)
+    return any(term in folded for term in terms)
+
+
+async def _radar_lexicon(pool: AsyncConnectionPool, source_record_id: UUID) -> list[str]:
+    """The lexicon of the radar that found the record; empty when it has none or no radar."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT r.lexicon FROM public.radar r"
+            " WHERE r.id = (SELECT radar_id FROM public.source_record WHERE id = %s)",
+            (str(source_record_id),),
+        )
+        row = await cur.fetchone()
+    return list(row[0] or []) if row else []
+
+
 async def _update_status(
     pool: AsyncConnectionPool,
     source_record_id: UUID,
@@ -163,10 +189,16 @@ async def judge_relevance(
         )
         return False
 
-    prompt = load_prompt(RELEVANCE_PROMPT_NAME, RELEVANCE_PROMPT_VERSION)
     source_record = await _load_source_record(pool, source_record_id)
     text = _content_text(source_record)
 
+    # Cheap lexicon check before the paid judge (M2). Filtered records are marked, never dropped.
+    if not passes_lexicon(text, await _radar_lexicon(pool, source_record_id)):
+        await _update_status(pool, source_record_id, "irrelevant", "prefilter")
+        log.info("extraction.prefiltered", source_record_id=str(source_record_id))
+        return False
+
+    prompt = load_prompt(RELEVANCE_PROMPT_NAME, RELEVANCE_PROMPT_VERSION)
     try:
         result = await gateway.run(
             Capability.PREJUDGE,
