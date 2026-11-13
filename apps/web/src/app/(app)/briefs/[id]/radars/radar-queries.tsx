@@ -1,7 +1,12 @@
 'use client';
 
 import { useActionState } from 'react';
-import { addRadarQuery, removeRadarQuery, updateRadarLexicon } from '@/app/actions/radars';
+import {
+  addRadarQuery,
+  removeRadarQuery,
+  resetRadarLexicon,
+  updateRadarLexicon,
+} from '@/app/actions/radars';
 import { yieldLabel } from '@/lib/radars';
 
 export type RadarQueryRow = {
@@ -18,6 +23,9 @@ type Props = {
   radarId: string;
   queries: RadarQueryRow[];
   lexicon: string[];
+  /** True once a person has edited the terms; generation then leaves them alone. */
+  lexiconEdited: boolean;
+  generatedLexicon: string[];
   canEdit: boolean;
 };
 
@@ -36,9 +44,18 @@ function RemoveQuery({ briefId, queryId }: { briefId: string; queryId: string })
 }
 
 /** A radar's queries with volume and yield per query (M2), plus the editable pre-filter lexicon. */
-export function RadarQueries({ briefId, radarId, queries, lexicon, canEdit }: Props) {
+export function RadarQueries({
+  briefId,
+  radarId,
+  queries,
+  lexicon,
+  lexiconEdited,
+  generatedLexicon,
+  canEdit,
+}: Props) {
   const [addState, addAction, adding] = useActionState(addRadarQuery, {});
   const [lexState, lexAction, saving] = useActionState(updateRadarLexicon, {});
+  const [resetState, resetAction, resetting] = useActionState(resetRadarLexicon, {});
 
   return (
     <details className="mt-2 text-xs">
@@ -123,6 +140,21 @@ export function RadarQueries({ briefId, radarId, queries, lexicon, canEdit }: Pr
           ) : (
             <span>{lexicon.join(', ') || 'None'}</span>
           )}
+          {canEdit && lexiconEdited ? (
+            <form action={resetAction} className="flex flex-wrap items-center gap-2">
+              <input type="hidden" name="brief" value={briefId} />
+              <input type="hidden" name="radar" value={radarId} />
+              <button type="submit" disabled={resetting} className="rounded border border-border px-2 py-1">
+                Restore suggested terms
+              </button>
+              <span className="text-ink-muted">
+                {generatedLexicon.length
+                  ? `${generatedLexicon.length} suggested: ${generatedLexicon.slice(0, 5).join(', ')}${generatedLexicon.length > 5 ? '…' : ''}`
+                  : 'No suggestions yet; they arrive with the next query generation.'}
+              </span>
+              {resetState.error ? <span className="text-red-600">{resetState.error}</span> : null}
+            </form>
+          ) : null}
         </div>
       </div>
     </details>

@@ -1553,8 +1553,10 @@ def build_app(
 
                 async with pool.connection() as db_conn:
                     cur = await db_conn.execute(
+                        # Radars waiting for a key (error) or gone quiet (silent) get fresh
+                        # queries too; removed (paused) radars do not.
                         "select id, org_id, workspace_id from public.radar"
-                        " where brief_id = %s and status = 'active'",
+                        " where brief_id = %s and status in ('active', 'error', 'silent')",
                         (brief_id,),
                     )
                     radars = await cur.fetchall()

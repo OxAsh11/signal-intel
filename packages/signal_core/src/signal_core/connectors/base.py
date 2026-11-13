@@ -21,6 +21,11 @@ class FetchBlocked(Exception):
     """Raised when the target URL resolves to a private / reserved IP address."""
 
 
+class FetchUnresolvable(FetchBlocked):
+    """The hostname does not resolve. A FetchBlocked, so callers that only know that still stop;
+    search connectors can tell it apart from a private address and keep the search snippet."""
+
+
 class FetchDisallowed(Exception):
     """Raised when robots.txt disallows the user agent from accessing the path."""
 
@@ -90,7 +95,7 @@ class FetchGuard:
         try:
             results = socket.getaddrinfo(host, None)
         except socket.gaierror as exc:
-            raise FetchBlocked(f"Cannot resolve host {host!r}: {exc}") from exc
+            raise FetchUnresolvable(f"Cannot resolve host {host!r}: {exc}") from exc
 
         for _family, _type, _proto, _canonname, sockaddr in results:
             addr_str = sockaddr[0]  # IPv4: (host, port); IPv6: (host, port, flow, scope)

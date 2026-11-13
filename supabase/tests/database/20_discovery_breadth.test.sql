@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(50);
+select plan(62);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -201,6 +201,42 @@ select is((select radar_id from public.source_record where id = (select v from i
 select is((select count(*)::int from public.source_record where connector_id = 'radar:not-a-uuid'), 0, '46a. setup');
 select lives_ok($$select app.create_source_record((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
   'radar:not-a-uuid', 'news', 'u', now(), 'd20-hash-bad', null, 'en', 'x')$$, '47. a malformed connector id does not fail the insert');
+
+-- ── Minor fixes ──────────────────────────────────────────────────────────────
+select ok(pg_get_functiondef('app.provision_radars(uuid)'::regprocedure) like '%pg_advisory_xact_lock%',
+  '51. provisioning is serialised per Brief');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000da02","role":"authenticated"}', true);
+select throws_ok(format('select public.add_radar_query(%L::uuid, %L)', (select v from ids where k = 'r'), ' Q2 '),
+  '23505', null, '52. the same query (ignoring case and spaces) cannot be added twice');
+select throws_ok(format($$select public.create_radar(%L::uuid, %L::uuid, 'event', 'E', '{"sites":["a.com) OR (foo"]}')$$,
+  (select v from ids where k = 'ws'), (select v from ids where k = 'b')), '22023', null, '53. a site cannot carry query syntax');
+select throws_ok(format($$select public.create_radar(%L::uuid, %L::uuid, 'event', 'E', '{"sites":["-bad-.com"]}')$$,
+  (select v from ids where k = 'ws'), (select v from ids where k = 'b')), '22023', null, '54. host labels cannot start or end with a hyphen');
+select lives_ok(format($$select public.create_radar(%L::uuid, %L::uuid, 'event', 'E', '{"sites":["ted.europa.eu/notices"]}')$$,
+  (select v from ids where k = 'ws'), (select v from ids where k = 'b')), '55. a domain with a path is accepted');
+select public.update_radar_lexicon((select v from ids where k = 'r'), '{}');
+select public.reset_radar_lexicon((select v from ids where k = 'r'));
+reset role;
+select is((select lexicon from public.radar where id = (select v from ids where k = 'r')), '{a,b}'::text[],
+  '56. reset restores the generated terms');
+select ok(not (select lexicon_edited from public.radar where id = (select v from ids where k = 'r')),
+  '57. reset hands the lexicon back to generation');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000da03","role":"authenticated"}', true);
+select throws_ok(format('select public.reset_radar_lexicon(%L::uuid)', (select v from ids where k = 'r')),
+  '42501', null, '58. a Viewer cannot reset the lexicon');
+reset role;
+select throws_ok(format('update public.source_record set radar_id = %L where id = %L',
+  (select id from public.radar where connector_type = 'news' and brief_id = (select v from ids where k = 'b')),
+  (select v from ids where k = 's1')), '55000', null, '59. a record cannot be moved to another radar');
+select lives_ok(format('update public.source_record set radar_query_id = null where id = %L', (select v from ids where k = 's1')),
+  '60. attribution can be cleared (query deleted)');
+select app.compute_radar_yield();
+select is(app.compute_radar_yield(), 0, '61. a second run with nothing changed writes nothing');
+select is((select app.compute_radar_yield() + count(*)::int from public.radar r
+            where r.brief_id = (select v from ids where k = 'b') and r.connector_type = 'event' and r.yield_count <> 0), 0,
+  '62. radars without records stay at zero');
 
 select is((select count(*)::int from public.job_type_config where job_type in ('source.fetch_registry','source.fetch_tender',
   'source.fetch_event','source.fetch_directory','source.fetch_social_post','source.targeted_search','radar.yield_compute')),

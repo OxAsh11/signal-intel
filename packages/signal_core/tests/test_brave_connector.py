@@ -295,3 +295,29 @@ async def test_guard_resolves_dns_off_the_event_loop(monkeypatch):
     monkeypatch.setattr(FetchGuard, "_check_robots", no_robots)
     await FetchGuard().check("https://a.test/")
     assert calls == ["<lambda>"]
+
+
+def test_targeted_query_keeps_lexicon_order_and_cleans_the_name():
+    from signal_core.connectors.brave import build_targeted_query
+
+    q = build_targeted_query('Acme "Hotels"  Ltd', ["Fit-out", "tender", "fit-out", "award", "x"])
+    assert q == '"Acme Hotels Ltd" Fit-out tender award'
+    assert build_targeted_query("Acme", []) == '"Acme"'
+
+
+@pytest.mark.asyncio
+async def test_unresolvable_host_keeps_the_snippet():
+    from signal_core.connectors.base import FetchUnresolvable
+
+    url = "https://gone.example/"
+    s = FakeSearch({"q1": [result(url, title="T", desc="D")]})
+    payloads, _ = await connector(s).fetch(
+        {}, ["q1"], {}, ScriptedGuard({url: FetchUnresolvable("nxdomain")}), 50
+    )
+    assert [p.content_kind for p in payloads] == ["snippet"]
+
+
+def test_unresolvable_is_still_blocked_for_other_connectors():
+    from signal_core.connectors.base import FetchUnresolvable
+
+    assert issubclass(FetchUnresolvable, FetchBlocked)

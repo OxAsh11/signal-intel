@@ -90,22 +90,38 @@ async def test_heartbeat_job_updates_health() -> None:
     assert set(beats) == {("system.heartbeat", "ok", "S1")}
 
 
+def canary_jobs(connector: InMemoryConnector) -> int:
+    return sum(1 for j in connector.jobs.values() if j["task_name"] == "system.canary")
+
+
 async def test_canary_job_runs_the_pipeline_check() -> None:
     health = FakeHealth()
-    app = make_app(health)
+    connector = InMemoryConnector()
+    app = make_app(health, connector=connector)
     async with app.open_async():
         await app.tasks["system.canary"].defer_async(timestamp=0)
+        # Stands in for the daily periodic tick, which fires in this run between 03:17 and
+        # 03:27 UTC: the test must hold then too.
+        await app.tasks["system.canary"].defer_async(timestamp=1)
         await run_system_queue(app)
-    assert health.canary_runs == 1
+    assert health.canary_runs == canary_jobs(connector) >= 2
 
 
 async def test_failed_canary_does_not_crash_the_worker() -> None:
     health = FakeHealth({"status": "incident", "error": "claim insert failed"})
-    app = make_app(health)
+    connector = InMemoryConnector()
+    app = make_app(health, connector=connector)
     async with app.open_async():
         await app.tasks["system.canary"].defer_async(timestamp=0)
         await run_system_queue(app)
-    assert health.canary_runs == 1  # recorded as an incident in SQL; no retry storm
+    # Recorded as an incident in SQL; no retry storm: one check per canary job (the daily
+    # periodic tick may add a job when this runs between 03:17 and 03:27 UTC).
+    assert health.canary_runs == canary_jobs(connector) >= 1
+    assert all(
+        j["status"] == "succeeded"
+        for j in connector.jobs.values()
+        if j["task_name"] == "system.canary"
+    )
 
 
 def test_health_goes_stale_without_relay() -> None:
@@ -589,6 +605,8 @@ async def test_version_published_provisions_radars_before_generating_queries() -
     provision = next(i for i, q in enumerate(sql_log) if "app.provision_radars" in q)
     radars = next(i for i, q in enumerate(sql_log) if "from public.radar" in q)
     assert provision < radars
+    # Radars waiting for a key (error) or gone quiet (silent) get fresh queries too.
+    assert "status in ('active', 'error', 'silent')" in sql_log[radars]
 
 
 async def test_brave_radar_without_queries_asks_for_them() -> None:

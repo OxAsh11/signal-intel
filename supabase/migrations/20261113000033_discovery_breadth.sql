@@ -9,12 +9,22 @@ alter table public.radar add constraint radar_connector_type_check check (connec
 alter table public.radar
   add column lexicon           text[]  not null default '{}',
   add column lexicon_edited    boolean not null default false,
+  add column generated_lexicon text[]  not null default '{}',   -- last AI-suggested terms (for reset)
   add column prefiltered_count int     not null default 0;
 
 alter table public.radar_query
   add column record_count      int not null default 0,
   add column prefiltered_count int not null default 0,
   add column yield_count       int not null default 0;
+
+-- One row per query text on a radar, ignoring case and surrounding spaces: attribution maps a
+-- query's text to exactly one row. Existing duplicates keep their oldest row.
+delete from public.radar_query q
+ using public.radar_query keep
+ where keep.radar_id = q.radar_id
+   and lower(btrim(keep.query_text)) = lower(btrim(q.query_text))
+   and (keep.created_at, keep.id) < (q.created_at, q.id);
+create unique index radar_query_text_uniq on public.radar_query (radar_id, lower(btrim(query_text)));
 
 -- ── 2. Source record attribution ─────────────────────────────────────────────
 -- The first query that finds a record owns it; a duplicate hit is not re-attributed.
@@ -30,6 +40,22 @@ drop trigger source_record_immutable on public.source_record;
 create trigger source_record_immutable before update on public.source_record
   for each row execute function app.forbid_update_except(
     'extraction_status', 'status_detail', 'updated_at', 'radar_id', 'radar_query_id');
+
+-- Attribution is set once: a record may gain a radar/query (backfill) or lose it (FK set null when
+-- a query or radar is deleted), but never move to a different one.
+create function app.forbid_reattribution() returns trigger
+language plpgsql set search_path = '' as $$
+begin
+  if (old.radar_id is not null and new.radar_id is not null and new.radar_id <> old.radar_id)
+     or (old.radar_query_id is not null and new.radar_query_id is not null
+         and new.radar_query_id <> old.radar_query_id) then
+    raise exception 'a source record cannot be moved to another radar or query' using errcode = '55000';
+  end if;
+  return new;
+end $$;
+revoke execute on function app.forbid_reattribution() from public, anon, authenticated;
+create trigger source_record_attribution_once before update of radar_id, radar_query_id
+  on public.source_record for each row execute function app.forbid_reattribution();
 
 drop function app.create_source_record(uuid, uuid, text, text, text, timestamptz, text, text, text, text);
 create function app.create_source_record(
@@ -100,15 +126,17 @@ declare
   q       jsonb;
 begin
   select org_id into v_org from public.radar where id = p_radar;
-  select coalesce(array_agg(btrim(e ->> 'query_text')), '{}') into v_texts
+  select coalesce(array_agg(lower(btrim(e ->> 'query_text'))), '{}') into v_texts
     from jsonb_array_elements(coalesce(p_queries, '[]')) e;
 
   delete from public.radar_query
-   where radar_id = p_radar and source <> 'user' and not (query_text = any (v_texts));
+   where radar_id = p_radar and source <> 'user' and not (lower(btrim(query_text)) = any (v_texts));
 
   for q in select * from jsonb_array_elements(coalesce(p_queries, '[]')) loop
+    continue when length(btrim(coalesce(q ->> 'query_text', ''))) = 0;
     if not exists (select 1 from public.radar_query
-                    where radar_id = p_radar and query_text = btrim(q ->> 'query_text')) then
+                    where radar_id = p_radar
+                      and lower(btrim(query_text)) = lower(btrim(q ->> 'query_text'))) then
       insert into public.radar_query (org_id, radar_id, query_text, language, source)
       values (v_org, p_radar, btrim(q ->> 'query_text'), coalesce(q ->> 'language', 'en'),
               coalesce(q ->> 'source', 'hypothesis'));
@@ -116,8 +144,13 @@ begin
   end loop;
 
   if p_lexicon is not null then
-    update public.radar set lexicon = app.clean_terms(p_lexicon), updated_at = now()
-     where id = p_radar and not lexicon_edited;
+    -- The suggestion is always kept (for reset); it becomes the live lexicon unless a person
+    -- has edited the terms.
+    update public.radar set
+      generated_lexicon = app.clean_terms(p_lexicon),
+      lexicon    = case when lexicon_edited then lexicon else app.clean_terms(p_lexicon) end,
+      updated_at = now()
+     where id = p_radar;
   end if;
 end $$;
 
@@ -155,6 +188,7 @@ begin
   where id = p_radar;
 end $$;
 
+-- Returns the number of radars whose numbers changed.
 -- A record yields when one of its active claims is on an entity with a Confirmed or Likely
 -- verdict on the radar's Brief's current version.
 create function app.compute_radar_yield() returns int
@@ -177,27 +211,36 @@ begin
     from public.source_record sr
    where sr.radar_id is not null;
 
+  -- Only rows whose numbers changed are written; a radar or query with no records counts zero.
   update public.radar r set
     record_count      = s.records,
     prefiltered_count = s.prefiltered,
     yield_count       = s.yielded,
     updated_at        = now()
-  from (select radar_id, count(*)::int as records,
-               count(*) filter (where prefiltered)::int as prefiltered,
-               count(*) filter (where yielded)::int as yielded
-          from _ry group by radar_id) s
-  where r.id = s.radar_id;
+  from (select r2.id,
+               count(y.id)::int as records,
+               count(y.id) filter (where y.prefiltered)::int as prefiltered,
+               count(y.id) filter (where y.yielded)::int as yielded
+          from public.radar r2 left join _ry y on y.radar_id = r2.id
+         group by r2.id) s
+  where r.id = s.id
+    and (r.record_count, r.prefiltered_count, r.yield_count)
+        is distinct from (s.records, s.prefiltered, s.yielded);
   get diagnostics v_n = row_count;
 
   update public.radar_query q set
     record_count      = s.records,
     prefiltered_count = s.prefiltered,
     yield_count       = s.yielded
-  from (select radar_query_id, count(*)::int as records,
-               count(*) filter (where prefiltered)::int as prefiltered,
-               count(*) filter (where yielded)::int as yielded
-          from _ry where radar_query_id is not null group by radar_query_id) s
-  where q.id = s.radar_query_id;
+  from (select q2.id,
+               count(y.id)::int as records,
+               count(y.id) filter (where y.prefiltered)::int as prefiltered,
+               count(y.id) filter (where y.yielded)::int as yielded
+          from public.radar_query q2 left join _ry y on y.radar_query_id = q2.id
+         group by q2.id) s
+  where q.id = s.id
+    and (q.record_count, q.prefiltered_count, q.yield_count)
+        is distinct from (s.records, s.prefiltered, s.yielded);
 
   drop table _ry;
   return v_n;
@@ -227,6 +270,8 @@ declare
   v_type text;
   v_n    int := 0;
 begin
+  -- Two deliveries of the same publish must not both create a radar: serialise per Brief.
+  perform pg_advisory_xact_lock(hashtextextended('provision_radars:' || p_brief::text, 0));
   select br.id, br.org_id, br.workspace_id, bv.config
     into b
     from public.brief br join public.brief_version bv on bv.id = br.current_version_id
@@ -312,10 +357,14 @@ begin
   if length(btrim(coalesce(p_text, ''))) not between 1 and 500 then
     raise exception 'a query needs 1 to 500 characters' using errcode = '22023';
   end if;
-  insert into public.radar_query (org_id, radar_id, query_text, language, source, edited_by_member)
-  values (r.org_id, p_radar, btrim(p_text), coalesce(nullif(btrim(p_language), ''), 'en'), 'user',
-          app.current_member_id(r.org_id))
-  returning id into v_id;
+  begin
+    insert into public.radar_query (org_id, radar_id, query_text, language, source, edited_by_member)
+    values (r.org_id, p_radar, btrim(p_text), coalesce(nullif(btrim(p_language), ''), 'en'), 'user',
+            app.current_member_id(r.org_id))
+    returning id into v_id;
+  exception when unique_violation then
+    raise exception 'this radar already has that query' using errcode = '23505';
+  end;
   perform app.audit(r.org_id, r.workspace_id, 'radar.query_added', 'radar', p_radar, null,
                     jsonb_build_object('query_id', v_id, 'query_text', btrim(p_text)));
   return v_id;
@@ -350,6 +399,22 @@ begin
                     jsonb_build_object('lexicon', app.clean_terms(p_terms)));
 end $$;
 
+-- Back to the generated terms; future generation keeps them up to date again.
+create function public.reset_radar_lexicon(p_radar uuid) returns void
+language plpgsql security definer set search_path = '' as $$
+declare r record;
+begin
+  select id, org_id, workspace_id, lexicon, generated_lexicon into r from public.radar where id = p_radar;
+  if r.id is null or not app.has_workspace_role(r.workspace_id, 'Editor') then
+    raise exception 'permission denied' using errcode = '42501';
+  end if;
+  update public.radar set lexicon = generated_lexicon, lexicon_edited = false, updated_at = now()
+   where id = p_radar;
+  perform app.audit(r.org_id, r.workspace_id, 'radar.lexicon_reset', 'radar', p_radar,
+                    jsonb_build_object('lexicon', r.lexicon),
+                    jsonb_build_object('lexicon', r.generated_lexicon));
+end $$;
+
 -- ── 8. create_radar validates config.sites ───────────────────────────────────
 create or replace function app.create_radar(
   p_ws             uuid,
@@ -375,7 +440,7 @@ begin
        or jsonb_array_length(v_sites) > 20
        or exists (select 1 from jsonb_array_elements(v_sites) s
                    where jsonb_typeof(s) <> 'string'
-                      or (s #>> '{}') !~ '^[a-z0-9.-]+\.[a-z]{2,}(/.*)?$')) then
+                      or (s #>> '{}') !~ '^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*\.[a-z]{2,}(/[A-Za-z0-9._~/-]*)?$')) then
     raise exception 'sites must be a list of up to 20 domains, like example.com' using errcode = '22023';
   end if;
   select org_id into v_org from public.workspace where id = p_ws;
@@ -430,12 +495,14 @@ to postgres, service_role;
 revoke execute on function
   public.add_radar_query(uuid, text, text),
   public.remove_radar_query(uuid),
-  public.update_radar_lexicon(uuid, text[])
+  public.update_radar_lexicon(uuid, text[]),
+  public.reset_radar_lexicon(uuid)
 from public, anon;
 grant execute on function
   public.add_radar_query(uuid, text, text),
   public.remove_radar_query(uuid),
-  public.update_radar_lexicon(uuid, text[])
+  public.update_radar_lexicon(uuid, text[]),
+  public.reset_radar_lexicon(uuid)
 to authenticated;
 
 -- ── 11. Backfill: attribute existing records to their radars and replace the old yield

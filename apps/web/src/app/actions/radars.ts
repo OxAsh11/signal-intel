@@ -156,3 +156,11 @@ export async function updateRadarLexicon(_: ActionState, form: FormData): Promis
   revalidatePath(`/briefs/${text(form, 'brief')}/radars`);
   return { ok: true };
 }
+
+/** Go back to the generated pre-filter terms. Fields: `radar`, `brief`. */
+export async function resetRadarLexicon(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('reset_radar_lexicon', { p_radar: text(form, 'radar') });
+  if (error) return { error };
+  revalidatePath(`/briefs/${text(form, 'brief')}/radars`);
+  return { ok: true };
+}

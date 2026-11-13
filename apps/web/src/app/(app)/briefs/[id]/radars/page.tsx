@@ -32,7 +32,7 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
   const { data: radars, error } = await supabase
     .from('radar')
     .select(
-      'id, connector_type, name, status, record_count, prefiltered_count, yield_count, lexicon, last_fetched_at, last_error, radar_query(id, query_text, source, record_count, prefiltered_count, yield_count)',
+      'id, connector_type, name, status, record_count, prefiltered_count, yield_count, lexicon, lexicon_edited, generated_lexicon, last_fetched_at, last_error, radar_query(id, query_text, source, record_count, prefiltered_count, yield_count)',
     )
     .eq('brief_id', id)
     .neq('status', 'paused')
@@ -93,6 +93,8 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
                       radarId={r.id}
                       queries={queries}
                       lexicon={(r.lexicon as string[] | null) ?? []}
+                      lexiconEdited={Boolean(r.lexicon_edited)}
+                      generatedLexicon={(r.generated_lexicon as string[] | null) ?? []}
                       canEdit={canEdit}
                     />
                   ) : null}

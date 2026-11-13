@@ -121,7 +121,10 @@ def _content_text(source_record: dict[str, Any]) -> str:
 
 
 def _fold(text: str) -> str:
-    return unicodedata.normalize("NFKC", text).casefold()
+    """NFKC forms folded, accents removed, case folded: "Rénovation" matches "renovation"."""
+    decomposed = unicodedata.normalize("NFKD", unicodedata.normalize("NFKC", text))
+    stripped = "".join(c for c in decomposed if not unicodedata.combining(c))
+    return stripped.casefold()
 
 
 def passes_lexicon(text: str, lexicon: list[str]) -> bool:

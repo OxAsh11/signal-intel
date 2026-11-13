@@ -29,7 +29,7 @@ from uuid import UUID
 import aiohttp
 
 from signal_core.connectors import SourcePayload
-from signal_core.connectors.base import FetchBlocked, FetchDisallowed
+from signal_core.connectors.base import FetchBlocked, FetchDisallowed, FetchUnresolvable
 from signal_core.connectors.base import content_hash as _content_hash
 from signal_core.connectors.website import _strip_html
 from signal_core.logging import get_logger
@@ -198,6 +198,9 @@ class BraveSearchConnector:
                 html = await self._fetch_page(url)
             else:
                 html = await fetch_page_guarded(url, guard)
+        except FetchUnresolvable:
+            # A dead host is not a risk: keep what the search engine saw.
+            html = None
         except FetchBlocked:
             log.info("brave.result_blocked", url=url)
             return None
@@ -294,12 +297,30 @@ async def fetch_page_guarded(
     return None
 
 
+def build_targeted_query(name: str, terms: list[str], n: int = 3) -> str:
+    """The exact company name in quotes, then the first *n* distinct lexicon terms.
+
+    Terms keep their lexicon order (generation lists the most telling first); repeats that differ
+    only in case are dropped. Quotes inside the name are removed so the phrase stays one phrase.
+    """
+    clean = " ".join(name.replace('"', " ").split())
+    picked: list[str] = []
+    seen: set[str] = set()
+    for term in terms:
+        t = " ".join(term.replace('"', " ").split())
+        if t and t.casefold() not in seen:
+            seen.add(t.casefold())
+            picked.append(t)
+        if len(picked) == n:
+            break
+    return " ".join([f'"{clean}"', *picked])
+
+
 async def targeted_search(
     connector: BraveSearchConnector, name: str, terms: list[str], guard: FetchGuard
 ) -> list[SourcePayload]:
     """One narrow search for an entity whose verdict is Unverified (M2/M5): 5 results."""
-    query = f'"{name}" ' + " ".join(terms[:3])
-    payloads, _ = await connector.fetch({}, [query.strip()], {}, guard, 5)
+    payloads, _ = await connector.fetch({}, [build_targeted_query(name, terms)], {}, guard, 5)
     return payloads
 
 

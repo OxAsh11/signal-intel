@@ -243,6 +243,10 @@ def test_passes_lexicon_casefold() -> None:
     assert passes_lexicon(f"{fullwidth} notice", ["tender"])
     assert not passes_lexicon("nothing here", ["tender"])
     assert passes_lexicon("x", [])
+    # Accents are ignored on both sides.
+    assert passes_lexicon("Hotel renovation planned", ["rénovation"])
+    assert passes_lexicon("Rénovation de l'hôtel", ["renovation"])
+    assert passes_lexicon("Straße", ["strasse"])
 
 
 async def test_judge_relevance_prefilter_skips_ai() -> None:

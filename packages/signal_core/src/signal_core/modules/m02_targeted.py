@@ -49,8 +49,9 @@ async def run_targeted_search(
                 return {"searched": False, "reason": "throttled"}
         cur = await conn.execute(
             """select e.display_name, b.org_id,
-                      coalesce((select array_agg(distinct t)
-                                  from public.radar r, unnest(r.lexicon) t
+                      coalesce((select array_agg(t order by r.created_at, u.ord)
+                                  from public.radar r,
+                                       unnest(r.lexicon) with ordinality as u(t, ord)
                                  where r.brief_id = b.id and r.status <> 'paused'), '{}')
                  from public.entity e, public.brief b
                 where e.id = %s and b.id = %s""",
@@ -59,7 +60,7 @@ async def run_targeted_search(
         row = await cur.fetchone()
     if row is None or not row[0]:
         return {"searched": False, "reason": "unknown_entity"}
-    name, org_id, lexicon = str(row[0]), UUID(str(row[1])), sorted(row[2] or [])
+    name, org_id, lexicon = str(row[0]), UUID(str(row[1])), list(row[2] or [])
 
     job_args: dict[str, Any] = {
         "entity_id": entity_id,
