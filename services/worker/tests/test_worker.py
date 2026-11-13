@@ -589,3 +589,65 @@ async def test_version_published_provisions_radars_before_generating_queries() -
     provision = next(i for i, q in enumerate(sql_log) if "app.provision_radars" in q)
     radars = next(i for i, q in enumerate(sql_log) if "from public.radar" in q)
     assert provision < radars
+
+
+async def test_brave_radar_without_queries_asks_for_them() -> None:
+    """A radar added by hand has no queries yet: the fetch asks for them instead of idling."""
+    radar_id, org, ws, brief = (str(uuid4()) for _ in range(4))
+
+    class _Cur:
+        def __init__(self) -> None:
+            self._rows: list = []
+
+        async def execute(self, sql: str, args: Any = None) -> None:
+            if "from public.radar where id" in sql:
+                self._rows = [(radar_id, org, ws, brief, "tender", {}, {})]
+            else:
+                self._rows = []
+
+        async def fetchone(self) -> tuple | None:
+            return self._rows[0] if self._rows else None
+
+        async def fetchall(self) -> list:
+            return self._rows
+
+        async def __aenter__(self) -> "_Cur":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Pool:
+        def connection(self) -> _Conn:
+            return _Conn()
+
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=_Pool(),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await app.tasks["source.fetch_tender"].defer_async(
+            radar_id=radar_id, org_id=org, workspace_id=ws, brief_id=brief
+        )
+        await app.run_worker_async(queues=["fetch"], wait=False, install_signal_handlers=False)
+
+    (gq,) = [j for j in connector.jobs.values() if j["task_name"] == "radar.generate_queries"]
+    assert gq["args"] == {"radar_id": radar_id, "org_id": org, "workspace_id": ws}
+    fetch = [j for j in connector.jobs.values() if j["task_name"] == "source.fetch_tender"]
+    assert [j["status"] for j in fetch] == ["succeeded"]

@@ -17,11 +17,13 @@ Fake mode: ``config["fake"]`` returns two fixtures (one full page, one snippet) 
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Awaitable, Callable
 from datetime import UTC, date, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING, Any, Protocol
+from urllib.parse import urljoin
 from uuid import UUID
 
 import aiohttp
@@ -47,6 +49,9 @@ _MAX_COUNT = 20
 _MAX_PAGE_BYTES = 2_000_000
 _SEARCH_TIMEOUT = aiohttp.ClientTimeout(total=20)
 _PAGE_TIMEOUT = aiohttp.ClientTimeout(total=15)
+_MAX_REDIRECTS = 3
+_PAGE_CONCURRENCY = 8
+_REDIRECT_STATUSES = frozenset({301, 302, 303, 307, 308})
 
 # connector_type → source_record.source_type
 BRAVE_KINDS: dict[str, str] = {
@@ -85,6 +90,8 @@ class BraveError(Exception):
 
 SearchFn = Callable[[str, dict[str, str]], Awaitable[dict[str, Any]]]
 PageFn = Callable[[str], Awaitable[bytes | None]]
+# (status, content_type, location, body) for one GET without following redirects.
+RawGet = Callable[[str], Awaitable[tuple[int, str, str | None, bytes]]]
 
 
 class SearchMeter(Protocol):
@@ -122,7 +129,9 @@ class BraveSearchConnector:
         self.source_type = BRAVE_KINDS.get(kind, kind)
         self._api_key = api_key
         self._search = search or self._default_search
-        self._fetch_page = fetch_page or _default_fetch_page
+        # Injected page fetchers (tests) get the guard checked here; the default follows
+        # redirects itself so that every hop goes through the guard.
+        self._fetch_page = fetch_page
         self._meter = meter
 
     async def fetch(
@@ -141,6 +150,7 @@ class BraveSearchConnector:
             raise SearchNotConfigured(NOT_SET_UP)
 
         sites = config.get("sites") or None
+        sem = asyncio.Semaphore(_PAGE_CONCURRENCY)
         fresh = freshness(cursor, today)
         token = await self._meter.reserve(len(queries)) if self._meter else None
         calls = 0
@@ -154,20 +164,27 @@ class BraveSearchConnector:
                 params = {"count": str(count), "freshness": fresh}
                 data = await self._search(build_query(query, self.kind, sites), params)
                 calls += 1
+                fresh_results = []
                 for res in (data.get("web") or {}).get("results") or []:
                     url = str(res.get("url") or "")
-                    if not url or url in seen:
-                        continue
-                    seen.add(url)
-                    payload = await self._payload(res, query, guard)
-                    if payload is not None:
+                    if url and url not in seen:
+                        seen.add(url)
+                        fresh_results.append(res)
+                for payload in await asyncio.gather(
+                    *(self._guarded_payload(sem, r, query, guard) for r in fresh_results)
+                ):
+                    if payload is not None and len(payloads) < limit:
                         payloads.append(payload)
-                    if len(payloads) >= limit:
-                        break
         finally:
             if self._meter:
                 await self._meter.settle(token, calls)
         return payloads, next_cursor
+
+    async def _guarded_payload(
+        self, sem: asyncio.Semaphore, res: dict[str, Any], query: str, guard: FetchGuard
+    ) -> SourcePayload | None:
+        async with sem:
+            return await self._payload(res, query, guard)
 
     async def _payload(
         self, res: dict[str, Any], query: str, guard: FetchGuard
@@ -176,12 +193,19 @@ class BraveSearchConnector:
         title = str(res.get("title") or "")
         html: bytes | None = None
         try:
-            await guard.check(url)
-            html = await self._fetch_page(url)
+            if self._fetch_page is not None:
+                await guard.check(url)
+                html = await self._fetch_page(url)
+            else:
+                html = await fetch_page_guarded(url, guard)
         except FetchBlocked:
             log.info("brave.result_blocked", url=url)
             return None
         except FetchDisallowed:
+            html = None
+        except Exception as exc:
+            # One bad result page never fails the fetch: keep Brave's snippet instead.
+            log.info("brave.page_failed", url=url, error=type(exc).__name__)
             html = None
         if html:
             text = _strip_html(html).decode("utf-8", errors="replace")
@@ -234,17 +258,40 @@ def _make(url: str, text: str, query: str | None, kind: str) -> SourcePayload:
     )
 
 
-async def _default_fetch_page(url: str) -> bytes | None:
-    """The page body when it is a 2xx HTML response under 2 MB; otherwise None."""
+async def _raw_get(url: str) -> tuple[int, str, str | None, bytes]:
+    """One GET without following redirects; status 0 on a network error."""
     try:
         async with aiohttp.ClientSession(timeout=_PAGE_TIMEOUT) as session:
-            async with session.get(url, allow_redirects=True) as resp:
-                if not 200 <= resp.status < 300 or "html" not in resp.content_type:
-                    return None
+            async with session.get(url, allow_redirects=False) as resp:
+                location = resp.headers.get("Location")
+                if resp.status in _REDIRECT_STATUSES:
+                    return resp.status, resp.content_type, location, b""
                 body = await resp.content.read(_MAX_PAGE_BYTES + 1)
-                return None if len(body) > _MAX_PAGE_BYTES else body
-    except (aiohttp.ClientError, TimeoutError, UnicodeError):
+                return resp.status, resp.content_type, location, body
+    except (aiohttp.ClientError, TimeoutError, UnicodeError, ValueError):
+        return 0, "", None, b""
+
+
+async def fetch_page_guarded(
+    url: str, guard: FetchGuard, *, get: RawGet | None = None
+) -> bytes | None:
+    """The page body when it is a 2xx HTML response under 2 MB; otherwise None.
+
+    Redirects are followed by hand (at most 3) and every hop is checked by the guard, so a
+    result that redirects to a private address raises FetchBlocked like a direct one.
+    """
+    getter = get or _raw_get
+    current = url
+    for _ in range(_MAX_REDIRECTS + 1):
+        await guard.check(current)
+        status, content_type, location, body = await getter(current)
+        if status in _REDIRECT_STATUSES and location:
+            current = urljoin(current, location)
+            continue
+        if 200 <= status < 300 and "html" in content_type and len(body) <= _MAX_PAGE_BYTES:
+            return body
         return None
+    return None
 
 
 async def targeted_search(

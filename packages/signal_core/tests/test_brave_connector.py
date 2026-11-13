@@ -197,3 +197,101 @@ async def test_targeted_search_quotes_the_name_and_adds_terms():
     q, params = s.calls[0]
     assert q == '"Acme Hotels" tender fit-out award'
     assert params["count"] == "5"
+
+
+# ── Review fixes ─────────────────────────────────────────────────────────────
+
+
+@pytest.mark.asyncio
+async def test_redirect_to_a_private_address_is_blocked():
+    from signal_core.connectors.brave import fetch_page_guarded
+
+    async def get(url: str):
+        if url == "https://a.test/x":
+            return 302, "text/html", "http://169.254.169.254/latest", b""
+        return 200, "text/html", None, b"<body>secret</body>"
+
+    guard = ScriptedGuard({"http://169.254.169.254/latest": FetchBlocked("private")})
+    with pytest.raises(FetchBlocked):
+        await fetch_page_guarded("https://a.test/x", guard, get=get)
+
+
+@pytest.mark.asyncio
+async def test_redirects_are_followed_through_the_guard_and_capped():
+    from signal_core.connectors.brave import fetch_page_guarded
+
+    seen: list[str] = []
+
+    class Recording(ScriptedGuard):
+        async def check(self, url: str) -> None:
+            seen.append(url)
+
+    async def hop(url: str):
+        if url.endswith("/final"):
+            return 200, "text/html; charset=utf-8", None, b"<body>ok</body>"
+        return 301, "text/html", "/final", b""
+
+    assert (
+        await fetch_page_guarded("https://a.test/start", Recording(), get=hop) == b"<body>ok</body>"
+    )
+    assert seen == ["https://a.test/start", "https://a.test/final"]
+
+    async def loop(url: str):
+        return 302, "text/html", url + "x", b""
+
+    assert await fetch_page_guarded("https://a.test/l", Recording(), get=loop) is None
+
+
+@pytest.mark.asyncio
+async def test_unexpected_guard_error_keeps_the_snippet():
+    url = "https://xn--bad.test/"
+    s = FakeSearch({"q1": [result(url, title="T")]})
+    payloads, _ = await connector(s).fetch(
+        {}, ["q1"], {}, ScriptedGuard({url: UnicodeError("idna")}), 50
+    )
+    assert [p.content_kind for p in payloads] == ["snippet"]
+
+
+@pytest.mark.asyncio
+async def test_result_pages_are_fetched_concurrently_in_order():
+    import asyncio
+
+    active = 0
+    peak = 0
+
+    async def slow_page(url: str) -> bytes | None:
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await asyncio.sleep(0.01)
+        active -= 1
+        return f"<body>{url}</body>".encode()
+
+    urls = [f"https://a.test/{i}" for i in range(10)]
+    s = FakeSearch({"q1": [result(u) for u in urls]})
+    payloads, _ = await connector(s, fetch_page=slow_page).fetch(
+        {}, ["q1"], {}, ScriptedGuard(), 50
+    )
+    assert [p.url for p in payloads] == urls
+    assert 1 < peak <= 8
+
+
+@pytest.mark.asyncio
+async def test_guard_resolves_dns_off_the_event_loop(monkeypatch):
+    import asyncio
+
+    calls: list[str] = []
+
+    async def fake_to_thread(fn, *args):
+        calls.append(fn.__name__)
+        return fn(*args)
+
+    monkeypatch.setattr(asyncio, "to_thread", fake_to_thread)
+    monkeypatch.setattr(FetchGuard, "_check_private_ip", staticmethod(lambda host: None))
+
+    async def no_robots(self, url, parsed):
+        return None
+
+    monkeypatch.setattr(FetchGuard, "_check_robots", no_robots)
+    await FetchGuard().check("https://a.test/")
+    assert calls == ["<lambda>"]

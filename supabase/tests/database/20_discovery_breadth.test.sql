@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(42);
+select plan(50);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -161,6 +161,10 @@ select is((select record_count || '/' || prefiltered_count || '/' || yield_count
   '2/1/1', '37. radar records, pre-filtered and yield');
 select is((select yield_count from public.radar_query where id = (select v from ids where k = 'q1')), 1, '38. per-query yield');
 
+select app.update_radar_cursor((select v from ids where k = 'r'), '{}', 5, 2);
+select is((select record_count from public.radar where id = (select v from ids where k = 'r')), 4,
+  '38a. a fetch adds its new records (not every fetched item) to the count');
+
 -- ── Targeted search throttle ─────────────────────────────────────────────────
 select ok(app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e'))
   and not app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e')),
@@ -168,6 +172,35 @@ select ok(app.claim_targeted_search((select v from ids where k = 'b'), (select v
 update public.targeted_search set searched_at = now() - interval '31 days';
 select ok(app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e')),
   '40. allowed again after 30 days');
+
+-- ── Review fixes: targeted search fan-out, release, cap; attribution from connector_id ─
+insert into ids select 'e_t', app.create_entity((select v from ids where k = 'org'), 'company', 'Only Targeted Co', 'tenant');
+insert into ids select 's_t', app.create_source_record((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+  'targeted:' || (select v from ids where k = 'b')::text, 'web_search', 'https://d20.example.com/t', now(), 'd20-hash-t', null, 'en', 'x');
+insert into public.entity_alias (org_id, entity_id, alias_type, value_normalised, confidence, source_record_id)
+  values ((select v from ids where k = 'org'), (select v from ids where k = 'e_t'), 'domain', 'onlytargeted.example', 90,
+          (select v from ids where k = 's_t'));
+select ok(not app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e_t')),
+  '43. an entity known only from targeted searches is not searched again');
+insert into ids select 'e_r', app.create_entity((select v from ids where k = 'org'), 'company', 'Release Co', 'tenant');
+select ok(app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e_r')), '44a. claimed');
+select app.release_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e_r'));
+select ok(app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e_r')),
+  '44. a released claim (failed search) can be claimed again');
+insert into public.targeted_search (org_id, workspace_id, brief_id, entity_id)
+  select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'b'),
+         app.create_entity((select v from ids where k = 'org'), 'company', 'Cap ' || n, 'tenant')
+    from generate_series(1, 100) n;
+insert into ids select 'e_c', app.create_entity((select v from ids where k = 'org'), 'company', 'Over Cap Co', 'tenant');
+select ok(not app.claim_targeted_search((select v from ids where k = 'b'), (select v from ids where k = 'e_c')),
+  '45. at most 100 targeted searches per Brief per day');
+insert into ids select 's_legacy', app.create_source_record((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+  'radar:' || (select v from ids where k = 'r')::text, 'news', 'https://d20.example.com/n', now(), 'd20-hash-n', null, 'en', 'x');
+select is((select radar_id from public.source_record where id = (select v from ids where k = 's_legacy')),
+  (select v from ids where k = 'r'), '46. a radar:<id> connector attributes the record to its radar');
+select is((select count(*)::int from public.source_record where connector_id = 'radar:not-a-uuid'), 0, '46a. setup');
+select lives_ok($$select app.create_source_record((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+  'radar:not-a-uuid', 'news', 'u', now(), 'd20-hash-bad', null, 'en', 'x')$$, '47. a malformed connector id does not fail the insert');
 
 select is((select count(*)::int from public.job_type_config where job_type in ('source.fetch_registry','source.fetch_tender',
   'source.fetch_event','source.fetch_directory','source.fetch_social_post','source.targeted_search','radar.yield_compute')),

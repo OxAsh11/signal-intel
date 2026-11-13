@@ -26,7 +26,6 @@ from signal_core.connectors.brave import (
     BraveSearchConnector,
     PgSearchMeter,
     SearchNotConfigured,
-    targeted_search,
 )
 from signal_core.connectors.csv_upload import CsvConnector
 from signal_core.connectors.job_posts import JobPostConnector
@@ -44,6 +43,7 @@ from signal_core.modules.m02_radar import (
     upsert_radar_queries,
 )
 from signal_core.modules.m02_radar_ai import generate_radar_queries
+from signal_core.modules.m02_targeted import run_targeted_search
 from signal_core.modules.m03_extraction import extract_structured, judge_relevance
 from signal_core.modules.m04_identity import duplicate_sweep, resolve_mention
 from signal_core.modules.m05_verdict import sample_for_review as _sample_verdicts_for_review
@@ -460,8 +460,15 @@ def build_app(
         r = await _load_radar(pool, UUID(radar_id))
         queries = [q["query_text"] for q in await _load_radar_queries(pool, UUID(radar_id))]
         if not queries:
-            # Queries are generated after the radar is created. Fetching now would move the
-            # cursor past items the first real fetch should see.
+            # A radar added by hand has no queries until they are generated; generation queues
+            # the fetch again. Fetching now would move the cursor past items the first real
+            # fetch should see.
+            with contextlib.suppress(AlreadyEnqueued):
+                await (
+                    app.tasks["radar.generate_queries"]
+                    .configure(queueing_lock=f"gq:{radar_id}")
+                    .defer_async(radar_id=radar_id, org_id=org_id, workspace_id=workspace_id)
+                )
             return {"fetched": 0, "created": 0, "reason": "no_queries"}
         job_args: dict[str, Any] = {
             "radar_id": radar_id,
@@ -526,45 +533,15 @@ def build_app(
     ) -> dict[str, Any]:
         """One narrow search for an entity whose verdict is Unverified (M2/M5)."""
         assert pool is not None, "pool required for source.targeted_search"
-        if get_settings().brave_search_api_key is None:
-            return {"searched": False, "reason": "not_configured"}
-        async with pool.connection() as db_conn:
-            # A resumed run (its budget approval granted) already holds the throttle slot.
-            if not approval_id:
-                cur = await db_conn.execute(
-                    "select app.claim_targeted_search(%s, %s)", (brief_id, entity_id)
-                )
-                claimed = await cur.fetchone()
-                if not (claimed and claimed[0]):
-                    return {"searched": False, "reason": "throttled"}
-            cur = await db_conn.execute(
-                """select e.display_name, b.org_id,
-                          coalesce((select array_agg(distinct t)
-                                      from public.radar r, unnest(r.lexicon) t
-                                     where r.brief_id = b.id and r.status <> 'paused'), '{}')
-                     from public.entity e, public.brief b
-                    where e.id = %s and b.id = %s""",
-                (entity_id, brief_id),
-            )
-            row = await cur.fetchone()
-        if row is None or not row[0]:
-            return {"searched": False, "reason": "unknown_entity"}
-        name, org_id, lexicon = str(row[0]), UUID(str(row[1])), sorted(row[2] or [])
-        job_args: dict[str, Any] = {
-            "entity_id": entity_id,
-            "brief_id": brief_id,
-            "workspace_id": workspace_id,
-        }
-        if approval_id:
-            job_args["approval_id"] = approval_id
-        ctx = CallContext(
-            org_id, UUID(workspace_id), UUID(brief_id), None, "source.targeted_search", job_args
+        return await run_targeted_search(
+            pool,
+            lambda ctx: _brave(TARGETED_KIND, ctx),
+            entity_id=entity_id,
+            brief_id=brief_id,
+            workspace_id=workspace_id,
+            approval_id=approval_id,
+            configured=get_settings().brave_search_api_key is not None,
         )
-        payloads = await targeted_search(_brave(TARGETED_KIND, ctx), name, lexicon, FetchGuard())
-        created = await create_source_records(
-            pool, org_id, UUID(workspace_id), f"targeted:{brief_id}", TARGETED_KIND, payloads
-        )
-        return {"searched": True, "created": created}
 
     _m05_verdict.targeted_search_job = targeted_search_task
 
@@ -613,6 +590,9 @@ def build_app(
             gateway, hypotheses, icp_summary, r["connector_type"], ctx, geographies=geographies
         )
         await upsert_radar_queries(pool, UUID(radar_id), query_set)
+        if not query_set.queries:
+            # Nothing to fetch; also stops a query-less radar bouncing between fetch and here.
+            return {"queries": 0}
         # New queries are only useful once they are fetched.
         await _queue_fetch(
             radar_id,

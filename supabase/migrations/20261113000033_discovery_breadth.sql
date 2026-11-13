@@ -49,14 +49,22 @@ create function app.create_source_record(
 ) returns uuid
 language plpgsql security definer set search_path = '' as $$
 declare
-  v_id uuid;
+  v_id    uuid;
+  v_radar uuid := p_radar;
 begin
+  -- Every radar connector names itself 'radar:<id>': attribute the record even when the caller
+  -- did not pass the radar (news, website, job post and CSV connectors).
+  if v_radar is null and p_connector_id ~ '^radar:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    select id into v_radar from public.radar
+     where id = substr(p_connector_id, 7)::uuid and org_id = p_org;
+  end if;
+
   insert into public.source_record
     (org_id, workspace_id, connector_id, source_type, url, fetched_at, content_hash, payload_ref,
      language, radar_id, radar_query_id, content_kind)
   values
     (p_org, p_workspace, p_connector_id, p_source_type, p_url, p_fetched_at, p_content_hash, p_payload_ref,
-     p_language, p_radar, p_radar_query, coalesce(p_content_kind, 'full'))
+     p_language, v_radar, p_radar_query, coalesce(p_content_kind, 'full'))
   on conflict (org_id, content_hash) do nothing
   returning id into v_id;
 
@@ -127,6 +135,8 @@ $$;
 
 -- ── 4. Yield (per radar and per query) ───────────────────────────────────────
 -- update_radar_cursor no longer adds to yield_count: yield is computed, not "new records".
+-- It adds the fetch's new records (p_yield, historically named) to record_count, so the count
+-- between yield runs matches what compute_radar_yield will write.
 create or replace function app.update_radar_cursor(
   p_radar        uuid,
   p_cursor_state jsonb,
@@ -138,7 +148,7 @@ begin
   update public.radar set
     cursor_state    = p_cursor_state,
     last_fetched_at = now(),
-    record_count    = record_count + p_fetched,
+    record_count    = record_count + greatest(p_yield, 0),
     status          = case when status = 'paused' then 'paused' else 'active' end,
     last_error      = null,
     updated_at      = now()
@@ -258,11 +268,23 @@ create policy targeted_search_read on public.targeted_search for select to authe
   using (app.has_workspace_role(workspace_id, 'Viewer'));
 grant select on public.targeted_search to authenticated;
 
--- True when this (brief, entity) may be searched now: once per 30 days.
+-- True when this (brief, entity) may be searched now: once per 30 days, at most 100 searches per
+-- Brief per day, and never for an entity known only from targeted searches (that would let one
+-- search's results trigger more searches without end).
 create function app.claim_targeted_search(p_brief uuid, p_entity uuid) returns boolean
 language plpgsql security definer set search_path = '' as $$
 declare v_id uuid;
 begin
+  if exists (select 1 from public.entity_alias where entity_id = p_entity)
+     and not exists (select 1 from public.entity_alias a
+                       join public.source_record sr on sr.id = a.source_record_id
+                      where a.entity_id = p_entity and sr.connector_id not like 'targeted:%') then
+    return false;
+  end if;
+  if (select count(*) from public.targeted_search
+       where brief_id = p_brief and searched_at > now() - interval '1 day') >= 100 then
+    return false;
+  end if;
   insert into public.targeted_search (org_id, workspace_id, brief_id, entity_id)
   select org_id, workspace_id, id, p_entity from public.brief where id = p_brief
   on conflict (brief_id, entity_id) do update set searched_at = now()
@@ -270,6 +292,12 @@ begin
   returning id into v_id;
   return v_id is not null;
 end $$;
+
+-- A search that failed gives its slot back, so a retry (or a later verdict) can search again.
+create function app.release_targeted_search(p_brief uuid, p_entity uuid) returns void
+language sql security definer set search_path = '' as $$
+  delete from public.targeted_search where brief_id = p_brief and entity_id = p_entity
+$$;
 
 -- ── 7. Editor RPCs: queries and lexicon ──────────────────────────────────────
 create function public.add_radar_query(p_radar uuid, p_text text, p_language text default 'en')
@@ -384,6 +412,7 @@ revoke execute on function
   app.compute_radar_yield(),
   app.provision_radars(uuid),
   app.claim_targeted_search(uuid, uuid),
+  app.release_targeted_search(uuid, uuid),
   app.clean_terms(text[]),
   app.brief_source_connector(text)
 from public, anon, authenticated;
@@ -393,6 +422,7 @@ grant execute on function
   app.compute_radar_yield(),
   app.provision_radars(uuid),
   app.claim_targeted_search(uuid, uuid),
+  app.release_targeted_search(uuid, uuid),
   app.clean_terms(text[]),
   app.brief_source_connector(text)
 to postgres, service_role;
@@ -407,3 +437,14 @@ grant execute on function
   public.remove_radar_query(uuid),
   public.update_radar_lexicon(uuid, text[])
 to authenticated;
+
+-- ── 11. Backfill: attribute existing records to their radars and replace the old yield
+-- ("new records") with the computed one.
+update public.source_record sr
+   set radar_id = r.id
+  from public.radar r
+ where sr.radar_id is null
+   and sr.connector_id ~ '^radar:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$'
+   and r.id = substr(sr.connector_id, 7)::uuid;
+update public.radar set yield_count = 0;
+select app.compute_radar_yield();

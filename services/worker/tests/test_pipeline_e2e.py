@@ -958,16 +958,17 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
                 }
             }
 
-        async def fake_page(url: str) -> bytes | None:
+        async def fake_page(url: str) -> tuple[int, str, str | None, bytes]:
             if url.endswith("/award"):
-                return b"<html><body>Hotel group fake tender: fit-out contract</body></html>"
-            return None
+                body = b"<html><body>Hotel group fake tender: fit-out contract</body></html>"
+                return 200, "text/html", None, body
+            return 404, "text/html", None, b""
 
         async def no_guard(self: Any, url: str) -> None:
             return None
 
         monkeypatch.setattr(brave.BraveSearchConnector, "_default_search", fake_search)
-        monkeypatch.setattr(brave, "_default_fetch_page", fake_page)
+        monkeypatch.setattr(brave, "_raw_get", fake_page)
         monkeypatch.setattr(FetchGuard, "check", no_guard)
 
         version_2 = await db.as_user("select public.publish_brief(%s)", (BRIEF,))

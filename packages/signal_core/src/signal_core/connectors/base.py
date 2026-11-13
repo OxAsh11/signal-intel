@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import os
@@ -75,7 +76,8 @@ class FetchGuard:
         if not host:
             raise FetchBlocked(f"Cannot parse hostname from URL: {url!r}")
 
-        self._check_private_ip(host)
+        # getaddrinfo blocks: resolve on a thread so other jobs keep running.
+        await asyncio.to_thread(self._check_private_ip, host)
         await self._check_robots(url, parsed)
 
     # ------------------------------------------------------------------
