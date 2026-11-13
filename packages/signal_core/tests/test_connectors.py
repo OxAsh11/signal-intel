@@ -236,3 +236,20 @@ async def test_generate_radar_queries_calls_gateway():
     )
     assert len(result.queries) == 2
     assert result.queries[0].query_text == "SolidWorks hiring"
+
+
+def test_source_payload_defaults_keep_old_connectors():
+    from datetime import UTC, datetime
+
+    from signal_core.connectors import SourcePayload
+
+    p = SourcePayload("https://x.test", datetime.now(tz=UTC), "h", None, "en", b"x")
+    assert p.query is None
+    assert p.content_kind == "full"
+
+
+def test_radar_query_set_carries_lexicon():
+    from signal_core.modules.m02_radar import RadarQuerySet
+
+    assert RadarQuerySet(queries=[]).lexicon == []
+    assert RadarQuerySet(queries=[], lexicon=["tender"]).lexicon == ["tender"]
