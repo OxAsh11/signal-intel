@@ -4,6 +4,8 @@ import { createClient } from '@/lib/supabase/server';
 import { getOrgContext, atLeast } from '@/lib/org';
 import { removeRadar } from '@/app/actions/radars';
 import { RadarAddForm } from './radar-add-form';
+import { RadarQueries, type RadarQueryRow } from './radar-queries';
+import { isNotSetUp, radarTypeLabel, yieldLabel } from '@/lib/radars';
 
 export const metadata = { title: 'Radars' };
 
@@ -29,7 +31,9 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
 
   const { data: radars, error } = await supabase
     .from('radar')
-    .select('id, connector_type, name, status, record_count, yield_count, last_fetched_at, last_error, radar_query(count)')
+    .select(
+      'id, connector_type, name, status, record_count, prefiltered_count, yield_count, lexicon, last_fetched_at, last_error, radar_query(id, query_text, source, record_count, prefiltered_count, yield_count)',
+    )
     .eq('brief_id', id)
     .neq('status', 'paused')
     .order('created_at', { ascending: true });
@@ -58,9 +62,8 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
       {radars && radars.length > 0 ? (
         <div className="mt-4 flex flex-col gap-2">
           {radars.map(r => {
-            const queryCount = Array.isArray(r.radar_query)
-              ? r.radar_query[0]?.count ?? 0
-              : 0;
+            const queries = (Array.isArray(r.radar_query) ? r.radar_query : []) as RadarQueryRow[];
+            const notSetUp = isNotSetUp(r.last_error);
 
             return (
               <div key={r.id} className="flex flex-col gap-2 rounded-lg border border-border p-4 sm:flex-row sm:items-start sm:justify-between">
@@ -69,15 +72,30 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
                     <span className="font-medium text-sm">{r.name}</span>
                     <span className={statusBadge(r.status ?? 'unknown')}>{r.status ?? 'unknown'}</span>
                   </div>
-                  <p className="m-0 text-xs text-ink-muted capitalize">{r.connector_type?.replace(/_/g, ' ')}</p>
+                  <p className="m-0 text-xs text-ink-muted">{radarTypeLabel(r.connector_type ?? '')}</p>
                   <p className="m-0 text-xs text-ink-muted">
-                    Records: {r.record_count ?? 0} · Yields: {r.yield_count ?? 0} · Queries: {queryCount} · Last fetched: {formatDate(r.last_fetched_at)}
+                    Records: {r.record_count ?? 0} · Pre-filtered: {r.prefiltered_count ?? 0} · Yield:{' '}
+                    {yieldLabel(r.record_count ?? 0, r.prefiltered_count ?? 0, r.yield_count ?? 0)} · Last fetched:{' '}
+                    {formatDate(r.last_fetched_at)}
                   </p>
-                  {r.last_error && (
+                  {notSetUp ? (
+                    <p className="m-0 text-xs text-ink-muted">
+                      Not set up yet: web-search radars start once the Brave Search key is added to the worker.
+                    </p>
+                  ) : r.last_error ? (
                     <p className="m-0 text-xs text-red-600 truncate max-w-sm" title={r.last_error}>
                       Error: {r.last_error}
                     </p>
-                  )}
+                  ) : null}
+                  {r.connector_type !== 'csv_upload' ? (
+                    <RadarQueries
+                      briefId={id}
+                      radarId={r.id}
+                      queries={queries}
+                      lexicon={(r.lexicon as string[] | null) ?? []}
+                      canEdit={canEdit}
+                    />
+                  ) : null}
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   {r.connector_type === 'csv_upload' && (

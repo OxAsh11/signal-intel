@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgContext } from '@/lib/org';
+import { isNotSetUp, radarTypeLabel, yieldLabel } from '@/lib/radars';
 
 export const metadata: Metadata = { title: 'Discovery' };
 
@@ -13,6 +14,7 @@ type Radar = {
   last_fetched_at: string | null;
   last_error: string | null;
   record_count: number;
+  prefiltered_count: number;
   yield_count: number;
   brief: { id: string; name: string } | { id: string; name: string }[] | null;
 };
@@ -28,7 +30,7 @@ export default async function DiscoveryPage() {
   const [{ data: radarRows }, ...statusCounts] = await Promise.all([
     supabase
       .from('radar')
-      .select('id, name, connector_type, status, last_fetched_at, last_error, record_count, yield_count, brief:brief_id(id, name)')
+      .select('id, name, connector_type, status, last_fetched_at, last_error, record_count, prefiltered_count, yield_count, brief:brief_id(id, name)')
       .eq('workspace_id', ws)
       .order('created_at', { ascending: false }),
     ...STATUSES.map((s) =>
@@ -42,7 +44,7 @@ export default async function DiscoveryPage() {
       <div className="flex flex-col gap-1">
         <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">Discovery</h1>
         <p className="m-0 max-w-[65ch] text-ink-muted">
-          Where each Brief is looking, how much it found, and what happened to every record. Radars are added from a Brief.
+          Where each Brief is looking, how much it found, and what happened to every record. Yield is the share of judged records that led to a Confirmed or Likely account. Radars are added from a Brief.
         </p>
       </div>
 
@@ -73,8 +75,9 @@ export default async function DiscoveryPage() {
                 <th>Source</th>
                 <th>Status</th>
                 <th>Last fetched</th>
-                <th>Fetched</th>
-                <th>New records</th>
+                <th>Records</th>
+                <th>Pre-filtered</th>
+                <th>Yield</th>
               </tr>
             </thead>
             <tbody>
@@ -84,14 +87,15 @@ export default async function DiscoveryPage() {
                   <tr key={r.id}>
                     <td>{r.name}</td>
                     <td>{brief ? <Link href={`/briefs/${brief.id}/radars`}>{brief.name}</Link> : '—'}</td>
-                    <td>{r.connector_type}</td>
+                    <td>{radarTypeLabel(r.connector_type)}</td>
                     <td>
                       <span data-radar-status={r.status}>{r.status}</span>
-                      {r.last_error ? `: ${r.last_error}` : ''}
+                      {isNotSetUp(r.last_error) ? ': not set up yet' : r.last_error ? `: ${r.last_error}` : ''}
                     </td>
                     <td>{r.last_fetched_at ? new Date(r.last_fetched_at).toLocaleString() : 'Never'}</td>
                     <td>{r.record_count}</td>
-                    <td>{r.yield_count}</td>
+                    <td>{r.prefiltered_count}</td>
+                    <td>{yieldLabel(r.record_count, r.prefiltered_count, r.yield_count)}</td>
                   </tr>
                 );
               })}

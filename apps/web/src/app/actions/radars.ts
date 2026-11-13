@@ -4,6 +4,7 @@ import { revalidatePath } from 'next/cache';
 import { redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
 import { friendlyError } from '@/lib/org';
+import { lines } from '@/lib/radars';
 import type { ActionState } from './access';
 
 /** Every write goes through an audited SQL function; the database re-checks the caller's role. */
@@ -33,15 +34,20 @@ export async function createRadar(_: ActionState, form: FormData): Promise<Actio
   if (!connectorType) return { error: 'Missing connector type.' };
   if (!name) return { error: 'Enter a name for the radar.' };
 
-  let config: unknown = {};
+  let config: Record<string, unknown> = {};
   const configRaw = text(form, 'config');
   if (configRaw) {
     try {
-      config = JSON.parse(configRaw);
+      config = JSON.parse(configRaw) as Record<string, unknown>;
     } catch {
       return { error: 'Invalid config JSON.' };
     }
   }
+  // Web-search radars may be narrowed to a few sites (one domain per line).
+  const sites = lines(String(form.get('sites') ?? '')).map((s) =>
+    s.toLowerCase().replace(/^https?:\/\//, '').replace(/\/$/, ''),
+  );
+  if (sites.length) config = { ...config, sites };
 
   const { data, error } = await rpc('create_radar', {
     p_ws: workspace,
@@ -121,4 +127,32 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
  */
 export async function csvRadarFormAction(form: FormData): Promise<void> {
   await uploadCsvRadar({}, form);
+}
+
+/** Add a user query to a radar (M2: users can edit the query set). Fields: `radar`, `brief`, `text`. */
+export async function addRadarQuery(_: ActionState, form: FormData): Promise<ActionState> {
+  const radar = text(form, 'radar');
+  const query = text(form, 'text');
+  if (!query) return { error: 'Enter a search query.' };
+  const { error } = await rpc('add_radar_query', { p_radar: radar, p_text: query });
+  if (error) return { error };
+  revalidatePath(`/briefs/${text(form, 'brief')}/radars`);
+  return { ok: true };
+}
+
+/** Remove a query from a radar. Fields: `query`, `brief`. */
+export async function removeRadarQuery(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('remove_radar_query', { p_query: text(form, 'query') });
+  if (error) return { error };
+  revalidatePath(`/briefs/${text(form, 'brief')}/radars`);
+  return { ok: true };
+}
+
+/** Replace a radar's pre-filter lexicon (one term per line). Fields: `radar`, `brief`, `terms`. */
+export async function updateRadarLexicon(_: ActionState, form: FormData): Promise<ActionState> {
+  const terms = lines(String(form.get('terms') ?? ''));
+  const { error } = await rpc('update_radar_lexicon', { p_radar: text(form, 'radar'), p_terms: terms });
+  if (error) return { error };
+  revalidatePath(`/briefs/${text(form, 'brief')}/radars`);
+  return { ok: true };
 }
