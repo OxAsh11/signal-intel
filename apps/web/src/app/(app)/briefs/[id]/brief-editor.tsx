@@ -15,7 +15,7 @@ function isPublishable(cfg: BriefConfig | null): boolean {
     (cfg.sources?.radar_types?.length ?? 0) >= 1);
 }
 
-const RADAR_TYPES = ['news_publications', 'job_postings', 'public_registries', 'tenders_procurement', 'events', 'directories', 'company_websites'];
+const RADAR_TYPES = ['news_publications', 'job_postings', 'public_registries', 'tenders_procurement', 'events', 'directories', 'public_social', 'company_websites'];
 
 function lines(arr: string[] | undefined) { return (arr ?? []).join('\n'); }
 function fromLines(s: string) { return s.split('\n').map(x => x.trim()).filter(Boolean); }
