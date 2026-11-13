@@ -69,6 +69,9 @@ SOCIAL_SITES = [
     "mastodon.social",
 ]
 
+# Targeted search for one entity is not a radar type; its records have source_type "web_search".
+TARGETED_KIND = "web_search"
+
 NOT_SET_UP = "Brave Search is not set up yet"
 
 
@@ -113,10 +116,10 @@ class BraveSearchConnector:
         fetch_page: PageFn | None = None,
         meter: SearchMeter | None = None,
     ) -> None:
-        if kind not in BRAVE_KINDS:
+        if kind not in BRAVE_KINDS and kind != TARGETED_KIND:
             raise ValueError(f"unknown Brave radar kind {kind!r}")
         self.kind = kind
-        self.source_type = BRAVE_KINDS[kind]
+        self.source_type = BRAVE_KINDS.get(kind, kind)
         self._api_key = api_key
         self._search = search or self._default_search
         self._fetch_page = fetch_page or _default_fetch_page

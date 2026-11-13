@@ -285,6 +285,11 @@ class FlakyUnclaimStore(MemoryApprovalStore):
         ("website", "source.fetch_website"),
         ("csv_upload", "source.fetch_csv"),
         ("job_post", "source.fetch_job_post"),
+        ("registry", "source.fetch_registry"),
+        ("tender", "source.fetch_tender"),
+        ("event", "source.fetch_event"),
+        ("directory", "source.fetch_directory"),
+        ("social_post", "source.fetch_social_post"),
     ],
 )
 async def test_dispatch_routes_radar_fetch_queued_to_correct_job(
@@ -477,7 +482,7 @@ async def test_dispatch_rederive_only_skips_collection() -> None:
         FakeHealth(),
         ai_configured=lambda: {"chat": True, "embed": True},
         approvals=MemoryApprovalStore(),
-        pool=MagicMock(),
+        pool=(pool := MagicMock()),
     )
     version_id = str(uuid4())
     async with app.open_async():
@@ -499,3 +504,88 @@ async def test_dispatch_rederive_only_skips_collection() -> None:
     assert "brief.rederive" in names
     assert "extract.backfill" not in names
     assert "radar.generate_queries" not in names
+    assert pool.connection.call_count == 0  # no provisioning, no radar lookups
+
+
+def test_discovery_jobs_registered(app_fixture):
+    names = set(app_fixture.tasks)
+    assert {
+        "source.fetch_registry",
+        "source.fetch_tender",
+        "source.fetch_event",
+        "source.fetch_directory",
+        "source.fetch_social_post",
+        "source.targeted_search",
+        "radar.yield_compute",
+    } <= names
+
+
+async def test_version_published_provisions_radars_before_generating_queries() -> None:
+    """A Brief's chosen sources become radars before queries are generated for active radars."""
+    sql_log: list[str] = []
+
+    class _Cur:
+        def __init__(self, rows: list) -> None:
+            self._rows = rows
+
+        async def execute(self, sql: str, args: Any = None) -> None:
+            sql_log.append(sql)
+
+        async def fetchone(self) -> tuple | None:
+            return self._rows[0] if self._rows else None
+
+        async def fetchall(self) -> list:
+            return self._rows
+
+        async def __aenter__(self) -> "_Cur":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur([(str(uuid4()),)])
+
+        async def execute(self, sql: str, args: Any = None) -> _Cur:
+            sql_log.append(sql)
+            return _Cur([])
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Ctx:
+        async def __aenter__(self) -> _Conn:
+            return _Conn()
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Pool:
+        def connection(self) -> _Ctx:
+            return _Ctx()
+
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=_Pool(),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await app.tasks[DISPATCH_TASK].defer_async(
+            event="brief.version_published",
+            event_id=str(uuid4()),
+            payload={"brief_id": str(uuid4()), "version": 2},
+        )
+        await app.run_worker_async(queues=["events"], wait=False, install_signal_handlers=False)
+
+    provision = next(i for i, q in enumerate(sql_log) if "app.provision_radars" in q)
+    radars = next(i for i, q in enumerate(sql_log) if "from public.radar" in q)
+    assert provision < radars
