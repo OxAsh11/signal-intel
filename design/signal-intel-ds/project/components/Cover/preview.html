@@ -6,46 +6,29 @@
 <title>Signal Intel</title>
 <style>
   html, body { margin:0; height:100%; }
-  body { background:var(--paper); color:var(--ink); font-family:var(--font-sans); overflow:hidden; }
+  body { background:#ffffff; color:var(--ink); font-family:var(--font-sans); overflow:hidden; }
   .cover { position:relative; height:288px; overflow:hidden; }
-  .art { position:absolute; top:0; left:480px; width:480px; height:288px; overflow:hidden; }
-  .art svg { display:block; width:480px; height:288px; }
-  .signal { fill:var(--signal); }
-  .teal { fill:var(--verdict-confirmed); }
-  .deep { fill:var(--ink); }
-  .tint { fill:var(--marker-soft); }
-  .marker { fill:var(--marker); }
-  .cut { fill:var(--on-signal); }
-  .blk { rx:var(--radius-md); }
-  .pip { rx:var(--radius-xs); }
-  .words { position:absolute; left:var(--space-8); bottom:var(--space-6); max-width:440px; }
-  .name { margin:0; font-size:104px; line-height:.95; font-weight:600; letter-spacing:-.03em; color:var(--ink); }
-  .tag { margin:var(--space-2) 0 0 4px; font-size:14px; line-height:20px; color:var(--ink-muted); }
+  /* Five feature-card tiles, one per colour family, each its exact product-card gradient. */
+  .art { position:absolute; top:24px; left:456px; display:grid; grid-template-columns:repeat(5, 88px); gap:8px; align-items:end; height:240px; }
+  .tile { border-radius:24px; }
+  .pool { height:240px; background:var(--gradient-product-card-pool); }
+  .mint { height:200px; background:var(--gradient-product-card-mint); }
+  .grass { height:160px; background:var(--gradient-product-card-grass); }
+  .mustard { height:120px; background:var(--gradient-product-card-mustard); }
+  .lava { height:80px; background:var(--gradient-product-card-lava); }
+  .words { position:absolute; left:32px; bottom:24px; max-width:400px; }
+  .name { margin:0; font-size:96px; line-height:.95; font-weight:500; letter-spacing:-.03em; color:#1f2023; }
+  .tag { margin:8px 0 0 4px; font-size:14px; line-height:20px; color:#515151; }
 </style>
 </head>
 <body>
 <div class="cover">
 <div class="art" aria-hidden="true">
-<svg viewBox="0 0 480 288" width="480" height="288">
-<!--
-  blocks      signal 160×264 slab bled off the top (the one accent, largest) · ink 184×208 bleeding off the right · verdict-confirmed 120×80 · marker-soft 120×136 tint with one marker highlight 64×16 — about 40% of 960×288
-  arrangement one tall signal slab with satellites, bottoms on one line space-8 above the edge, space-4 gutters
-  pattern     the band pips, the system's own signal-strength motif ("ordered states use form as well as colour"): four ascending pips cut from the slab in on-signal, three tall pips in marker on the ink block
-  scales      sides in space-2 multiples; gutters space-4; pip width space-2 and gap space-1 (slab), space-4 and space-2 (ink); corners radius-md on blocks, radius-xs on pips
--->
-<rect class="signal blk" x="0" y="-8" width="160" height="264" rx="6"/>
-<rect class="teal blk" x="176" y="24" width="120" height="80" rx="6"/>
-<rect class="tint blk" x="176" y="120" width="120" height="136" rx="6"/>
-<rect class="marker pip" x="192" y="224" width="64" height="16" rx="2"/>
-<rect class="deep blk" x="312" y="48" width="184" height="208" rx="6"/>
-<rect class="cut pip" x="24" y="216" width="8" height="16" rx="2"/>
-<rect class="cut pip" x="36" y="200" width="8" height="32" rx="2"/>
-<rect class="cut pip" x="48" y="184" width="8" height="48" rx="2"/>
-<rect class="cut pip" x="60" y="168" width="8" height="64" rx="2"/>
-<rect class="marker pip" x="344" y="176" width="16" height="48" rx="2"/>
-<rect class="marker pip" x="368" y="144" width="16" height="80" rx="2"/>
-<rect class="marker pip" x="392" y="112" width="16" height="112" rx="2"/>
-</svg>
+  <div class="tile pool"></div>
+  <div class="tile mint"></div>
+  <div class="tile grass"></div>
+  <div class="tile mustard"></div>
+  <div class="tile lava"></div>
 </div>
 <div class="words">
 <h1 class="name">Signal<br>Intel</h1>

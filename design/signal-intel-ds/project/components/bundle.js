@@ -1,9 +1,15 @@
-/* @ds-bundle: {"format":4,"namespace":"SignalIntel","components":[{"name":"Button"},{"name":"VerdictBadge"},{"name":"BandChip"},{"name":"StageBadge"},{"name":"ReplyClassTag"},{"name":"DerivedValue"},{"name":"EvidenceQuote"},{"name":"ScoreBreakdown"},{"name":"CostPreview"},{"name":"PushModeSwitch"},{"name":"MetricTile"},{"name":"HealthIndicator"},{"name":"ReviewQueueItem"}]} */
+/* @ds-bundle: {"format":4,"namespace":"SignalIntel","components":[{"name":"Button"},{"name":"VerdictBadge"},{"name":"BandChip"},{"name":"StageBadge"},{"name":"ReplyClassTag"},{"name":"DerivedValue"},{"name":"EvidenceQuote"},{"name":"ScoreBreakdown"},{"name":"CostPreview"},{"name":"PushModeSwitch"},{"name":"MetricTile"},{"name":"HealthIndicator"},{"name":"ReviewQueueItem"},{"name":"Card"},{"name":"FamilyTag"}]} */
 (function () {
   var React = window.React;
   var h = React.createElement;
   function cx() { return Array.prototype.filter.call(arguments, Boolean).join(" "); }
   function slug(s) { return String(s).toLowerCase().replace(/[^a-z]/g, ""); }
+
+  /* Primary buttons carry the right-pointing chevron (guidelines: 6.504 x 9.912 viewBox). */
+  function Arrow() {
+    return h("svg", { className: "si-btn-arrow", viewBox: "0 0 6.504 9.912", "aria-hidden": "true" },
+      h("path", { d: "M0.8 0 L6.5 4.956 L0.8 9.912 L0 9.1 L4.8 4.956 L0 0.8 Z", fill: "currentColor" }));
+  }
 
   /* Button. Pass `cost` for any action that spends; it is shown inside the button. */
   function Button(p) {
@@ -11,7 +17,7 @@
     var rest = Object.assign({}, p); delete rest.variant; delete rest.size; delete rest.cost; delete rest.className; delete rest.children;
     return h("button", Object.assign({ type: "button" }, rest, {
       className: cx("si-btn", variant !== "secondary" && "si-btn-" + variant, size === "sm" && "si-btn-sm", p.className)
-    }), p.children, p.cost ? h("span", { className: "si-btn-cost" }, p.cost) : null);
+    }), p.children, p.cost ? h("span", { className: "si-btn-cost" }, p.cost) : null, variant === "primary" ? h(Arrow) : null);
   }
 
   var VERDICT = {
@@ -130,7 +136,7 @@
 
   /* MetricTile: always a link to the rows behind the number. */
   function MetricTile(p) {
-    return h("a", { className: "si-metric", href: p.href || "#" },
+    return h("a", { className: cx("si-metric", p.family && "si-fam-" + p.family), href: p.href || "#" },
       h("span", { className: "si-label" }, p.label),
       h("span", { className: "si-metric-num" }, p.value),
       h("span", { className: "si-metric-sub" },
@@ -168,6 +174,19 @@
         h(Button, { variant: "quiet", size: "sm" }, "Parent / subsidiary")));
   }
 
-  var api = { Button: Button, VerdictBadge: VerdictBadge, BandChip: BandChip, StageBadge: StageBadge, ReplyClassTag: ReplyClassTag, DerivedValue: DerivedValue, EvidenceQuote: EvidenceQuote, ScoreBreakdown: ScoreBreakdown, CostPreview: CostPreview, PushModeSwitch: PushModeSwitch, MetricTile: MetricTile, HealthIndicator: HealthIndicator, ReviewQueueItem: ReviewQueueItem };
+  /* Colour families identify kinds of components: pool discovery, mint judgement,
+     grass engagement, mustard needs you, lava cost and alerts. */
+  var FAMILIES = { pool: 1, mint: 1, grass: 1, mustard: 1, lava: 1 };
+  function Card(p) {
+    var fam = FAMILIES[p.family] ? p.family : null;
+    var cls = !fam ? "si-card" : p.kind === "feature" ? "si-fcard si-fam-" + fam : "si-card si-gcard si-fam-" + fam;
+    return h("section", { className: cx(cls, p.className), style: p.style }, p.children);
+  }
+  function FamilyTag(p) {
+    var fam = FAMILIES[p.family] ? p.family : "pool";
+    return h("span", { className: "si-ftag si-fam-" + fam }, p.children);
+  }
+
+  var api = { Button: Button, VerdictBadge: VerdictBadge, BandChip: BandChip, StageBadge: StageBadge, ReplyClassTag: ReplyClassTag, DerivedValue: DerivedValue, EvidenceQuote: EvidenceQuote, ScoreBreakdown: ScoreBreakdown, CostPreview: CostPreview, PushModeSwitch: PushModeSwitch, MetricTile: MetricTile, HealthIndicator: HealthIndicator, ReviewQueueItem: ReviewQueueItem, Card: Card, FamilyTag: FamilyTag };
   window.SignalIntel = Object.assign(window.SignalIntel || {}, api);
 })();

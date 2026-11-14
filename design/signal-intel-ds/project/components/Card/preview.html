@@ -1,0 +1,29 @@
+<!-- @dsCard group="Surfaces" height=520 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>Card</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  var fams = [['pool', 'Discovery'], ['mint', 'Judgement'], ['grass', 'Engagement'], ['mustard', 'Needs you'], ['lava', 'Cost and alerts']];
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div', { className: 'si-col' },
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(170px, 1fr))', gap: 12 } },
+      fams.map(function (f) {
+        return h(S.Card, { key: f[0], family: f[0] },
+          h(S.FamilyTag, { family: f[0] }, f[1]),
+          h('strong', { style: { color: 'var(--ink)', fontWeight: 500 } }, 'Content card'),
+          h('span', { style: { fontSize: 13 } }, 'Grey card, small fade at the bottom.'));
+      })),
+    h('div', { style: { display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(240px, 1fr))', gap: 12 } },
+      h(S.Card, { family: 'mint', kind: 'feature' },
+        h(S.FamilyTag, { family: 'mint' }, 'Judgement · why now'),
+        h('h3', { className: 'si-h2', style: { fontSize: 22 } }, 'A new resort with interiors not yet awarded'),
+        h('p', { style: { margin: 0 } }, 'Copy sits in the light top; the gradient carries the identity.')),
+      h(S.Card, { family: 'grass', kind: 'feature' },
+        h(S.FamilyTag, { family: 'grass' }, 'Engagement · next step'),
+        h('h3', { className: 'si-h2', style: { fontSize: 22 } }, 'Email the Head of Projects'),
+        h('div', null, h(S.Button, { variant: 'primary' }, 'Draft email'))))));
+</script>
+</body>
+</html>
