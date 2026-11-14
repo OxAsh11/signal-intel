@@ -32,6 +32,9 @@ from signal_core.metering import CallContext
 
 log = get_logger(__name__)
 
+# Wired by the worker app: the deferrable source.targeted_search task (M2 targeted search).
+targeted_search_job: Any = None
+
 # Module-level handles wired by build_app()
 verdict_compute_job: Any | None = None
 account_card_generate_job: Any | None = None
@@ -121,8 +124,36 @@ async def compute_verdict(
         for brief in briefs
     ]
 
+    await defer_targeted_searches(briefs, values, entity_id, workspace_id)
     await _defer_account_card(pool, entity_id, workspace_id)
     return next((v for v in values if v is not None), None)
+
+
+async def defer_targeted_searches(
+    briefs: list[ActiveBrief],
+    values: list[str | None],
+    entity_id: UUID,
+    workspace_id: UUID,
+) -> int:
+    """Ask for one narrow search per Brief whose verdict on the entity is Unverified (M2).
+
+    The job itself throttles to once per Brief and entity per 30 days.
+    """
+    job = targeted_search_job
+    if job is None:
+        return 0
+    queued = 0
+    for brief, value in zip(briefs, values, strict=True):
+        if value != "Unverified":
+            continue
+        with contextlib.suppress(Exception):
+            await job.configure(queueing_lock=f"ts:{brief.brief_id}:{entity_id}").defer_async(
+                entity_id=str(entity_id),
+                brief_id=str(brief.brief_id),
+                workspace_id=str(workspace_id),
+            )
+            queued += 1
+    return queued
 
 
 async def _verdict_for_brief(

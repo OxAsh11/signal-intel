@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from typing import TYPE_CHECKING, Any, Protocol
+from typing import TYPE_CHECKING, Any, Literal, Protocol
 
 if TYPE_CHECKING:
     from signal_core.connectors.base import FetchGuard
@@ -20,6 +20,10 @@ class SourcePayload:
     payload_ref: str | None
     language: str
     raw: bytes
+    # The radar query that found this item (search connectors); None for feeds, uploads, sites.
+    query: str | None = None
+    # "snippet" when only the search engine's snippet could be kept (robots-blocked or unfetchable).
+    content_kind: Literal["full", "snippet"] = "full"
 
 
 class Connector(Protocol):

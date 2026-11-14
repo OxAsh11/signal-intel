@@ -12,7 +12,7 @@ from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.metering import CallContext
 
 PROMPT_NAME = "brief_intake"
-PROMPT_VERSION = 1
+PROMPT_VERSION = 2
 
 
 class BriefIntakeInput(BaseModel):

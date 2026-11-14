@@ -1,8 +1,9 @@
 """S1 jobs: every job type has a kill switch, checked before each run.
 
 Kill switches live in `job_type_config.enabled`. A disabled type is skipped and logged, never run.
-A job that pauses for budget (BudgetPaused) or lacks an AI key (AiNotConfigured) ends cleanly and is
-not retried; every other exception propagates to Procrastinate's retry strategy.
+A job that pauses for budget (BudgetPaused) or lacks an AI or search key (AiNotConfigured,
+SearchNotConfigured) ends cleanly and is not retried; every other exception propagates to
+Procrastinate's retry strategy.
 """
 
 import time
@@ -14,6 +15,7 @@ import procrastinate
 from psycopg_pool import AsyncConnectionPool
 
 from signal_core.ai_gateway.errors import AiNotConfigured
+from signal_core.connectors.brave import SearchNotConfigured
 from signal_core.logging import get_logger
 from signal_core.metering import BudgetPaused
 
@@ -65,7 +67,7 @@ def guarded(job_type: str, kill_switch: KillSwitch, fn: JobFn) -> JobFn:
             # it is granted. Returning (not raising) means Procrastinate never retries it.
             log.warning("job.paused", job_type=job_type, approval_id=str(paused.approval_id))
             return None
-        except AiNotConfigured:
+        except (AiNotConfigured, SearchNotConfigured):
             # A missing key will not appear by retrying; Settings shows "Not set up yet".
             log.warning("job.not_configured", job_type=job_type)
             return None

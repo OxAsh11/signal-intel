@@ -1,22 +1,17 @@
 'use client';
 
-import { useActionState } from 'react';
+import { useActionState, useState } from 'react';
 import { createRadar } from '@/app/actions/radars';
+import { RADAR_TYPES, WEB_SEARCH_TYPES } from '@/lib/radars';
 
 interface Props {
   briefId: string;
   workspaceId: string;
 }
 
-const CONNECTOR_OPTIONS = [
-  { value: 'csv_upload', label: 'CSV upload' },
-  { value: 'website', label: 'Company websites' },
-  { value: 'news', label: 'News & publications' },
-  { value: 'job_post', label: 'Job postings' },
-] as const;
-
 export function RadarAddForm({ briefId, workspaceId }: Props) {
   const [state, formAction, pending] = useActionState(createRadar, {});
+  const [type, setType] = useState('');
 
   return (
     <form action={formAction} className="flex flex-col gap-3 rounded-lg border border-border p-4">
@@ -32,9 +27,11 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
           name="connector_type"
           className="rounded border border-border bg-surface px-2 py-1.5 text-sm"
           required
+          value={type}
+          onChange={(e) => setType(e.target.value)}
         >
           <option value="">Select type…</option>
-          {CONNECTOR_OPTIONS.map(opt => (
+          {RADAR_TYPES.map((opt) => (
             <option key={opt.value} value={opt.value}>{opt.label}</option>
           ))}
         </select>
@@ -46,11 +43,29 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
           id="radar-name"
           name="name"
           type="text"
-          placeholder="e.g. Competitor websites"
+          placeholder="e.g. Hotel tenders in Germany"
           className="rounded border border-border bg-surface px-2 py-1.5 text-sm"
           required
         />
       </div>
+
+      {WEB_SEARCH_TYPES.has(type) ? (
+        <div className="flex flex-col gap-1">
+          <label htmlFor="radar-sites" className="text-xs text-ink-muted">
+            Limit to sites (optional, one domain per line)
+          </label>
+          <textarea
+            id="radar-sites"
+            name="sites"
+            rows={3}
+            placeholder={type === 'social_post' ? 'Leave empty for the main public social sites' : 'e.g. ted.europa.eu'}
+            className="rounded border border-border bg-surface px-2 py-1.5 text-sm"
+          />
+          <p className="m-0 text-xs text-ink-muted">
+            Found through web search. Pages that block crawlers keep only the search snippet.
+          </p>
+        </div>
+      ) : null}
 
       {state.error && (
         <p className="m-0 text-sm text-red-600">{state.error}</p>

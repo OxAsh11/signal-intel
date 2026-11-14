@@ -52,6 +52,7 @@ Copy the watch patterns from each `railway.json` so a change to one service does
 | `DATABASE_URL_SESSION` | | ✓ | Supabase → Connect → **Session pooler** (port 5432) |
 | `ANTHROPIC_API_KEY` | | ✓ | Phase 1 onwards |
 | `VOYAGE_API_KEY` | | ✓ | Phase 1 onwards |
+| `BRAVE_SEARCH_API_KEY` | | ✓ | Web-search radars and targeted search (M2). Optional: without it those radars show "Not set up yet" |
 | `APP_ENV` | ✓ | ✓ | `staging` or `production` |
 | `LOG_LEVEL` | | ✓ | `info` |
 | `SENTRY_DSN` | ✓ | ✓ | Optional |
@@ -98,7 +99,7 @@ pnpm py:check
 
 ## AI gateway, evals and budgets
 
-- **Keys and models (worker):** `ANTHROPIC_API_KEY` (Claude), `VOYAGE_API_KEY` (embeddings), and the model names `AI_MODEL_EXTRACT`, `AI_MODEL_JUDGE`, `AI_MODEL_PREJUDGE`, `AI_MODEL_WRITE`, `AI_MODEL_EMBED` (defaults are in `.env.example`). Without a key the matching capability is off and Settings shows "Not set up yet"; jobs that need it end without retrying.
+- **Keys and models (worker):** `ANTHROPIC_API_KEY` (Claude), `VOYAGE_API_KEY` (embeddings), and the model names `AI_MODEL_EXTRACT`, `AI_MODEL_JUDGE`, `AI_MODEL_PREJUDGE`, `AI_MODEL_WRITE`, `AI_MODEL_EMBED` (defaults are in `.env.example`). Without a key the matching capability is off and Settings shows "Not set up yet"; jobs that need it end without retrying. `BRAVE_SEARCH_API_KEY` works the same way for the web-search radars: each call is metered at $0.005 (the `brave-search` row in `model_price`) against the workspace budgets.
 - **Eval CLI:** `uv run ai-eval <name>@<version> [--fake] [--workspace <uuid>]`. `--fake` uses a deterministic provider and spends nothing. Without it, `--workspace` names the workspace to charge.
 - **Database tests:** `uv run pytest -m db` runs against `DATABASE_URL_SESSION` (the shared dev database) and leaves its test rows there.
 - **Job and approval contract:** when a call would pass a budget cap, the job pauses (it ends cleanly and is not retried) and an approval is raised. A paused job resumes only when `CallContext.job_type` is a registered task name, `job_args` are exactly that task's keyword arguments, and the task accepts an `approval_id` keyword argument. An approval covers one call's estimate, not a whole job. Eval CLI pauses are not resumable.

@@ -43,7 +43,8 @@ from api.main import build_app as build_api
 from signal_core.ai_gateway.gateway import Result
 from signal_core.ai_gateway.prompts import render
 from signal_core.config import get_settings
-from signal_core.connectors import SourcePayload
+from signal_core.connectors import SourcePayload, brave
+from signal_core.connectors.base import FetchGuard
 from signal_core.events import DISPATCH_TASK, PgOutboxStore, procrastinate_deferrer, relay_once
 from signal_core.health import PgHealthStore
 from signal_core.jobs import DbKillSwitch
@@ -148,6 +149,8 @@ class FakeGateway:
     @staticmethod
     def _answer(name: str, variables: dict[str, str]) -> dict[str, Any]:
         if name == "relevance_judge":
+            if "fake tender" in variables["content"].lower():
+                return {"relevant": False, "reason": "fixture"}
             assert "designs every project in Revit" in variables["content"], (
                 "extraction must see the page text"
             )
@@ -204,6 +207,12 @@ class FakeGateway:
             return {"next_step": "Follow up with the BIM lead."}
         if name == "reply_classify":
             return {"reply_class": "Interested"}
+        if name == "radar_queries":
+            assert variables["geographies"] == "Germany"
+            return {
+                "queries": [{"query_text": "hotel fit-out tender", "source": "hypothesis"}],
+                "lexicon": ["fake tender"],
+            }
         if name == "identity_tiebreak":
             return {"winner_index": None, "confidence": 0, "reason": "unsure"}
         raise AssertionError(f"unexpected prompt {name}")
@@ -911,7 +920,7 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             "personas": {"buyer": ["BIM"]},
             "offer": "BIM services",
             "examples": {"positive": ["a", "b", "c"], "negative": ["d", "e"]},
-            "sources": {"radar_types": ["company_websites"]},
+            "sources": {"radar_types": ["company_websites", "tenders_procurement"]},
             "icp": {"geographies": ["Germany"]},
         }
         await db.as_user(
@@ -928,8 +937,80 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         )[0]
         assert (status, tier, rejudge) == ("ready", "Expand", True)
         assert accounts >= 1
+
+        # Publishing provisions a tenders radar from the Brief's sources (M2). Brave and the
+        # page fetches are stubbed; everything else (metering, attribution, pre-filter) is real.
+        monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
+        get_settings.cache_clear()
+
+        async def fake_search(self: Any, q: str, params: dict[str, str]) -> dict[str, Any]:
+            assert q == "hotel fit-out tender" and params["freshness"] == "py"
+            return {
+                "web": {
+                    "results": [
+                        {"url": "https://tenders.example/award", "title": "Award"},
+                        {
+                            "url": "https://tenders.example/other",
+                            "title": "Other",
+                            "description": "An unrelated announcement",
+                        },
+                    ]
+                }
+            }
+
+        async def fake_page(url: str) -> tuple[int, str, str | None, bytes]:
+            if url.endswith("/award"):
+                body = b"<html><body>Hotel group fake tender: fit-out contract</body></html>"
+                return 200, "text/html", None, body
+            return 404, "text/html", None, b""
+
+        async def no_guard(self: Any, url: str) -> None:
+            return None
+
+        monkeypatch.setattr(brave.BraveSearchConnector, "_default_search", fake_search)
+        monkeypatch.setattr(brave, "_raw_get", fake_page)
+        monkeypatch.setattr(FetchGuard, "check", no_guard)
+
         version_2 = await db.as_user("select public.publish_brief(%s)", (BRIEF,))
         await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        tender_radar, lexicon = (
+            await db.admin(
+                "select id, lexicon from public.radar"
+                " where brief_id = %s and connector_type = 'tender'",
+                (BRIEF,),
+            )
+        )[0]
+        assert lexicon == ["fake tender"]
+        assert (
+            await db.one(
+                "select count(*) from public.radar where brief_id = %s and connector_type = 'website'",
+                (BRIEF,),
+            )
+            == 0
+        )  # websites need a URL list; they are not provisioned
+        records = await db.admin(
+            "select content_kind, radar_query_id is not null, extraction_status::text, status_detail"
+            " from public.source_record where radar_id = %s order by url",
+            (tender_radar,),
+        )
+        assert records == [
+            ("full", True, "irrelevant", "fixture"),
+            ("snippet", True, "irrelevant", "prefilter"),
+        ]
+        assert (
+            await db.one(
+                "select count(*) from public.usage_ledger where provider = 'brave' and unit = 'fetch'"
+            )
+            == 1
+        )
+        await db.admin("select app.compute_radar_yield()")
+        assert (
+            await db.admin(
+                "select record_count, prefiltered_count, yield_count from public.radar where id = %s",
+                (tender_radar,),
+            )
+        )[0] == (2, 1, 0)
         assert (
             await db.one(
                 "select edit_tier::text from public.brief_version where id = %s", (version_2,)

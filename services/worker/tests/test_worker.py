@@ -90,22 +90,38 @@ async def test_heartbeat_job_updates_health() -> None:
     assert set(beats) == {("system.heartbeat", "ok", "S1")}
 
 
+def canary_jobs(connector: InMemoryConnector) -> int:
+    return sum(1 for j in connector.jobs.values() if j["task_name"] == "system.canary")
+
+
 async def test_canary_job_runs_the_pipeline_check() -> None:
     health = FakeHealth()
-    app = make_app(health)
+    connector = InMemoryConnector()
+    app = make_app(health, connector=connector)
     async with app.open_async():
         await app.tasks["system.canary"].defer_async(timestamp=0)
+        # Stands in for the daily periodic tick, which fires in this run between 03:17 and
+        # 03:27 UTC: the test must hold then too.
+        await app.tasks["system.canary"].defer_async(timestamp=1)
         await run_system_queue(app)
-    assert health.canary_runs == 1
+    assert health.canary_runs == canary_jobs(connector) >= 2
 
 
 async def test_failed_canary_does_not_crash_the_worker() -> None:
     health = FakeHealth({"status": "incident", "error": "claim insert failed"})
-    app = make_app(health)
+    connector = InMemoryConnector()
+    app = make_app(health, connector=connector)
     async with app.open_async():
         await app.tasks["system.canary"].defer_async(timestamp=0)
         await run_system_queue(app)
-    assert health.canary_runs == 1  # recorded as an incident in SQL; no retry storm
+    # Recorded as an incident in SQL; no retry storm: one check per canary job (the daily
+    # periodic tick may add a job when this runs between 03:17 and 03:27 UTC).
+    assert health.canary_runs == canary_jobs(connector) >= 1
+    assert all(
+        j["status"] == "succeeded"
+        for j in connector.jobs.values()
+        if j["task_name"] == "system.canary"
+    )
 
 
 def test_health_goes_stale_without_relay() -> None:
@@ -285,6 +301,11 @@ class FlakyUnclaimStore(MemoryApprovalStore):
         ("website", "source.fetch_website"),
         ("csv_upload", "source.fetch_csv"),
         ("job_post", "source.fetch_job_post"),
+        ("registry", "source.fetch_registry"),
+        ("tender", "source.fetch_tender"),
+        ("event", "source.fetch_event"),
+        ("directory", "source.fetch_directory"),
+        ("social_post", "source.fetch_social_post"),
     ],
 )
 async def test_dispatch_routes_radar_fetch_queued_to_correct_job(
@@ -477,7 +498,7 @@ async def test_dispatch_rederive_only_skips_collection() -> None:
         FakeHealth(),
         ai_configured=lambda: {"chat": True, "embed": True},
         approvals=MemoryApprovalStore(),
-        pool=MagicMock(),
+        pool=(pool := MagicMock()),
     )
     version_id = str(uuid4())
     async with app.open_async():
@@ -499,3 +520,152 @@ async def test_dispatch_rederive_only_skips_collection() -> None:
     assert "brief.rederive" in names
     assert "extract.backfill" not in names
     assert "radar.generate_queries" not in names
+    assert pool.connection.call_count == 0  # no provisioning, no radar lookups
+
+
+def test_discovery_jobs_registered(app_fixture):
+    names = set(app_fixture.tasks)
+    assert {
+        "source.fetch_registry",
+        "source.fetch_tender",
+        "source.fetch_event",
+        "source.fetch_directory",
+        "source.fetch_social_post",
+        "source.targeted_search",
+        "radar.yield_compute",
+    } <= names
+
+
+async def test_version_published_provisions_radars_before_generating_queries() -> None:
+    """A Brief's chosen sources become radars before queries are generated for active radars."""
+    sql_log: list[str] = []
+
+    class _Cur:
+        def __init__(self, rows: list) -> None:
+            self._rows = rows
+
+        async def execute(self, sql: str, args: Any = None) -> None:
+            sql_log.append(sql)
+
+        async def fetchone(self) -> tuple | None:
+            return self._rows[0] if self._rows else None
+
+        async def fetchall(self) -> list:
+            return self._rows
+
+        async def __aenter__(self) -> "_Cur":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur([(str(uuid4()),)])
+
+        async def execute(self, sql: str, args: Any = None) -> _Cur:
+            sql_log.append(sql)
+            return _Cur([])
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Ctx:
+        async def __aenter__(self) -> _Conn:
+            return _Conn()
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Pool:
+        def connection(self) -> _Ctx:
+            return _Ctx()
+
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=_Pool(),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await app.tasks[DISPATCH_TASK].defer_async(
+            event="brief.version_published",
+            event_id=str(uuid4()),
+            payload={"brief_id": str(uuid4()), "version": 2},
+        )
+        await app.run_worker_async(queues=["events"], wait=False, install_signal_handlers=False)
+
+    provision = next(i for i, q in enumerate(sql_log) if "app.provision_radars" in q)
+    radars = next(i for i, q in enumerate(sql_log) if "from public.radar" in q)
+    assert provision < radars
+    # Radars waiting for a key (error) or gone quiet (silent) get fresh queries too.
+    assert "status in ('active', 'error', 'silent')" in sql_log[radars]
+
+
+async def test_brave_radar_without_queries_asks_for_them() -> None:
+    """A radar added by hand has no queries yet: the fetch asks for them instead of idling."""
+    radar_id, org, ws, brief = (str(uuid4()) for _ in range(4))
+
+    class _Cur:
+        def __init__(self) -> None:
+            self._rows: list = []
+
+        async def execute(self, sql: str, args: Any = None) -> None:
+            if "from public.radar where id" in sql:
+                self._rows = [(radar_id, org, ws, brief, "tender", {}, {})]
+            else:
+                self._rows = []
+
+        async def fetchone(self) -> tuple | None:
+            return self._rows[0] if self._rows else None
+
+        async def fetchall(self) -> list:
+            return self._rows
+
+        async def __aenter__(self) -> "_Cur":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Pool:
+        def connection(self) -> _Conn:
+            return _Conn()
+
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=_Pool(),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await app.tasks["source.fetch_tender"].defer_async(
+            radar_id=radar_id, org_id=org, workspace_id=ws, brief_id=brief
+        )
+        await app.run_worker_async(queues=["fetch"], wait=False, install_signal_handlers=False)
+
+    (gq,) = [j for j in connector.jobs.values() if j["task_name"] == "radar.generate_queries"]
+    assert gq["args"] == {"radar_id": radar_id, "org_id": org, "workspace_id": ws}
+    fetch = [j for j in connector.jobs.values() if j["task_name"] == "source.fetch_tender"]
+    assert [j["status"] for j in fetch] == ["succeeded"]

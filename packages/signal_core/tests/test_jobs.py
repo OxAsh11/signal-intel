@@ -67,6 +67,22 @@ async def test_missing_key_ends_job_without_retry() -> None:
     assert any(e["event"] == "job.not_configured" for e in logs)
 
 
+async def test_search_not_configured_ends_cleanly() -> None:
+    from signal_core.connectors.brave import SearchNotConfigured
+
+    async def body() -> None:
+        raise SearchNotConfigured("no key")
+
+    with capture_logs() as logs:
+        assert (
+            await guarded(
+                "source.fetch_tender", FakeKillSwitch({"source.fetch_tender": True}), body
+            )()
+            is None
+        )
+    assert any(e["event"] == "job.not_configured" for e in logs)
+
+
 async def test_other_exceptions_still_propagate() -> None:
     async def body() -> Any:
         raise RuntimeError("boom")

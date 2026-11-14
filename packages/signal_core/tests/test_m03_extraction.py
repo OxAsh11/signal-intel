@@ -21,6 +21,7 @@ from signal_core.modules.m03_extraction import (
     extract_backfill,
     extract_structured,
     judge_relevance,
+    passes_lexicon,
 )
 
 # ---------------------------------------------------------------------------
@@ -77,6 +78,9 @@ class FakeConn:
         """Return canned rows based on the SQL pattern."""
         self.calls.append((sql, args))
         sql_lower = sql.lower()
+        if "lexicon" in sql_lower:
+            lexicon = self._source_record.get("lexicon")
+            return [(lexicon,)] if lexicon is not None else []
         if "public.source_record" in sql_lower:
             sr = self._source_record
             if "extraction_status" in sql_lower:
@@ -230,6 +234,41 @@ async def test_judge_relevance_ai_error_updates_status_and_reraises() -> None:
     status_calls = [args for sql, args in pool.conn.calls if "update_extraction_status" in sql]
     assert len(status_calls) == 1
     assert "failed" in status_calls[0]
+
+
+def test_passes_lexicon_casefold() -> None:
+    assert passes_lexicon("AUSSCHREIBUNG für Hotels", ["ausschreibung"])
+    assert passes_lexicon("Société Générale", ["société"])
+    fullwidth = "".join(chr(0xFEE0 + ord(c)) for c in "Tender")  # NFKC folds these
+    assert passes_lexicon(f"{fullwidth} notice", ["tender"])
+    assert not passes_lexicon("nothing here", ["tender"])
+    assert passes_lexicon("x", [])
+    # Accents are ignored on both sides.
+    assert passes_lexicon("Hotel renovation planned", ["rénovation"])
+    assert passes_lexicon("Rénovation de l'hôtel", ["renovation"])
+    assert passes_lexicon("Straße", ["strasse"])
+
+
+async def test_judge_relevance_prefilter_skips_ai() -> None:
+    """A record with none of its radar's lexicon terms is pre-filtered without an AI call."""
+    gw = _make_gateway(json.dumps({"relevant": True, "reason": "unused"}))
+    record = _fake_source_record() | {"lexicon": ["tender", "procurement"]}
+    pool = FakePool(record)
+
+    result = await judge_relevance(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert result is False
+    status_calls = [args for sql, args in pool.conn.calls if "update_extraction_status" in sql]
+    assert status_calls == [(str(SOURCE_RECORD_ID), "irrelevant", "prefilter")]
+    assert gw._budget.lines == []  # type: ignore[attr-defined]
+
+
+async def test_judge_relevance_lexicon_hit_goes_to_ai() -> None:
+    gw = _make_gateway(json.dumps({"relevant": True, "reason": "ok"}))
+    record = _fake_source_record() | {"lexicon": ["hiring"]}
+    pool = FakePool(record)
+
+    assert await judge_relevance(pool, gw, SOURCE_RECORD_ID, _ctx()) is True
 
 
 # ---------------------------------------------------------------------------

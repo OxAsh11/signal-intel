@@ -34,6 +34,8 @@ class Settings(BaseSettings):
 
     # Enrichment provider (M7). Without a key the provider is skipped: "Not set up yet".
     hunter_api_key: SecretStr | None = None
+    # Brave Search (M2 web-search radars, targeted search). Unset: "Not set up yet".
+    brave_search_api_key: SecretStr | None = None
 
     # Supabase project URL (same as NEXT_PUBLIC_SUPABASE_URL) and service key —
     # used by the worker to download uploaded files from Supabase Storage.

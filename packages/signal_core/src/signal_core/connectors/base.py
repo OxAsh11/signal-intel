@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import ipaddress
 import os
@@ -18,6 +19,11 @@ _USER_AGENT = "signal-intel"
 
 class FetchBlocked(Exception):
     """Raised when the target URL resolves to a private / reserved IP address."""
+
+
+class FetchUnresolvable(FetchBlocked):
+    """The hostname does not resolve. A FetchBlocked, so callers that only know that still stop;
+    search connectors can tell it apart from a private address and keep the search snippet."""
 
 
 class FetchDisallowed(Exception):
@@ -75,7 +81,8 @@ class FetchGuard:
         if not host:
             raise FetchBlocked(f"Cannot parse hostname from URL: {url!r}")
 
-        self._check_private_ip(host)
+        # getaddrinfo blocks: resolve on a thread so other jobs keep running.
+        await asyncio.to_thread(self._check_private_ip, host)
         await self._check_robots(url, parsed)
 
     # ------------------------------------------------------------------
@@ -88,7 +95,7 @@ class FetchGuard:
         try:
             results = socket.getaddrinfo(host, None)
         except socket.gaierror as exc:
-            raise FetchBlocked(f"Cannot resolve host {host!r}: {exc}") from exc
+            raise FetchUnresolvable(f"Cannot resolve host {host!r}: {exc}") from exc
 
         for _family, _type, _proto, _canonname, sockaddr in results:
             addr_str = sockaddr[0]  # IPv4: (host, port); IPv6: (host, port, flow, scope)
