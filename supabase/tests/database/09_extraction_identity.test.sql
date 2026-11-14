@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(12);
+select plan(15);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Well-known IDs from migration 0010 (canary predicate + extractor_version)
@@ -79,6 +79,16 @@ insert into ids select 'rev',
     (select v from ids where k = 'men'),
     (select v from ids where k = 'ent'),
     'name_country', 75::smallint);
+
+-- Two more review items: one resolved as a new company, one skipped (Part 8.1 feedback tests).
+insert into ids select 'men2', app.create_mention((select v from ids where k = 'org'), (select v from ids where k = 'sr'),
+  'company'::public.entity_type, 'Acme Holdings', null, null, '{}'::jsonb);
+insert into ids select 'men3', app.create_mention((select v from ids where k = 'org'), (select v from ids where k = 'sr'),
+  'company'::public.entity_type, 'Acme Group', null, null, '{}'::jsonb);
+insert into ids select 'rev2', app.create_review_item((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+  (select v from ids where k = 'men2'), (select v from ids where k = 'ent'), 'name_country', 60::smallint);
+insert into ids select 'rev3', app.create_review_item((select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+  (select v from ids where k = 'men3'), (select v from ids where k = 'ent'), 'name_country', 55::smallint);
 
 -- ── Test 1: authenticated cannot call app.update_extraction_status ───────────
 set local role authenticated;
@@ -225,6 +235,19 @@ select lives_ok(
   '11. editor can resolve review_item with merge action'
 );
 reset role;
+
+-- ── Tests 13–15: identity decisions are stored as feedback (PRD Part 8.1) ─────
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-9000-000000000e02","role":"authenticated"}', true);
+select app.resolve_review_item((select v from ids where k = 'rev2'), 'create_new');
+select app.resolve_review_item((select v from ids where k = 'rev3'), 'skip');
+reset role;
+select is((select action from public.feedback where target_type = 'identity_match' and target_id = (select v from ids where k = 'rev')),
+  'confirm', '13. merging into the suggested company confirms the match');
+select is((select action from public.feedback where target_type = 'identity_match' and target_id = (select v from ids where k = 'rev2')),
+  'reject', '14. creating a new company rejects the suggested match');
+select is((select count(*)::int from public.feedback where target_type = 'identity_match' and target_id = (select v from ids where k = 'rev3')),
+  0, '15. skipping records no judgement');
 
 -- ── Test 12: review_item RLS — workspace isolation ───────────────────────────
 -- Beta-org user (00000000-0000-4000-9000-000000000e04) has a valid auth token

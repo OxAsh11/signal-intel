@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(35);
+select plan(38);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- J = Editor, K = Viewer, B = owner of a second organisation.
@@ -172,6 +172,12 @@ select is((select count(*)::int from public.feedback where target_id = (select v
 select ok((select (inputs ->> 'human_override')::boolean and value = 'Contradicted' from public.verdict
             where id = (select v from ids where k = 'ver')),
   '26. the corrected verdict is held by the human mark');
+select is((select jsonb_array_length(examples) from public.evaluation_set where brief_version_id = (select v from ids where k = 'v3')),
+  2, '26a. every human mark joins the Brief version''s evaluation set');
+select is((select examples -> 0 ->> 'label' from public.evaluation_set where brief_version_id = (select v from ids where k = 'v3')),
+  'Contradicted', '26b. the evaluation example is labelled with the human verdict');
+select ok(not exists (select 1 from information_schema.tables where table_schema = 'public'
+            and table_name in ('research_job', 'enrichment_job')), '26c. unused job tables are gone');
 select ok((select draft_config -> 'examples' -> 'negative' ? 'Pilot Co 1' from public.brief
             where id = (select v from ids where k = 'a')),
   '27. a wrong verdict can add the account to the negative examples');
