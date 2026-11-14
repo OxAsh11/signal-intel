@@ -1,13 +1,13 @@
 'use client';
 import { useActionState } from 'react';
-import { ChipField } from './chip-field';
+import { ChipField, fieldInput } from './chip-field';
 import { startPilot } from '@/app/actions/briefs';
-import { Button } from '@signal/ui';
+import { Button, Card, FamilyTag } from '@signal/ui';
 import type { BriefConfig } from '@/lib/briefs';
 
 type Brief = { id: string; state: string; draft_config: BriefConfig | null };
 
-function isPublishable(cfg: BriefConfig | null): boolean {
+export function isPublishable(cfg: BriefConfig | null): boolean {
   if (!cfg) return false;
   return !!(cfg.offer?.trim() && cfg.hypothesis?.trim() &&
     (cfg.examples?.positive?.length ?? 0) >= 3 &&
@@ -15,151 +15,197 @@ function isPublishable(cfg: BriefConfig | null): boolean {
     (cfg.sources?.radar_types?.length ?? 0) >= 1);
 }
 
-const RADAR_TYPES = ['news_publications', 'job_postings', 'public_registries', 'tenders_procurement', 'events', 'directories', 'public_social', 'company_websites'];
+/** Source types in people's words. */
+const SOURCE_LABELS: Record<string, string> = {
+  news_publications: 'News and trade press',
+  job_postings: 'Job postings',
+  public_registries: 'Public registries and permits',
+  tenders_procurement: 'Tenders and procurement',
+  events: 'Events (speakers and exhibitors)',
+  directories: 'Directories and partner lists',
+  public_social: 'Public social posts',
+  company_websites: 'Company websites',
+};
+const RADAR_TYPES = Object.keys(SOURCE_LABELS);
 
-function lines(arr: string[] | undefined) { return (arr ?? []).join('\n'); }
-function fromLines(s: string) { return s.split('\n').map(x => x.trim()).filter(Boolean); }
+const lines = (arr: string[] | undefined) => (arr ?? []).join('\n');
+const fromLines = (s: string) => s.split('\n').map((x) => x.trim()).filter(Boolean);
+const list = (arr: string[] | undefined) => (arr?.length ? arr.join(', ') : null);
 
-export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { brief: Brief; canEdit: boolean; workspaceId: string }) {
+function Pairs({ rows }: { rows: [string, string | null][] }) {
+  const shown = rows.filter(([, v]) => v);
+  if (!shown.length) return <span className="text-ink-muted">Not drafted yet.</span>;
+  return (
+    <dl className="m-0 grid grid-cols-[repeat(auto-fit,minmax(200px,1fr))] gap-3">
+      {shown.map(([k, v]) => (
+        <div key={k} className="flex flex-col gap-0.5">
+          <dt className="text-[13px] text-ink-muted">{k}</dt>
+          <dd className="m-0 font-medium text-ink">{v}</dd>
+        </div>
+      ))}
+    </dl>
+  );
+}
+
+/**
+ * Brief Studio, step 2: the AI's draft as plain statements. Each part shows what the AI wrote;
+ * "Change" opens an editor for that part only.
+ */
+export function BriefEditor({ brief, canEdit }: { brief: Brief; canEdit: boolean; workspaceId: string }) {
   const cfg: BriefConfig = brief.draft_config ?? {};
-  const [pubState, pubFormAction, pubPending] = useActionState(startPilot, {});
-  const canPublish = brief.state === 'Draft' && canEdit && isPublishable(cfg);
-  const editorDisabled = !canEdit;
+  const disabled = !canEdit;
+  const c0 = cfg as Record<string, unknown>;
 
   return (
-    <div className="flex flex-col gap-4">
-      <div className="flex flex-col gap-2">
-        <ChipField briefId={brief.id} fieldName="offer" label="Offer" required disabled={editorDisabled}
-          currentConfig={cfg as Record<string, unknown>}
-          renderValue={c => <span className="line-clamp-1">{String(c.offer ?? '')}</span>}
-          renderEditor={(c, onChange) => (
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">What is being sold or offered?</span>
-              <input defaultValue={String(c.offer ?? '')}
-                onChange={e => onChange({ ...c, offer: e.target.value })}
-                className="rounded border border-line bg-surface-raised px-3 py-2 text-sm" />
-            </label>
-          )} />
-        <ChipField briefId={brief.id} fieldName="hypothesis" label="Hypothesis" required disabled={editorDisabled}
-          currentConfig={cfg as Record<string, unknown>}
-          renderValue={c => <span className="line-clamp-1">{String(c.hypothesis ?? '')}</span>}
-          renderEditor={(c, onChange) => (
-            <label className="flex flex-col gap-1">
-              <span className="text-xs text-ink-muted">The observable public fact that marks a target.</span>
-              <textarea rows={3} defaultValue={String(c.hypothesis ?? '')}
-                onChange={e => onChange({ ...c, hypothesis: e.target.value })}
-                className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y" />
-            </label>
-          )} />
-        <ChipField briefId={brief.id} fieldName="examples" label="Examples" required disabled={editorDisabled}
-          currentConfig={cfg as Record<string, unknown>}
-          renderValue={c => {
-            const ex = c.examples as { positive?: string[]; negative?: string[] } | undefined;
-            return <span>{ex?.positive?.length ?? 0} positive · {ex?.negative?.length ?? 0} negative</span>;
-          }}
-          renderEditor={(c, onChange) => {
-            const ex = (c.examples as { positive?: string[]; negative?: string[] } | undefined) ?? {};
-            return (
-              <div className="flex flex-col gap-2">
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-ink-muted">Positive examples (≥ 3, one per line)</span>
-                  <textarea rows={4} defaultValue={lines(ex.positive)}
-                    onChange={e => onChange({ ...c, examples: { ...ex, positive: fromLines(e.target.value) } })}
-                    className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
-                </label>
-                <label className="flex flex-col gap-1">
-                  <span className="text-xs text-ink-muted">Negative examples (≥ 2, one per line)</span>
-                  <textarea rows={3} defaultValue={lines(ex.negative)}
-                    onChange={e => onChange({ ...c, examples: { ...ex, negative: fromLines(e.target.value) } })}
-                    className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
-                </label>
-              </div>
-            );
-          }} />
-        <ChipField briefId={brief.id} fieldName="sources" label="Sources" required disabled={editorDisabled}
-          isEmpty={c => ((c.sources as { radar_types?: string[] } | undefined)?.radar_types?.length ?? 0) === 0}
-          currentConfig={cfg as Record<string, unknown>}
-          renderValue={c => <span>{((c.sources as { radar_types?: string[] } | undefined)?.radar_types ?? []).join(', ') || 'None'}</span>}
-          renderEditor={(c, onChange) => {
-            const current = ((c.sources as { radar_types?: string[] } | undefined)?.radar_types ?? []) as string[];
-            return (
-              <fieldset className="flex flex-col gap-1">
-                <legend className="text-xs text-ink-muted mb-1">Select at least one radar type</legend>
-                {RADAR_TYPES.map(t => (
-                  <label key={t} className="flex items-center gap-2 text-sm">
-                    <input type="checkbox" checked={current.includes(t)}
-                      onChange={e => {
-                        const next = e.target.checked ? [...current, t] : current.filter(x => x !== t);
-                        onChange({ ...c, sources: { ...((c.sources as object) ?? {}), radar_types: next } });
-                      }} />
-                    {t.replace(/_/g, ' ')}
-                  </label>
-                ))}
-              </fieldset>
-            );
-          }} />
-        <ChipField briefId={brief.id} fieldName="icp" label="ICP" disabled={editorDisabled}
-          currentConfig={cfg as Record<string, unknown>}
-          renderValue={c => {
-            const icp = c.icp as BriefConfig['icp'];
-            const count = (icp?.verticals?.length ?? 0) + (icp?.geographies?.length ?? 0) + (icp?.size_bands?.length ?? 0) + (icp?.commercial_roles?.length ?? 0);
-            return <span>{count} attributes</span>;
-          }}
-          renderEditor={(c, onChange) => {
-            const icp = (c.icp as BriefConfig['icp'] | undefined) ?? {};
-            return (
-              <div className="flex flex-col gap-2">
-                {(['verticals', 'geographies', 'size_bands', 'commercial_roles'] as const).map(field => (
-                  <label key={field} className="flex flex-col gap-1">
-                    <span className="text-xs text-ink-muted capitalize">{field.replace('_', ' ')} (one per line)</span>
-                    <textarea rows={2} defaultValue={lines(icp[field])}
-                      onChange={e => onChange({ ...c, icp: { ...icp, [field]: fromLines(e.target.value) } })}
-                      className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
-                  </label>
-                ))}
-              </div>
-            );
-          }} />
-        <ChipField briefId={brief.id} fieldName="personas" label="Personas" disabled={editorDisabled}
-          currentConfig={cfg as Record<string, unknown>}
-          renderValue={c => {
-            const p = c.personas as BriefConfig['personas'];
-            const count = (p?.buyer?.length ?? 0) + (p?.user?.length ?? 0) + (p?.influencer?.length ?? 0);
-            return <span>{count} attributes</span>;
-          }}
-          renderEditor={(c, onChange) => {
-            const p = (c.personas as BriefConfig['personas'] | undefined) ?? {};
-            return (
-              <div className="flex flex-col gap-2">
-                {(['buyer', 'user', 'influencer'] as const).map(field => (
-                  <label key={field} className="flex flex-col gap-1">
-                    <span className="text-xs text-ink-muted capitalize">{field.replace('_', ' ')} (one per line)</span>
-                    <textarea rows={2} defaultValue={lines(p[field])}
-                      onChange={e => onChange({ ...c, personas: { ...p, [field]: fromLines(e.target.value) } })}
-                      className="rounded border border-line bg-surface-raised px-3 py-2 text-sm resize-y font-mono text-xs" />
-                  </label>
-                ))}
-              </div>
-            );
-          }} />
-      </div>
+    <div className="flex min-w-0 flex-col gap-4">
+      <ChipField briefId={brief.id} fieldName="hypothesis" label="The signal we look for" required disabled={disabled} currentConfig={c0}
+        renderValue={(c) => <p className="m-0 max-w-[70ch] text-[17px] leading-[1.55]">{String(c.hypothesis ?? '')}</p>}
+        renderEditor={(c, onChange) => (
+          <label className="flex flex-col gap-1">
+            <span className="text-[13px] text-ink-muted">The public event that marks a company as ready to buy.</span>
+            <textarea rows={3} defaultValue={String(c.hypothesis ?? '')} onChange={(e) => onChange({ ...c, hypothesis: e.target.value })} className={`${fieldInput} resize-y`} />
+          </label>
+        )} />
 
-      {brief.state === 'Draft' && canEdit && (
-        <form action={pubFormAction} className="pt-2">
-          <fieldset disabled={pubPending} className="contents">
-            <input type="hidden" name="brief" value={brief.id} />
-            <Button type="submit" variant="primary" disabled={!canPublish}>
-              Start pilot
-            </Button>
-            <p className="mt-1 text-xs text-ink-muted">
-              {canPublish
-                ? 'The pilot scores a small sample of accounts so you can check the verdicts before going live.'
-                : 'Fill in all required fields before starting the pilot.'}
-            </p>
-            {pubState?.error && <p className="text-xs text-danger mt-1">{pubState.error}</p>}
-          </fieldset>
-        </form>
-      )}
+      <ChipField briefId={brief.id} fieldName="icp" label="Who fits" disabled={disabled} currentConfig={c0}
+        isEmpty={(c) => !Object.values((c.icp as BriefConfig['icp']) ?? {}).some((v) => (v as string[] | undefined)?.length)}
+        renderValue={(c) => {
+          const icp = (c.icp as BriefConfig['icp']) ?? {};
+          return <Pairs rows={[['Countries', list(icp.geographies)], ['Industries', list(icp.verticals)], ['Size', list(icp.size_bands)], ['Their role', list(icp.commercial_roles)]]} />;
+        }}
+        renderEditor={(c, onChange) => {
+          const icp = (c.icp as BriefConfig['icp'] | undefined) ?? {};
+          const fields = [['geographies', 'Countries'], ['verticals', 'Industries'], ['size_bands', 'Size'], ['commercial_roles', 'Their role']] as const;
+          return (
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
+              {fields.map(([field, label]) => (
+                <label key={field} className="flex flex-col gap-1">
+                  <span className="text-[13px] text-ink-muted">{label} (one per line)</span>
+                  <textarea rows={3} defaultValue={lines(icp[field])} onChange={(e) => onChange({ ...c, icp: { ...icp, [field]: fromLines(e.target.value) } })} className={`${fieldInput} resize-y`} />
+                </label>
+              ))}
+            </div>
+          );
+        }} />
+
+      <ChipField briefId={brief.id} fieldName="examples" label="Examples the AI learns from" required disabled={disabled} currentConfig={c0}
+        renderValue={(c) => {
+          const ex = (c.examples as { positive?: string[]; negative?: string[] } | undefined) ?? {};
+          return (
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-4">
+              <div className="flex flex-col gap-1.5">
+                <span className="font-medium text-verdict-confirmed">● Match</span>
+                {(ex.positive ?? []).map((x) => <span key={x}>{x}</span>)}
+              </div>
+              <div className="flex flex-col gap-1.5">
+                <span className="font-medium text-danger">✕ Not a match</span>
+                {(ex.negative ?? []).map((x) => <span key={x}>{x}</span>)}
+              </div>
+            </div>
+          );
+        }}
+        renderEditor={(c, onChange) => {
+          const ex = (c.examples as { positive?: string[]; negative?: string[] } | undefined) ?? {};
+          return (
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-3">
+              <label className="flex flex-col gap-1">
+                <span className="text-[13px] text-ink-muted">Match: at least 3, one per line</span>
+                <textarea rows={5} defaultValue={lines(ex.positive)} onChange={(e) => onChange({ ...c, examples: { ...ex, positive: fromLines(e.target.value) } })} className={`${fieldInput} resize-y`} />
+              </label>
+              <label className="flex flex-col gap-1">
+                <span className="text-[13px] text-ink-muted">Not a match: at least 2, one per line</span>
+                <textarea rows={5} defaultValue={lines(ex.negative)} onChange={(e) => onChange({ ...c, examples: { ...ex, negative: fromLines(e.target.value) } })} className={`${fieldInput} resize-y`} />
+              </label>
+            </div>
+          );
+        }} />
+
+      <ChipField briefId={brief.id} fieldName="sources" label="Where we will look" required disabled={disabled} currentConfig={c0}
+        isEmpty={(c) => ((c.sources as { radar_types?: string[] } | undefined)?.radar_types?.length ?? 0) === 0}
+        renderValue={(c) => (
+          <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
+            {((c.sources as { radar_types?: string[] } | undefined)?.radar_types ?? []).map((t) => (
+              <li key={t} className="si-ftag si-fam-pool">{SOURCE_LABELS[t] ?? t.replace(/_/g, ' ')}</li>
+            ))}
+          </ul>
+        )}
+        renderEditor={(c, onChange) => {
+          const current = ((c.sources as { radar_types?: string[] } | undefined)?.radar_types ?? []) as string[];
+          return (
+            <fieldset className="m-0 grid grid-cols-[repeat(auto-fit,minmax(240px,1fr))] gap-2 border-0 p-0">
+              <legend className="mb-2 text-[13px] text-ink-muted">Choose at least one</legend>
+              {RADAR_TYPES.map((t) => (
+                <label key={t} className="flex items-center gap-2 text-[14px] text-ink">
+                  <input type="checkbox" checked={current.includes(t)} onChange={(e) => {
+                    const next = e.target.checked ? [...current, t] : current.filter((x) => x !== t);
+                    onChange({ ...c, sources: { ...((c.sources as object) ?? {}), radar_types: next } });
+                  }} />
+                  {SOURCE_LABELS[t]}
+                </label>
+              ))}
+            </fieldset>
+          );
+        }} />
+
+      <ChipField briefId={brief.id} fieldName="personas" label="Who to contact" disabled={disabled} currentConfig={c0}
+        isEmpty={(c) => !Object.values((c.personas as BriefConfig['personas']) ?? {}).some((v) => (v as string[] | undefined)?.length)}
+        renderValue={(c) => {
+          const p = (c.personas as BriefConfig['personas']) ?? {};
+          return <Pairs rows={[['Decides', list(p.buyer)], ['Uses it', list(p.user)], ['Influences', list(p.influencer)]]} />;
+        }}
+        renderEditor={(c, onChange) => {
+          const p = (c.personas as BriefConfig['personas'] | undefined) ?? {};
+          const fields = [['buyer', 'Decides'], ['user', 'Uses it'], ['influencer', 'Influences']] as const;
+          return (
+            <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3">
+              {fields.map(([field, label]) => (
+                <label key={field} className="flex flex-col gap-1">
+                  <span className="text-[13px] text-ink-muted">{label}: job titles, one per line</span>
+                  <textarea rows={3} defaultValue={lines(p[field])} onChange={(e) => onChange({ ...c, personas: { ...p, [field]: fromLines(e.target.value) } })} className={`${fieldInput} resize-y`} />
+                </label>
+              ))}
+            </div>
+          );
+        }} />
+
+      <ChipField briefId={brief.id} fieldName="offer" label="What you sell" required disabled={disabled} currentConfig={c0}
+        renderValue={(c) => <p className="m-0">{String(c.offer ?? '')}</p>}
+        renderEditor={(c, onChange) => (
+          <label className="flex flex-col gap-1">
+            <span className="text-[13px] text-ink-muted">In one line, what you offer these companies.</span>
+            <input defaultValue={String(c.offer ?? '')} onChange={(e) => onChange({ ...c, offer: e.target.value })} className={fieldInput} />
+          </label>
+        )} />
     </div>
+  );
+}
+
+/** Right rail on a Draft: start the pilot once the required parts are in. */
+export function StartPilotCard({ brief, canEdit }: { brief: Brief; canEdit: boolean }) {
+  const [state, formAction, pending] = useActionState(startPilot, {});
+  const ready = isPublishable(brief.draft_config);
+  return (
+    <Card family="mint" kind="feature" aria-labelledby="pilot-h">
+      <FamilyTag family="mint">Next · pilot</FamilyTag>
+      <h2 id="pilot-h" className="si-h2 text-[22px]">Test the Brief on 20 companies</h2>
+      <ol className="m-0 flex flex-col gap-1.5 pl-5 text-[14px]">
+        <li>Radars collect from the sources you chose.</li>
+        <li>The AI judges 20 companies and shows the quotes behind each verdict.</li>
+        <li>You mark each verdict right or wrong; wrong ones become examples.</li>
+        <li>At 80% right, go live and the engine runs on every company it finds.</li>
+      </ol>
+      {canEdit ? (
+        <form action={formAction} className="flex flex-col gap-2">
+          <input type="hidden" name="brief" value={brief.id} />
+          <div>
+            <Button type="submit" variant="primary" disabled={!ready || pending}>Start pilot</Button>
+          </div>
+          <span className="text-[13px] text-ink">
+            {ready ? 'Nothing is emailed during a pilot.' : 'Check the parts marked "Needed to start the pilot" first.'}
+          </span>
+          {state?.error ? <p className="m-0 text-[13px] text-danger">{state.error}</p> : null}
+        </form>
+      ) : null}
+    </Card>
   );
 }

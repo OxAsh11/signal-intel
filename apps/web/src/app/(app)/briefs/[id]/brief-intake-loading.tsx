@@ -9,11 +9,15 @@ export function BriefIntakeLoading({ briefId }: { briefId: string }) {
     return () => clearInterval(id);
   }, [router]);
   return (
-    <div className="flex flex-col gap-3 rounded-md border border-line bg-surface p-6 animate-pulse">
-      <p className="m-0 text-ink-muted">The AI is drafting your Brief. This takes about 10–15 seconds…</p>
-      <div className="h-4 w-48 rounded bg-line" />
-      <div className="h-4 w-72 rounded bg-line" />
-      <div className="h-4 w-56 rounded bg-line" />
-    </div>
+    <section className="si-fcard si-fam-mint" aria-live="polite">
+      <span className="si-ftag si-fam-mint">Drafting</span>
+      <h2 className="si-h2 text-[22px]">The AI is drafting your Brief</h2>
+      <p className="m-0">It writes the signal to look for, who fits, examples, sources and who to contact. About 15 seconds; this page updates by itself.</p>
+      <div className="flex flex-col gap-2 animate-pulse" aria-hidden="true">
+        <div className="h-3 w-2/3 rounded-xs bg-surface/70" />
+        <div className="h-3 w-1/2 rounded-xs bg-surface/70" />
+        <div className="h-3 w-3/5 rounded-xs bg-surface/70" />
+      </div>
+    </section>
   );
 }

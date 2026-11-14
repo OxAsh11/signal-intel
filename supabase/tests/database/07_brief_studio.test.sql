@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(20);
+select plan(23);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 insert into auth.users (id, email, aud, role) values
@@ -53,6 +53,25 @@ select is(
   'pending',
   '1. create_brief sets intake_status=pending'
 );
+
+-- ── 1a–1c. the intake gets the full description (AI-first Brief Studio) ──────
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000aa02","role":"authenticated"}', true);
+insert into ids select 'brief_d', public.create_brief((select v from ids where k = 'ws'), 'Hotel openings',
+  'We fit out hotel interiors. Find hotel groups opening new properties in India and the Gulf.');
+reset role;
+select is((select payload ->> 'description' from public.outbox
+            where aggregate_id = (select v from ids where k = 'brief_d') and event = 'brief.intake_requested'),
+  'We fit out hotel interiors. Find hotel groups opening new properties in India and the Gulf.',
+  '1a. the intake event carries the description');
+select is((select payload ->> 'description' from public.outbox
+            where aggregate_id = (select v from ids where k = 'brief_a') and event = 'brief.intake_requested'),
+  'AI Brief A', '1b. without a description the intake falls back to the name');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000aa02","role":"authenticated"}', true);
+select throws_ok(format('select public.create_brief(%L::uuid, %L, %L)', (select v from ids where k = 'ws'), 'Too long', repeat('x', 4001)),
+  '22023', null, '1c. a description over 4000 characters is refused');
+reset role;
 
 -- ── 2. publish_brief with missing offer raises 42501 ─────────────────────────
 -- draft_config is NULL at this point; offer validation must reject immediately.

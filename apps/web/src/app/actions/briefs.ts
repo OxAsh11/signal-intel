@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import { refresh } from 'next/cache';
 import { createClient } from '@/lib/supabase/server';
 import { friendlyError } from '@/lib/org';
+import { nameFromDescription } from '@/lib/briefs';
 import type { ActionState } from './access';
 
 /** Every write goes through an audited SQL function; the database re-checks the caller's role. */
@@ -16,12 +17,19 @@ async function rpc(fn: string, args: Record<string, unknown>) {
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
+/** Brief Studio step 1: everything the person wrote goes to the AI, which drafts the whole Brief. */
 export async function createBrief(_: ActionState, form: FormData): Promise<ActionState> {
-  const name = text(form, 'name');
   const workspace = text(form, 'workspace');
-  if (!name) return { error: 'Enter a name for the Brief.' };
+  const description = text(form, 'description');
+  const website = text(form, 'website');
+  const customer = text(form, 'customer');
   if (!workspace) return { error: 'Choose a workspace first.' };
-  const { data, error } = await rpc('create_brief', { p_ws: workspace, p_name: name });
+  if (description.length < 20) return { error: 'Describe the companies you want to find in a sentence or two.' };
+  const full = [description, website && `Our website: ${website}`, customer && `A customer we won: ${customer}`]
+    .filter(Boolean)
+    .join('\n');
+  const name = text(form, 'name') || nameFromDescription(description) || 'New Brief';
+  const { data, error } = await rpc('create_brief', { p_ws: workspace, p_name: name, p_description: full });
   if (error) return { error };
   redirect(`/briefs/${data as string}`);
 }
