@@ -12,9 +12,9 @@ const when = (iso: string | null) => (iso ? new Date(iso).toLocaleDateString('en
 
 function Section({ title, hint, children }: { title: string; hint: string; children: React.ReactNode }) {
   return (
-    <section className="flex flex-col gap-3 rounded-md border border-line bg-surface p-4">
+    <section className="si-card">
       <div className="flex flex-col gap-0.5">
-        <h2 className="m-0 text-[15px] leading-[22px] font-semibold">{title}</h2>
+        <h2 className="si-h2">{title}</h2>
         <p className="m-0 max-w-[70ch] text-[13px] text-ink-muted">{hint}</p>
       </div>
       {children}
@@ -51,7 +51,7 @@ export async function ApiAccess() {
         {tokenRows.length === 0 ? (
           <p className="m-0 text-[13px] text-ink-muted">No tokens yet.</p>
         ) : (
-          <table>
+          <table className="si-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -93,7 +93,7 @@ export async function ApiAccess() {
         {integrationRows.length === 0 ? (
           <p className="m-0 text-[13px] text-ink-muted">Not set up yet.</p>
         ) : (
-          <table>
+          <table className="si-table">
             <thead>
               <tr>
                 <th>Name</th>
@@ -124,7 +124,7 @@ export async function ApiAccess() {
           {subscriptionRows.length === 0 ? (
             <p className="m-0 text-[13px] text-ink-muted">Not set up yet.</p>
           ) : (
-            <table>
+            <table className="si-table">
               <thead>
                 <tr>
                   <th>URL</th>

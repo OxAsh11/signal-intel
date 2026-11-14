@@ -2,8 +2,10 @@ import type { Metadata } from 'next';
 import {
   BandChip,
   Button,
+  Card,
   DerivedValue,
   EvidenceQuote,
+  FamilyTag,
   HealthIndicator,
   MetricTile,
   ReplyClassTag,
@@ -12,6 +14,7 @@ import {
   VerdictBadge,
 } from '@signal/ui';
 import { Band, ReplyClass, Stage, Verdict } from '@signal/contracts';
+import type { Family } from '@signal/ui';
 import tokens from '../../../../../design/signal-intel-ds/project/tokens.json';
 
 export const metadata: Metadata = { title: 'Design reference' };
@@ -25,16 +28,24 @@ function Section({ title, children }: { title: string; children: React.ReactNode
   );
 }
 
+const FAMILIES: [Family, string][] = [
+  ['pool', 'Discovery'],
+  ['mint', 'Judgement'],
+  ['grass', 'Engagement'],
+  ['mustard', 'Needs you'],
+  ['lava', 'Cost and alerts'],
+];
+
 /** Living reference: every token and component, rendered from the same sources the app uses. */
 export default function DesignPage() {
   return (
-    <main className="mx-auto flex max-w-5xl flex-col gap-8 px-4 py-8 md:px-8">
+    <main className="si-page">
       <div className="flex flex-col gap-1">
         <span className="si-label">Design reference</span>
-        <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">Signal Intel</h1>
-        <p className="m-0 max-w-[65ch] text-ink-muted">
-          Tokens come from design/signal-intel-ds/project/tokens.json. Components come from @signal/ui. Switch your OS theme
-          to check dark mode.
+        <h1 className="si-h1">Signal Intel</h1>
+        <p className="si-lede">
+          Tokens come from design/signal-intel-ds/project/tokens.json. Components come from @signal/ui. Light only, on the
+          Mixpanel guideline system; colour families identify kinds of components.
         </p>
       </div>
 
@@ -136,6 +147,43 @@ export default function DesignPage() {
           <HealthIndicator name="Derivation lag" status="degraded" detail="14 min behind" />
         </div>
       </Section>
+      <section className="flex flex-col gap-3">
+        <h2 className="si-h2">Colour families</h2>
+        <p className="m-0 text-ink-muted">Pool = discovery · mint = judgement · grass = engagement · mustard = needs you · lava = cost and alerts.</p>
+        <div className="si-tiles">
+          {FAMILIES.map(([family, label]) => (
+            <MetricTile key={family} family={family} label={label} value="128" href="#" delta="example" version="def v1" />
+          ))}
+        </div>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,220px),1fr))] gap-4">
+          {FAMILIES.map(([family, label]) => (
+            <Card key={family} family={family}>
+              <FamilyTag family={family}>{label}</FamilyTag>
+              <h3 className="si-h2">Content card</h3>
+              <p className="m-0 text-[14px]">Grey card with the family&apos;s small fade at the bottom.</p>
+            </Card>
+          ))}
+        </div>
+        <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] gap-4">
+          {(['mint', 'grass', 'pool'] as Family[]).map((family) => (
+            <Card key={family} family={family} kind="feature" className="min-h-[240px]">
+              <FamilyTag family={family}>Feature card</FamilyTag>
+              <h3 className="si-h1 text-[24px]">The product-card gradient</h3>
+              <p className="m-0">Copy sits in the light top; the colour carries the identity.</p>
+              <div><Button variant="primary">Primary action</Button></div>
+            </Card>
+          ))}
+        </div>
+      </section>
+
+      <Section title="Buttons">
+        <Button variant="primary">Start sequence</Button>
+        <Button>Create deal</Button>
+        <Button variant="quiet">Cancel</Button>
+        <Button variant="primary" size="sm">Small primary</Button>
+        <Button size="sm">Small</Button>
+      </Section>
+
       <p className="m-0 text-[12px] text-ink-muted">All figures on this page are design examples, not data.</p>
     </main>
   );

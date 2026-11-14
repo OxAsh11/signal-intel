@@ -25,14 +25,18 @@
   --color-danger-soft: var(--danger-soft);
   --color-on-danger: var(--on-danger);
   --color-band-medium: var(--band-medium);
+  --color-ink-body: var(--ink-body);
 }
 
 @theme {
   --radius-xs: 2px;
   --radius-sm: 4px;
-  --radius-md: 6px;
-  --radius-lg: 10px;
-  --font-sans: "Instrument Sans", ui-sans-serif, system-ui, "Segoe UI", sans-serif;
+  --radius-tag: 6px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --radius-xl: 24px;
+  --radius-pill: 40px;
+  --font-sans: "DM Sans", "Helvetica Neue", Arial, sans-serif;
   --font-serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
-  --font-mono: "JetBrains Mono", ui-monospace, "Cascadia Mono", Menlo, monospace;
+  --font-mono: "DM Mono", "SF Mono", ui-monospace, monospace;
 }

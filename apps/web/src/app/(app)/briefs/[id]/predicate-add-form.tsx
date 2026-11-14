@@ -42,7 +42,7 @@ export function PredicateAddForm({ workspaceId }: { workspaceId: string }) {
             className="rounded border border-line bg-surface px-2 py-1 text-sm" />
         </label>
         <button type="submit" disabled={isPending}
-          className="rounded bg-accent px-3 py-1 text-sm font-medium text-white hover:bg-accent/90 disabled:opacity-60">
+          className="si-btn si-btn-primary si-btn-sm">
           Add column
         </button>
       </div>

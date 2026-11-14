@@ -39,7 +39,7 @@ export default async function AccountsPage({ params }: { params: Promise<{ wsid:
 
   return (
     <div>
-      <h1>Accounts</h1>
+      <h1 className="si-h1">Accounts</h1>
       {accounts.length === 0 ? (
         <p>No accounts yet</p>
       ) : (

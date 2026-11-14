@@ -16,9 +16,9 @@ type InvitationRow = { id: string; email: string; role: Role; workspace_id: stri
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="flex flex-col gap-3 rounded-md border border-line bg-surface p-4">
+    <section className="si-card">
       <div className="flex flex-col gap-0.5">
-        <h2 className="m-0 text-[15px] leading-[22px] font-semibold">{title}</h2>
+        <h2 className="si-h2">{title}</h2>
         {hint ? <p className="m-0 max-w-[70ch] text-[13px] text-ink-muted">{hint}</p> : null}
       </div>
       {children}
@@ -68,7 +68,7 @@ export async function MembersAndAccess() {
         }
       >
         <div className="overflow-x-auto">
-          <table className="w-full border-collapse text-left">
+          <table className="si-table">
             <thead>
               <tr className="border-b border-line">
                 <th className="si-label px-2 py-2 font-semibold">Member</th>

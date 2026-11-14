@@ -14,7 +14,7 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
   const [type, setType] = useState('');
 
   return (
-    <form action={formAction} className="flex flex-col gap-3 rounded-lg border border-border p-4">
+    <form action={formAction} className="si-card">
       <h3 className="m-0 text-sm font-semibold">Add radar</h3>
 
       <input type="hidden" name="brief" value={briefId} />
@@ -25,7 +25,7 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
         <select
           id="radar-type"
           name="connector_type"
-          className="rounded border border-border bg-surface px-2 py-1.5 text-sm"
+          className="rounded-sm border border-line-strong bg-surface px-3 py-2 text-sm text-ink"
           required
           value={type}
           onChange={(e) => setType(e.target.value)}
@@ -44,7 +44,7 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
           name="name"
           type="text"
           placeholder="e.g. Hotel tenders in Germany"
-          className="rounded border border-border bg-surface px-2 py-1.5 text-sm"
+          className="rounded-sm border border-line-strong bg-surface px-3 py-2 text-sm text-ink"
           required
         />
       </div>
@@ -59,7 +59,7 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
             name="sites"
             rows={3}
             placeholder={type === 'social_post' ? 'Leave empty for the main public social sites' : 'e.g. ted.europa.eu'}
-            className="rounded border border-border bg-surface px-2 py-1.5 text-sm"
+            className="rounded-sm border border-line-strong bg-surface px-3 py-2 text-sm text-ink"
           />
           <p className="m-0 text-xs text-ink-muted">
             Found through web search. Pages that block crawlers keep only the search snippet.
@@ -68,13 +68,13 @@ export function RadarAddForm({ briefId, workspaceId }: Props) {
       ) : null}
 
       {state.error && (
-        <p className="m-0 text-sm text-red-600">{state.error}</p>
+        <p className="m-0 text-sm text-danger">{state.error}</p>
       )}
 
       <button
         type="submit"
         disabled={pending}
-        className="self-start rounded bg-accent px-3 py-1.5 text-sm font-medium text-white disabled:opacity-50"
+        className="si-btn si-btn-primary self-start"
       >
         {pending ? 'Adding…' : 'Add radar'}
       </button>

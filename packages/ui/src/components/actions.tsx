@@ -1,5 +1,6 @@
 import type { ButtonHTMLAttributes } from 'react';
 import { cx } from '../cx';
+import type { Family } from './surfaces';
 
 export interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'quiet' | 'danger';
@@ -17,6 +18,11 @@ export function Button({ variant = 'secondary', size = 'md', cost, className, ch
     >
       {children}
       {cost ? <span className="si-btn-cost">{cost}</span> : null}
+      {variant === 'primary' ? (
+        <svg className="si-btn-arrow" viewBox="0 0 6.504 9.912" aria-hidden="true">
+          <path d="M0.8 0 L6.5 4.956 L0.8 9.912 L0 9.1 L4.8 4.956 L0 0.8 Z" fill="currentColor" />
+        </svg>
+      ) : null}
     </button>
   );
 }
@@ -29,11 +35,13 @@ export interface MetricTileProps {
   version: string;
   delta?: string;
   incomplete?: boolean;
+  /** Colour family of what the number measures (discovery, judgement, engagement, cost…). */
+  family?: Family;
 }
 
-export function MetricTile({ label, value, href, version, delta, incomplete }: MetricTileProps) {
+export function MetricTile({ label, value, href, version, delta, incomplete, family }: MetricTileProps) {
   return (
-    <a className="si-metric" href={href}>
+    <a className={cx('si-metric', family && `si-fam-${family}`)} href={href}>
       <span className="si-label">{label}</span>
       <span className="si-metric-num">{value}</span>
       <span className="si-metric-sub">

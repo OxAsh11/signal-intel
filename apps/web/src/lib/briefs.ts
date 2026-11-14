@@ -11,3 +11,9 @@ export type BriefConfig = {
   scoring?: Record<string, unknown>;
   budget?: { day_cap?: number | null; month_cap?: number | null };
 };
+
+/** A short Brief name from the description's first sentence; the person can rename it later. */
+export function nameFromDescription(description: string): string {
+  const first = (description.split(/(?<=[.!?])\s/)[0] ?? '').replace(/\s+/g, ' ').trim();
+  return first.length > 60 ? `${first.slice(0, 57).replace(/\s+\S*$/, '')}…` : first;
+}

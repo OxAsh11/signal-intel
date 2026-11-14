@@ -38,7 +38,7 @@ function RemoveQuery({ briefId, queryId }: { briefId: string; queryId: string })
       <button type="submit" disabled={pending} className="text-xs text-ink-muted hover:text-ink">
         Remove
       </button>
-      {state.error ? <span className="ml-2 text-xs text-red-600">{state.error}</span> : null}
+      {state.error ? <span className="ml-2 text-xs text-danger">{state.error}</span> : null}
     </form>
   );
 }
@@ -106,12 +106,12 @@ export function RadarQueries({
               type="text"
               maxLength={500}
               placeholder="Add a search query"
-              className="min-w-[240px] rounded border border-border bg-surface px-2 py-1"
+              className="min-w-[240px] rounded-sm border border-line-strong bg-surface px-3 py-2 text-sm text-ink"
             />
-            <button type="submit" disabled={adding} className="rounded border border-border px-2 py-1">
+            <button type="submit" disabled={adding} className="si-btn si-btn-sm">
               Add query
             </button>
-            {addState.error ? <span className="text-red-600">{addState.error}</span> : null}
+            {addState.error ? <span className="text-danger">{addState.error}</span> : null}
           </form>
         ) : null}
 
@@ -129,12 +129,12 @@ export function RadarQueries({
                 rows={4}
                 defaultValue={lexicon.join('\n')}
                 placeholder="One term or phrase per line"
-                className="rounded border border-border bg-surface px-2 py-1"
+                className="rounded-sm border border-line-strong bg-surface px-3 py-2 text-sm text-ink"
               />
-              <button type="submit" disabled={saving} className="self-start rounded border border-border px-2 py-1">
+              <button type="submit" disabled={saving} className="si-btn si-btn-sm self-start">
                 Save terms
               </button>
-              {lexState.error ? <span className="text-red-600">{lexState.error}</span> : null}
+              {lexState.error ? <span className="text-danger">{lexState.error}</span> : null}
               {lexState.ok ? <span className="text-ink-muted">Saved. New queries will not replace your terms.</span> : null}
             </form>
           ) : (
@@ -144,7 +144,7 @@ export function RadarQueries({
             <form action={resetAction} className="flex flex-wrap items-center gap-2">
               <input type="hidden" name="brief" value={briefId} />
               <input type="hidden" name="radar" value={radarId} />
-              <button type="submit" disabled={resetting} className="rounded border border-border px-2 py-1">
+              <button type="submit" disabled={resetting} className="si-btn si-btn-sm">
                 Restore suggested terms
               </button>
               <span className="text-ink-muted">
@@ -152,7 +152,7 @@ export function RadarQueries({
                   ? `${generatedLexicon.length} suggested: ${generatedLexicon.slice(0, 5).join(', ')}${generatedLexicon.length > 5 ? '…' : ''}`
                   : 'No suggestions yet; they arrive with the next query generation.'}
               </span>
-              {resetState.error ? <span className="text-red-600">{resetState.error}</span> : null}
+              {resetState.error ? <span className="text-danger">{resetState.error}</span> : null}
             </form>
           ) : null}
         </div>
