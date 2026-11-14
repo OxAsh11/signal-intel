@@ -50,13 +50,13 @@ export default async function ReportsPage({ params }: { params: Promise<{ wsid: 
 
   return (
     <div>
-      <h1>Reports</h1>
+      <h1 className="si-h1">Reports</h1>
 
       {!briefId ? (
         <p>No brief published yet — metrics unavailable.</p>
       ) : (
         <section>
-          <h2>Key metrics</h2>
+          <h2 className="si-h2">Key metrics</h2>
           <div style={{ display: "flex", gap: "1rem", flexWrap: "wrap" }}>
             {metricKeys.map((key) => (
               <div className="metric-tile" key={key}>
@@ -69,11 +69,11 @@ export default async function ReportsPage({ params }: { params: Promise<{ wsid: 
       )}
 
       <section>
-        <h2>Stage funnel</h2>
+        <h2 className="si-h2">Stage funnel</h2>
         {Object.keys(stageCounts).length === 0 ? (
           <p>No accounts yet.</p>
         ) : (
-          <table>
+          <table className="si-table">
             <thead>
               <tr>
                 <th>Stage</th>

@@ -32,10 +32,10 @@ export default async function CampaignsPage({ params }: { params: Promise<{ wsid
 
   return (
     <div>
-      <h1>Campaigns</h1>
+      <h1 className="si-h1">Campaigns</h1>
 
       <section>
-        <h2>New campaign</h2>
+        <h2 className="si-h2">New campaign</h2>
         {briefRows.length === 0 ? (
           <p>Create a Brief first: a campaign is linked to the Brief it activates.</p>
         ) : (
@@ -64,7 +64,7 @@ export default async function CampaignsPage({ params }: { params: Promise<{ wsid
       {rows.length === 0 ? (
         <p>No campaigns yet.</p>
       ) : (
-        <table>
+        <table className="si-table">
           <thead>
             <tr>
               <th>Name</th>

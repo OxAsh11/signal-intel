@@ -44,7 +44,7 @@ export function VersionDiff({ versions, vA, vB, briefId }:
       </div>
 
       {vA && vB && (
-        <table className="w-full text-sm border-collapse">
+        <table className="si-table">
           <thead>
             <tr>
               <th className="text-left pb-2 w-32 text-ink-muted font-medium">Field</th>
@@ -63,7 +63,7 @@ export function VersionDiff({ versions, vA, vB, briefId }:
                   <td className={`py-2 pl-4 font-mono text-xs align-top whitespace-pre-wrap ${changed ? 'text-caution' : ''}`}>
                     {display(aVal)}
                   </td>
-                  <td className={`py-2 pl-4 font-mono text-xs align-top whitespace-pre-wrap ${changed ? 'text-accent' : ''}`}>
+                  <td className={`py-2 pl-4 font-mono text-xs align-top whitespace-pre-wrap ${changed ? 'bg-marker-soft text-ink' : ''}`}>
                     {display(bVal)}
                   </td>
                 </tr>

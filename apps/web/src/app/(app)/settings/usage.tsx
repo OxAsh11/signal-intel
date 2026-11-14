@@ -23,9 +23,9 @@ const LEDGER_LIMIT = 200;
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <section className="flex flex-col gap-3 rounded-md border border-line bg-surface p-4">
+    <section className="si-card">
       <div className="flex flex-col gap-0.5">
-        <h2 className="m-0 text-[15px] leading-[22px] font-semibold">{title}</h2>
+        <h2 className="si-h2">{title}</h2>
         {hint ? <p className="m-0 max-w-[70ch] text-[13px] text-ink-muted">{hint}</p> : null}
       </div>
       {children}
@@ -162,7 +162,7 @@ export async function UsageAndBudgets({ searchParams }: { searchParams: Promise<
               <p className="m-0 text-ink-muted">No usage in this period.</p>
             ) : (
               <div className="overflow-x-auto">
-                <table className="w-full border-collapse text-left">
+                <table className="si-table">
                   <thead>
                     <tr className="border-b border-line">
                       {['Time', 'Capability', 'Model', 'Unit', 'Quantity', 'Cost', 'Status'].map((h) => (

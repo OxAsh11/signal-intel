@@ -130,7 +130,7 @@ export function AccountsFilter({ accounts }: { accounts: AccountRow[] }) {
       {filtered.length === 0 ? (
         <p>No accounts match the active filters.</p>
       ) : (
-        <table>
+        <table className="si-table">
           <thead>
             <tr>
               <th>Entity</th>

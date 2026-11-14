@@ -93,8 +93,8 @@ export async function PreviewPanel({
   const current = preview && stable(preview.draft_config) === stable(draft) ? preview : null;
 
   const shell = (children: React.ReactNode) => (
-    <section className="flex flex-col gap-3 rounded-md border border-line bg-surface p-4">
-      <h2 className="m-0 text-[17px] font-semibold">Unpublished changes</h2>
+    <section className="si-card">
+      <h2 className="si-h2">Unpublished changes</h2>
       {children}
     </section>
   );

@@ -23,8 +23,8 @@ export async function Exclusions({ briefId, canEdit }: { briefId: string; canEdi
   const rows = (data ?? []) as Exclusion[];
 
   return (
-    <section className="flex flex-col gap-3 pt-4">
-      <h2 className="text-base font-semibold">Exclusions</h2>
+    <section className="si-card">
+      <h2 className="si-h2">Exclusions</h2>
 
       {rows.length === 0 ? (
         <p className="text-sm text-ink-muted">No exclusions added yet.</p>

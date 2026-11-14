@@ -117,10 +117,10 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
         <Link href={`/briefs/${id}`} className="text-sm text-ink-muted hover:text-ink">
           ← {brief.name}
         </Link>
-        <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">
+        <h1 className="si-h1">
           Pilot results
         </h1>
-        <p className="m-0 max-w-[65ch] text-ink-muted">
+        <p className="si-lede">
           Mark each verdict right or wrong. Your marks measure accuracy and can teach the Brief new
           examples. Go live from the Brief page when you are satisfied.
         </p>
@@ -171,7 +171,7 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
           {rows.map((r) => (
             <div
               key={r.entityId}
-              className="flex flex-col gap-2 rounded-md border border-line bg-surface p-4"
+              className="si-card"
             >
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-[15px] font-semibold">{r.name}</span>

@@ -27,7 +27,7 @@ export default async function CsvUploadPage({ params }: Props) {
 
   return (
     <div>
-      <h1>Upload CSV Radar</h1>
+      <h1 className="si-h1">Upload CSV Radar</h1>
       <p>Brief: {brief.name}</p>
       <form action={csvRadarFormAction}>
         <input type="hidden" name="brief" value={briefId} />

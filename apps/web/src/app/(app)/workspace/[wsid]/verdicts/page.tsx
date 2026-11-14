@@ -14,7 +14,7 @@ export default async function VerdictsPage({ params }: { params: Promise<{ wsid:
   if (!verdicts || verdicts.length === 0) {
     return (
       <div>
-        <h1>Verdicts</h1>
+        <h1 className="si-h1">Verdicts</h1>
         <p>No verdicts yet — extraction and identity resolution must complete first.</p>
       </div>
     );
@@ -22,8 +22,8 @@ export default async function VerdictsPage({ params }: { params: Promise<{ wsid:
 
   return (
     <div>
-      <h1>Verdicts</h1>
-      <table>
+      <h1 className="si-h1">Verdicts</h1>
+      <table className="si-table">
         <thead>
           <tr>
             <th>Entity</th>

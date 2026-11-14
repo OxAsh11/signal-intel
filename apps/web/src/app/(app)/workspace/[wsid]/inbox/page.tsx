@@ -43,7 +43,7 @@ export default async function InboxPage({ params }: { params: Promise<{ wsid: st
   if (replies.length === 0) {
     return (
       <div>
-        <h1>Inbox</h1>
+        <h1 className="si-h1">Inbox</h1>
         <p>No replies received yet.</p>
       </div>
     );
@@ -51,8 +51,8 @@ export default async function InboxPage({ params }: { params: Promise<{ wsid: st
 
   return (
     <div>
-      <h1>Inbox</h1>
-      <table>
+      <h1 className="si-h1">Inbox</h1>
+      <table className="si-table">
         <thead>
           <tr>
             <th>Received</th>

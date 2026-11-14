@@ -201,3 +201,4 @@ a.si-metric:hover { border-color: var(--signal); }
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 
 .si-brand-dot { display: inline-block; width: 10px; height: 10px; border-radius: 40px; background: linear-gradient(180deg, #72BEF4, #5FB6AC); }
+@media (max-width: 807px) { .si-table { display: block; overflow-x: auto; } }

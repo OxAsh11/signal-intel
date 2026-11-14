@@ -57,13 +57,13 @@ export default async function MeetingsPage({ params }: { params: Promise<{ wsid:
 
   return (
     <div>
-      <h1>Meetings &amp; Tasks</h1>
+      <h1 className="si-h1">Meetings &amp; Tasks</h1>
 
-      <h2>Meetings</h2>
+      <h2 className="si-h2">Meetings</h2>
       {meetings.length === 0 ? (
         <p>No meetings yet.</p>
       ) : (
-        <table>
+        <table className="si-table">
           <thead>
             <tr>
               <th>Scheduled at</th>
@@ -95,11 +95,11 @@ export default async function MeetingsPage({ params }: { params: Promise<{ wsid:
         </table>
       )}
 
-      <h2>Tasks</h2>
+      <h2 className="si-h2">Tasks</h2>
       {tasks.length === 0 ? (
         <p>No open tasks.</p>
       ) : (
-        <table>
+        <table className="si-table">
           <thead>
             <tr>
               <th>Title</th>

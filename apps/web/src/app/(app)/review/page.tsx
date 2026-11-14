@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { Button } from '@signal/ui';
+import { Button, EvidenceQuote, FamilyTag } from '@signal/ui';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import {
@@ -78,12 +78,15 @@ const shown = (v: unknown) => (typeof v === 'string' ? v : JSON.stringify(v));
 function Section({ title, hint, count, children }: { title: string; hint: string; count: number; children: ReactNode }) {
   if (count === 0) return null;
   return (
-    <section className="flex flex-col gap-3">
-      <div className="flex flex-col gap-0.5">
-        <h2 className="m-0 text-lg font-semibold">
-          {title} <span className="si-muted font-normal">· {count}</span>
-        </h2>
-        <p className="m-0 max-w-[70ch] text-[13px] text-ink-muted">{hint}</p>
+    <section className="flex flex-col gap-4">
+      <div className="flex flex-col gap-2">
+        <div className="flex flex-wrap items-center gap-3">
+          <FamilyTag family="mustard">Needs you</FamilyTag>
+          <h2 className="si-h2">
+            {title} <span className="font-mono text-ink-muted">{count}</span>
+          </h2>
+        </div>
+        <p className="m-0 max-w-[70ch] text-[14px] text-ink-muted">{hint}</p>
       </div>
       {children}
     </section>
@@ -91,7 +94,7 @@ function Section({ title, hint, count, children }: { title: string; hint: string
 }
 
 function Card({ children }: { children: ReactNode }) {
-  return <div className="flex flex-col gap-3 rounded-md border border-line bg-surface p-4">{children}</div>;
+  return <div className="si-card">{children}</div>;
 }
 
 function VerdictChip({ value }: { value: string }) {
@@ -101,26 +104,24 @@ function VerdictChip({ value }: { value: string }) {
 function ClaimList({ claims }: { claims: ClaimRow[] }) {
   if (claims.length === 0) return <p className="m-0 text-[13px] text-ink-muted">No claims behind this verdict.</p>;
   return (
-    <div className="grid gap-3 sm:grid-cols-2">
+    <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,360px),1fr))] gap-3">
       {claims.map((c) => {
-        const url = one(c.source)?.url;
+        const url = one(c.source)?.url ?? undefined;
+        let host = 'stored source';
+        try {
+          if (url) host = new URL(url).hostname.replace(/^www\./, '');
+        } catch {}
         return (
-          <div key={c.id} className="flex flex-col gap-1 rounded-sm border border-line p-3">
-            <span className="si-label">{one(c.predicate)?.label ?? one(c.predicate)?.key ?? 'Claim'}</span>
-            <span className="text-[14px] font-medium">{shown(c.value)}</span>
-            {c.quote ? <q className="text-[13px] text-ink-muted">{c.quote}</q> : null}
-            <span className="text-[12px] text-ink-muted">
-              Confidence {c.confidence} · observed {day(c.observed_at)}
-              {url ? (
-                <>
-                  {' · '}
-                  <a href={url} target="_blank" rel="noreferrer">
-                    source
-                  </a>
-                </>
-              ) : null}
-            </span>
-          </div>
+          <EvidenceQuote
+            key={c.id}
+            claim={`${one(c.predicate)?.label ?? one(c.predicate)?.key ?? 'Claim'} = ${shown(c.value)}`}
+            sourceType={`confidence ${c.confidence}`}
+            sourceName={host}
+            sourceHref={url}
+            observed={day(c.observed_at)}
+          >
+            {c.quote ? <mark>{c.quote}</mark> : 'No quote: structured source'}
+          </EvidenceQuote>
         );
       })}
     </div>
@@ -158,7 +159,7 @@ export default async function ReviewPage() {
   if (!ctx?.workspace || !supabase) {
     return (
       <div className="flex flex-col gap-1">
-        <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">Review</h1>
+        <h1 className="si-h1">Review</h1>
         <p className="m-0 text-ink-muted">Join or create a workspace to see its review queue.</p>
       </div>
     );
@@ -264,8 +265,8 @@ export default async function ReviewPage() {
   return (
     <>
       <div className="flex flex-col gap-1">
-        <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">Review</h1>
-        <p className="m-0 max-w-[65ch] text-ink-muted">
+        <h1 className="si-h1">Review</h1>
+        <p className="si-lede">
           Every decision that needs a person, most important first.
           {total > 0 ? ` ${total} waiting.` : ''}
         </p>

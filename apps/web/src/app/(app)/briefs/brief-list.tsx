@@ -23,7 +23,7 @@ export async function BriefList() {
   if (!data?.length) return (
     <p className="m-0 text-ink-muted">
       No Briefs yet.{' '}
-      <Link href="/briefs/new" className="text-accent underline-offset-2 hover:underline">Create the first one.</Link>
+      <Link href="/briefs/new" className="font-medium text-ink underline">Create the first one.</Link>
     </p>
   );
 
@@ -42,7 +42,7 @@ export async function BriefList() {
             {byState[state].map(b => (
               <li key={b.id}>
                 <Link href={`/briefs/${b.id}`}
-                  className="flex items-center justify-between rounded-md border border-line bg-surface px-4 py-3 hover:bg-surface-raised transition-colors">
+                  className="flex items-center justify-between rounded-md border border-line bg-surface px-4 py-3 hover:bg-surface-sunken transition-colors">
                   <span className="font-medium">{b.name}</span>
                   <span className="text-xs text-ink-muted tabular-nums">
                     {b.intake_status === 'pending' ? 'drafting…' :

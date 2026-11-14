@@ -13,8 +13,8 @@ export default async function BriefStudioPage() {
     <>
       <div className="flex items-start justify-between gap-4">
         <div className="flex flex-col gap-1">
-          <h1 className="m-0 text-[28px] leading-[34px] font-semibold tracking-[-0.015em]">Brief Studio</h1>
-          <p className="m-0 max-w-[65ch] text-ink-muted">
+          <h1 className="si-h1">Brief Studio</h1>
+          <p className="si-lede">
             Define what you are looking for. Each Brief is a versioned hypothesis the platform collects and scores accounts against.
           </p>
         </div>
