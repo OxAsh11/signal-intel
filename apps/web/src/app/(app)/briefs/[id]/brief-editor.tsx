@@ -1,7 +1,7 @@
 'use client';
 import { useActionState } from 'react';
 import { ChipField } from './chip-field';
-import { publishBrief } from '@/app/actions/briefs';
+import { startPilot } from '@/app/actions/briefs';
 import { Button } from '@signal/ui';
 import type { BriefConfig } from '@/lib/briefs';
 
@@ -20,9 +20,9 @@ const RADAR_TYPES = ['news_publications', 'job_postings', 'public_registries', '
 function lines(arr: string[] | undefined) { return (arr ?? []).join('\n'); }
 function fromLines(s: string) { return s.split('\n').map(x => x.trim()).filter(Boolean); }
 
-export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId, hasDraftChanges }: { brief: Brief; canEdit: boolean; workspaceId: string; hasDraftChanges: boolean }) {
+export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId }: { brief: Brief; canEdit: boolean; workspaceId: string }) {
   const cfg: BriefConfig = brief.draft_config ?? {};
-  const [pubState, pubFormAction, pubPending] = useActionState(publishBrief, {});
+  const [pubState, pubFormAction, pubPending] = useActionState(startPilot, {});
   const canPublish = brief.state === 'Draft' && canEdit && isPublishable(cfg);
   const editorDisabled = !canEdit;
 
@@ -149,25 +149,13 @@ export function BriefEditor({ brief, canEdit, workspaceId: _workspaceId, hasDraf
           <fieldset disabled={pubPending} className="contents">
             <input type="hidden" name="brief" value={brief.id} />
             <Button type="submit" variant="primary" disabled={!canPublish}>
-              Publish Brief
+              Start pilot
             </Button>
-            {!canPublish && (
-              <p className="mt-1 text-xs text-ink-muted">Fill in all required fields before publishing.</p>
-            )}
-            {pubState?.error && <p className="text-xs text-danger mt-1">{pubState.error}</p>}
-          </fieldset>
-        </form>
-      )}
-      {(brief.state === 'Active' || brief.state === 'Paused') && canEdit && hasDraftChanges && (
-        <form action={pubFormAction} className="pt-2">
-          <fieldset disabled={pubPending} className="contents">
-            <input type="hidden" name="brief" value={brief.id} />
-            <Button type="submit" variant="primary" disabled={!isPublishable(cfg)}>
-              Publish new version
-            </Button>
-            {!isPublishable(cfg) && (
-              <p className="mt-1 text-xs text-ink-muted">Fill in all required fields before publishing.</p>
-            )}
+            <p className="mt-1 text-xs text-ink-muted">
+              {canPublish
+                ? 'The pilot scores a small sample of accounts so you can check the verdicts before going live.'
+                : 'Fill in all required fields before starting the pilot.'}
+            </p>
             {pubState?.error && <p className="text-xs text-danger mt-1">{pubState.error}</p>}
           </fieldset>
         </form>

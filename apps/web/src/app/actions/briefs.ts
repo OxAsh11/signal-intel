@@ -52,6 +52,56 @@ export async function publishBrief(_: ActionState, form: FormData): Promise<Acti
   return { ok: true };
 }
 
+/** Draft → Pilot: freezes version 1 and scores a small sample of accounts (M1 step 3). */
+export async function startPilot(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('start_pilot', { p_brief: text(form, 'brief') });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
+/** Pilot → Active. */
+export async function goLive(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('go_live', { p_brief: text(form, 'brief') });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
+/** Asks the worker what the current draft would change and cost (M1 edit preview). */
+export async function requestPreview(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('request_brief_preview', { p_brief: text(form, 'brief') });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
+/** An over-budget edit waits for an Owner or Admin (S6). */
+export async function requestPublishApproval(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('request_publish_approval', { p_preview: text(form, 'preview') });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
+/**
+ * Calibrate (M1 step 4): "right" confirms the verdict; any verdict value corrects it. With
+ * "example" checked the account also joins the draft's positive or negative examples.
+ */
+export async function markPilotVerdict(_: ActionState, form: FormData): Promise<ActionState> {
+  const mark = text(form, 'mark');
+  if (!mark) return { error: 'Choose right or the correct verdict.' };
+  const { error } = await rpc('mark_pilot_verdict', {
+    p_verdict: text(form, 'verdict'),
+    p_action: mark === 'right' ? 'confirm' : 'correct',
+    p_value: mark === 'right' ? null : mark,
+    p_add_example: form.get('example') === 'on',
+  });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
 export async function updateBriefState(_: ActionState, form: FormData): Promise<ActionState> {
   const { error } = await rpc('update_brief_state', {
     p_brief: text(form, 'brief'),

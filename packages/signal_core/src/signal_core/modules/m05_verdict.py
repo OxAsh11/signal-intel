@@ -25,7 +25,7 @@ import signal_core.modules.m15_account_card as _m15
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
-from signal_core.briefs import ActiveBrief, active_brief_versions
+from signal_core.briefs import ActiveBrief, active_brief_versions, holds_pilot_slot
 from signal_core.derivation.writer import upsert_verdict
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
@@ -83,13 +83,19 @@ async def compute_verdict(
     entity_id: UUID,
     workspace_id: UUID,
     ctx: CallContext,
+    *,
+    only_version: UUID | None = None,
 ) -> str | None:
     """Compute and store the entity's verdict under every active Brief version in the workspace.
 
-    Returns the verdict under the most recently published Brief, or None when the workspace has
-    no active Brief.
+    With only_version, judge under that Brief version alone (re-derivation after an edit).
+
+    Returns the verdict under the most recently published Brief that judged it, or None when
+    no Brief did (no active Brief, or only pilots whose sample is full).
     """
     briefs = await active_brief_versions(pool, workspace_id)
+    if only_version is not None:
+        briefs = [b for b in briefs if b.brief_version_id == only_version]
     if not briefs:
         log.info("verdict.no_brief_version", workspace_id=str(workspace_id))
         return None
@@ -116,7 +122,7 @@ async def compute_verdict(
     ]
 
     await _defer_account_card(pool, entity_id, workspace_id)
-    return values[0]
+    return next((v for v in values if v is not None), None)
 
 
 async def _verdict_for_brief(
@@ -127,7 +133,12 @@ async def _verdict_for_brief(
     display_name: str,
     claims: list[tuple[Any, ...]],
     ctx: CallContext,
-) -> str:
+) -> str | None:
+    # A Pilot Brief judges only the accounts in its sample (M1).
+    if brief.state == "Pilot" and not await holds_pilot_slot(
+        pool, brief.brief_version_id, entity_id, claim=True
+    ):
+        return None
     if not claims:
         await upsert_verdict(
             pool, brief.brief_version_id, entity_id, "Unverified", [], [], {"reason": "no_claims"}

@@ -58,7 +58,7 @@ from worker.health import HealthState
 
 REPO = Path(__file__).resolve().parents[3]
 CANARY_EXTRACTOR_VERSION = UUID("00000000-0000-4000-a000-0000000000c6")
-QUEUES = ["events", "fetch", "extract", "identity", "derive", "compute", "default"]
+QUEUES = ["events", "briefs", "fetch", "extract", "identity", "derive", "compute", "default"]
 
 USER = UUID("00000000-0000-4000-8000-0000000e2e01")
 ORG = UUID("00000000-0000-4000-8000-0000000e2e02")
@@ -904,6 +904,45 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             == 1
         )
         await _drain(app, connector, pool)
+
+        # ── Brief edit: preview, publish, re-derive (M1) ──────────────────────
+        draft = {
+            "hypothesis": "Engineering firms that design in Revit",
+            "personas": {"buyer": ["BIM"]},
+            "offer": "BIM services",
+            "examples": {"positive": ["a", "b", "c"], "negative": ["d", "e"]},
+            "sources": {"radar_types": ["company_websites"]},
+            "icp": {"geographies": ["Germany"]},
+        }
+        await db.as_user(
+            "select public.save_brief_draft_ui(%s, %s::jsonb)", (BRIEF, json.dumps(draft))
+        )
+        preview = await db.as_user("select public.request_brief_preview(%s)", (BRIEF,))
+        await _drain(app, connector, pool)
+        status, tier, rejudge, accounts = (
+            await db.admin(
+                "select status, tier::text, rejudge, (result ->> 'accounts')::int"
+                " from public.brief_preview where id = %s",
+                (preview,),
+            )
+        )[0]
+        assert (status, tier, rejudge) == ("ready", "Expand", True)
+        assert accounts >= 1
+        version_2 = await db.as_user("select public.publish_brief(%s)", (BRIEF,))
+        await _drain(app, connector, pool)
+        assert (
+            await db.one(
+                "select edit_tier::text from public.brief_version where id = %s", (version_2,)
+            )
+            == "Expand"
+        )
+        assert (
+            await db.one(
+                "select count(*) from public.score where brief_version_id = %s", (version_2,)
+            )
+            >= 1
+        )
+        assert _failed_jobs(connector) == []
 
         # ── Removing a member revokes their tokens at once ────────────────────
         await db.admin("update public.member set status = 'removed' where id = %s", (MEMBER,))

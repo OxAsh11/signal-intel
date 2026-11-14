@@ -9,6 +9,7 @@ import { BriefEditor } from './brief-editor';
 import { StateControls } from './state-controls';
 import { Exclusions } from './exclusions';
 import { Predicates } from './predicates';
+import { PreviewPanel } from './preview-panel';
 
 export const metadata: Metadata = { title: 'Brief' };
 
@@ -32,6 +33,14 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
     if (ver?.config) seedConfig = ver.config as import('@/lib/briefs').BriefConfig;
   }
   const briefForEditor = { ...brief, draft_config: seedConfig };
+  const showPreview = canEdit && hasDraftChanges && ['Pilot', 'Active', 'Paused'].includes(brief.state);
+  let nextVersion = 1;
+  if (showPreview) {
+    const { data: last } = await supabase
+      .from('brief_version').select('version').eq('brief_id', id)
+      .order('version', { ascending: false }).limit(1).maybeSingle();
+    nextVersion = (last?.version ?? 0) + 1;
+  }
 
   return (
     <>
@@ -52,10 +61,21 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
       <Link href={`/briefs/${id}/radars`} className="text-sm text-ink-muted hover:text-ink">
         Radars →
       </Link>
+      {brief.state === 'Pilot' && (
+        <Link href={`/briefs/${id}/pilot`} className="text-sm text-ink-muted hover:text-ink">
+          Pilot results →
+        </Link>
+      )}
 
       {brief.intake_status === 'pending'
         ? <BriefIntakeLoading briefId={id} />
-        : <BriefEditor brief={briefForEditor} canEdit={canEdit} workspaceId={ctx.workspace.id} hasDraftChanges={hasDraftChanges} />}
+        : <BriefEditor brief={briefForEditor} canEdit={canEdit} workspaceId={ctx.workspace.id} />}
+
+      {showPreview && (
+        <Suspense fallback={null}>
+          <PreviewPanel briefId={id} draft={brief.draft_config} nextVersion={nextVersion} />
+        </Suspense>
+      )}
 
       <Suspense fallback={null}>
         <Exclusions briefId={id} canEdit={canEdit} />

@@ -125,7 +125,8 @@ async def push_campaign_batch(
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT c.org_id, c.workspace_id, c.push_mode, c.status, c.destination_integration_id,"
-            "       b.current_version_id"
+            # A Brief in Pilot has no live version for activation (M1).
+            "       CASE WHEN b.state = 'Active' THEN b.current_version_id END"
             "  FROM public.campaign c"
             "  LEFT JOIN public.brief b ON b.id = c.brief_id"
             " WHERE c.id = %s",

@@ -20,10 +20,11 @@ from signal_core.briefs import ActiveBrief
 from signal_core.config import get_settings
 from signal_core.metering import CallContext
 from signal_core.modules.m07_enrichment import HunterProvider, enrich_account, match_persona
-from signal_core.modules.m08_scoring import _band_from_priority, _decay, _settings
 from signal_core.modules.m09_activation import _variables
 from signal_core.modules.m10_inbox import classify_reply
 from signal_core.modules.m11_stage import TRANSITIONS
+from signal_core.scoring_core import _band_from_priority, _decay
+from signal_core.scoring_core import settings as _score_settings
 
 
 def _brief(
@@ -195,7 +196,7 @@ async def test_ai_failure_never_writes_a_verdict(monkeypatch: pytest.MonkeyPatch
 
 
 def test_scoring_settings_defaults_and_overrides() -> None:
-    weights, thresholds, roles = _settings(_brief())
+    weights, thresholds, roles = _score_settings(_brief().config, _brief().weights)
     assert weights == {"fit": 0.25, "evidence": 0.25, "scale": 0.25, "timing": 0.25}
     assert thresholds == {"High": 70.0, "Medium": 40.0} and roles == []
 
@@ -206,7 +207,7 @@ def test_scoring_settings_defaults_and_overrides() -> None:
         },
         {"evidence": 0.7, "band_thresholds": {"High": 80}},
     )
-    weights, thresholds, roles = _settings(brief)
+    weights, thresholds, roles = _score_settings(brief.config, brief.weights)
     assert weights["fit"] == 0.1 and weights["evidence"] == 0.7
     assert thresholds == {"High": 80.0, "Medium": 40.0}
     assert roles == ["buyer", "influencer"]  # only roles the Brief actually names titles for
