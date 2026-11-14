@@ -17,3 +17,4 @@ export {
   type EvidenceQuoteProps,
   type ScoreBreakdownProps,
 } from './components/evidence';
+export { Card, FamilyTag, type CardProps, type Family } from './components/surfaces';

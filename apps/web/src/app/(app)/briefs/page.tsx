@@ -20,7 +20,7 @@ export default async function BriefStudioPage() {
         </div>
         {canEdit && (
           <Link href="/briefs/new"
-            className="inline-flex items-center rounded-md bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent/90 transition-colors">
+            className="si-btn si-btn-primary">
             New Brief
           </Link>
         )}

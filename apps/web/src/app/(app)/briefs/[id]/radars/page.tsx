@@ -12,11 +12,10 @@ export const metadata = { title: 'Radars' };
 type RadarStatus = 'active' | 'error' | 'silent' | string;
 
 function statusBadge(status: RadarStatus) {
-  const base = 'inline-block rounded-full px-2 py-0.5 text-xs font-medium';
-  if (status === 'active') return `${base} bg-green-100 text-green-800`;
-  if (status === 'error') return `${base} bg-red-100 text-red-700`;
-  if (status === 'silent') return `${base} bg-amber-100 text-amber-700`;
-  return `${base} bg-gray-100 text-gray-600`;
+  if (status === 'active') return 'si-chip si-reply-interested';
+  if (status === 'error') return 'si-chip si-reply-unsubscribe';
+  if (status === 'silent') return 'si-chip si-reply-notnow';
+  return 'si-chip si-reply-notinterested';
 }
 
 function formatDate(iso: string | null) {
@@ -66,7 +65,7 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
             const notSetUp = isNotSetUp(r.last_error);
 
             return (
-              <div key={r.id} className="flex flex-col gap-2 rounded-lg border border-border p-4 sm:flex-row sm:items-start sm:justify-between">
+              <div key={r.id} className="si-card sm:flex-row sm:items-start sm:justify-between">
                 <div className="flex flex-col gap-1">
                   <div className="flex items-center gap-2">
                     <span className="font-medium text-sm">{r.name}</span>
@@ -83,7 +82,7 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
                       Not set up yet: web-search radars start once the Brave Search key is added to the worker.
                     </p>
                   ) : r.last_error ? (
-                    <p className="m-0 text-xs text-red-600 truncate max-w-sm" title={r.last_error}>
+                    <p className="m-0 text-xs text-danger truncate max-w-sm" title={r.last_error}>
                       Error: {r.last_error}
                     </p>
                   ) : null}
@@ -113,7 +112,7 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
                       <input type="hidden" name="id" value={r.id} />
                       <button
                         type="submit"
-                        className="rounded border border-border px-2 py-1 text-xs text-red-600 hover:bg-red-50"
+                        className="si-btn si-btn-sm text-danger"
                       >
                         Remove
                       </button>
