@@ -1,7 +1,7 @@
 import { NextResponse, type NextRequest } from 'next/server';
 import { createClient } from '@/lib/supabase/server';
 
-/** OAuth return URL (Google / Microsoft). Exchanges the code for a session cookie. */
+/** Return URL for OAuth (Google / Microsoft) and email sign-in links. Exchanges the code for a session cookie. */
 export async function GET(request: NextRequest) {
   const { searchParams, origin } = request.nextUrl;
   const code = searchParams.get('code');

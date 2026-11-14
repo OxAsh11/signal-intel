@@ -7,11 +7,16 @@ import { createClient } from '@/lib/supabase/client';
 
 type Provider = 'google' | 'azure';
 
-/** Buttons only for providers that are switched on; the login page shows placeholders for the rest. */
-export function SignInButtons({ providers }: { providers: Provider[] }) {
+/**
+ * Buttons only for providers that are switched on; the login page shows placeholders for the rest.
+ * `showUrlError` is off when the email form is also shown, so a failed sign-in is reported once.
+ */
+export function SignInButtons({ providers, showUrlError = true }: { providers: Provider[]; showUrlError?: boolean }) {
   const params = useSearchParams();
   const [pending, setPending] = useState<Provider | null>(null);
-  const [error, setError] = useState<string | null>(params.get('error') ? 'Sign-in did not complete. Try again.' : null);
+  const [error, setError] = useState<string | null>(
+    showUrlError && params.get('error') ? 'Sign-in did not complete. Try again.' : null,
+  );
   const supabase = createClient();
 
   if (!supabase) {
