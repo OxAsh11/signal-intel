@@ -104,11 +104,11 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
     .from('signal-uploads')
     .upload(storagePath, fileBuffer, { contentType: 'text/csv', upsert: false });
 
-  if (uploadError) return { error: friendlyError(uploadError.message) };
+  if (uploadError) return { error: `The file could not be stored: ${friendlyError(uploadError.message)}` };
 
   // Step 2: Create the radar with the storage path already in config so the
   // worker can find the file immediately when radar.fetch_queued fires.
-  const { data: radarId, error: createError } = await rpc('create_radar', {
+  const { error: createError } = await rpc('create_radar', {
     p_ws: workspace,
     p_brief: brief,
     p_connector_type: 'csv_upload',
@@ -119,14 +119,6 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
 
   revalidatePath(`/briefs/${brief}`);
   redirect(`/briefs/${brief}`);
-}
-
-/**
- * Form-compatible wrapper around uploadCsvRadar for direct use as a form `action`.
- * Returns void so it satisfies the HTML form action type constraint.
- */
-export async function csvRadarFormAction(form: FormData): Promise<void> {
-  await uploadCsvRadar({}, form);
 }
 
 /** Add a user query to a radar (M2: users can edit the query set). Fields: `radar`, `brief`, `text`. */

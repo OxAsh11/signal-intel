@@ -1,20 +1,21 @@
 import type { Metadata } from 'next';
-import { notFound } from 'next/navigation';
+import Link from 'next/link';
+import { notFound, redirect } from 'next/navigation';
 import { createClient } from '@/lib/supabase/server';
-import { getOrgContext } from '@/lib/org';
-import { csvRadarFormAction } from '@/app/actions/radars';
+import { atLeast, getOrgContext } from '@/lib/org';
+import { CsvUploadForm } from './csv-upload-form';
 
-export const metadata: Metadata = { title: 'Upload CSV Radar' };
+export const metadata: Metadata = { title: 'Upload a list' };
 
 interface Props {
   params: Promise<{ id: string }>;
-  searchParams: Promise<Record<string, string | string[] | undefined>>;
 }
 
 export default async function CsvUploadPage({ params }: Props) {
   const { id: briefId } = await params;
   const [ctx, supabase] = await Promise.all([getOrgContext(), createClient()]);
   if (!ctx?.workspace || !supabase) return null;
+  if (!atLeast(ctx.workspaceRole, 'Editor')) redirect(`/briefs/${briefId}`);
 
   const { data: brief } = await supabase
     .from('brief')
@@ -26,25 +27,17 @@ export default async function CsvUploadPage({ params }: Props) {
   if (!brief) notFound();
 
   return (
-    <div>
-      <h1 className="si-h1">Upload CSV Radar</h1>
-      <p>Brief: {brief.name}</p>
-      <form action={csvRadarFormAction}>
-        <input type="hidden" name="brief" value={briefId} />
-        <input type="hidden" name="workspace" value={ctx.workspace.id} />
-
-        <div>
-          <label htmlFor="name">Radar name</label>
-          <input id="name" name="name" type="text" required placeholder="e.g. Prospect list" />
-        </div>
-
-        <div>
-          <label htmlFor="file">CSV file</label>
-          <input id="file" name="file" type="file" accept=".csv" required />
-        </div>
-
-        <button type="submit">Upload &amp; create radar</button>
-      </form>
+    <div className="mx-auto flex w-full max-w-[760px] flex-col gap-7">
+      <div className="flex flex-col gap-2">
+        <Link href={`/briefs/${briefId}/radars`} className="text-[13px] text-ink-muted">‹ Radars</Link>
+        <span className="si-eyebrow">{brief.name}</span>
+        <h1 className="si-h1">Upload a list</h1>
+        <p className="si-lede">
+          A CSV of companies, articles or event exhibitors becomes a radar. Every row is judged against this Brief like any
+          other source.
+        </p>
+      </div>
+      <CsvUploadForm briefId={briefId} workspaceId={ctx.workspace.id} />
     </div>
   );
 }
