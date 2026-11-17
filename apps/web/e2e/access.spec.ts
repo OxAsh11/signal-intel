@@ -27,8 +27,9 @@ test('another organisation cannot see or open a Brief', async ({ browser }) => {
   await expect(pageB.getByText('No Briefs yet.')).toBeVisible();
   await expect(pageB.getByText(name)).toHaveCount(0);
 
-  const res = await pageB.goto(`/briefs/${id}`);
-  expect(res?.status()).toBe(404);
+  // Next.js streams the page frame first, so the HTTP status stays 200; the not-found screen is what counts.
+  await pageB.goto(`/briefs/${id}`);
+  await expect(pageB.getByRole('heading', { name: 'This page could not be found.' })).toBeVisible();
   await expect(pageB.getByText(name)).toHaveCount(0);
   await ctxB.close();
 });

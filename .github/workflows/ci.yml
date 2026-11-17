@@ -112,7 +112,14 @@ jobs:
           } >> "$GITHUB_ENV"
       - run: pnpm turbo run build --filter=web
       - run: pnpm --filter web exec playwright install --with-deps chromium
-      - run: pnpm --filter web e2e
+      - name: Playwright
+        run: |
+          set -o pipefail
+          pnpm --filter web e2e 2>&1 | tee e2e.log
+      # The server's own errors fail the job too (e.g. Next.js refusing a prerender).
+      - name: No server errors during the run
+        run: |
+          if grep -E "\[WebServer\].*(Error:|unstable value)" e2e.log; then exit 1; fi
       - uses: actions/upload-artifact@v4
         if: failure()
         with:

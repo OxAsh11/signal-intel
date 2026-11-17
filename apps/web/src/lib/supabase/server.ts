@@ -1,15 +1,19 @@
 import 'server-only';
 import { cookies } from 'next/headers';
+import { connection } from 'next/server';
 import { createServerClient } from '@supabase/ssr';
 import { supabaseEnv } from '@/lib/env';
 
 /**
  * Supabase client acting as the signed-in user. Every query runs under RLS with the user's JWT.
  * Reads cookies(), so callers must sit inside a <Suspense> boundary (Cache Components).
+ * `connection()` first: the auth client reads the clock (Date.now) as it starts, which Next.js
+ * refuses during a prerender, so the client only ever runs at request time.
  */
 export async function createClient() {
   const env = supabaseEnv();
   if (!env) return null;
+  await connection();
   const cookieStore = await cookies();
   return createServerClient(env.url, env.anonKey, {
     cookies: {
