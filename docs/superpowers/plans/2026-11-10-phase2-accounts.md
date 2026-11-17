@@ -188,6 +188,7 @@ Labels derived here and upserted: `radar:<source>`, `vertical:<value>`, `geograp
 ```python
 # test_m08_scoring.py
 
+
 async def test_compute_score_no_brief_version_returns_none(): ...
 async def test_compute_score_unverified_verdict_caps_at_low(): ...
 async def test_compute_score_contradicted_verdict_sets_excluded(): ...
@@ -344,13 +345,13 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 ```python
 TRANSITIONS: dict[str, dict[str, str]] = {
     # activity_kind → {from_stage → to_stage}
-    'message_sent':      {'Untouched': 'Contacted', 'Queued': 'Contacted'},
-    'reply_received':    {'Contacted': 'Engaged'},
-    'inbound_contact':   {'Untouched': 'Engaged', 'Contacted': 'Engaged'},
-    'meeting_held':      {'Contacted': 'Meeting', 'Engaged': 'Meeting', 'Qualified': 'Meeting'},
-    'marked_qualified':  {'Contacted': 'Qualified', 'Engaged': 'Qualified'},
-    'marked_disqualified': {'*': 'Disqualified'},  # any stage → Disqualified
-    'deal_created':      {'Meeting': 'Handed off'},
+    "message_sent": {"Untouched": "Contacted", "Queued": "Contacted"},
+    "reply_received": {"Contacted": "Engaged"},
+    "inbound_contact": {"Untouched": "Engaged", "Contacted": "Engaged"},
+    "meeting_held": {"Contacted": "Meeting", "Engaged": "Meeting", "Qualified": "Meeting"},
+    "marked_qualified": {"Contacted": "Qualified", "Engaged": "Qualified"},
+    "marked_disqualified": {"*": "Disqualified"},  # any stage → Disqualified
+    "deal_created": {"Meeting": "Handed off"},
     # Notes, out-of-office, task_completed: no transition
 }
 ```
@@ -512,20 +513,42 @@ Co-Authored-By: Claude Sonnet 4.6 <noreply@anthropic.com>"
 - Produces: 6 new `@job` decorated async functions in `app.py`, each following the pattern from `verdict_compute_task`; 1 cron registration for `health.check` running every 30 minutes
 
 ```python
-@job(app, type="score.compute",          kill_switch=kill_switch, queue="derive",  retry=2)
-async def score_compute_task(*, entity_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_): ...
+@job(app, type="score.compute", kill_switch=kill_switch, queue="derive", retry=2)
+async def score_compute_task(
+    *, entity_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_
+): ...
 
-@job(app, type="research.generate",      kill_switch=kill_switch, queue="compute", retry=1)
-async def research_generate_task(*, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_): ...
 
-@job(app, type="enrichment.run",         kill_switch=kill_switch, queue="compute", retry=1)
-async def enrichment_run_task(*, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_): ...
+@job(app, type="research.generate", kill_switch=kill_switch, queue="compute", retry=1)
+async def research_generate_task(
+    *, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_
+): ...
 
-@job(app, type="account.stage_advance",  kill_switch=kill_switch, queue="derive",  retry=3)
-async def account_stage_advance_task(*, account_id: str, workspace_id: str, org_id: str, activity_id: str | None, activity_kind: str, approval_id: str | None = None, **_): ...
 
-@job(app, type="account.card.generate",  kill_switch=kill_switch, queue="derive",  retry=2)
-async def account_card_generate_task(*, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_): ...
+@job(app, type="enrichment.run", kill_switch=kill_switch, queue="compute", retry=1)
+async def enrichment_run_task(
+    *, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_
+): ...
+
+
+@job(app, type="account.stage_advance", kill_switch=kill_switch, queue="derive", retry=3)
+async def account_stage_advance_task(
+    *,
+    account_id: str,
+    workspace_id: str,
+    org_id: str,
+    activity_id: str | None,
+    activity_kind: str,
+    approval_id: str | None = None,
+    **_,
+): ...
+
+
+@job(app, type="account.card.generate", kill_switch=kill_switch, queue="derive", retry=2)
+async def account_card_generate_task(
+    *, account_id: str, workspace_id: str, org_id: str, approval_id: str | None = None, **_
+): ...
+
 
 @cron(app, cron="*/30 * * * *", queue="health", type="health.check")
 async def health_check_task(**_): ...

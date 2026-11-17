@@ -180,16 +180,19 @@ def test_create_campaign_returns_uuid(mock_pool):
     result = create_campaign(mock_pool, ctx, "Q4 Target", "Vertical", brief_id)
     assert isinstance(result, UUID)
 
+
 def test_push_dry_run_records_no_members(mock_pool):
     # Campaign with push_mode = 'dry run'
     result = push_campaign_batch(mock_pool, mock_gateway, campaign_id, ctx)
     assert result["pushed"] == 0
     # external_write_log has dry_run=True entries
 
+
 def test_push_skips_suppressed_person(mock_pool):
     # person_entity_id in suppression_list
     result = push_campaign_batch(mock_pool, mock_gateway, campaign_id, ctx)
     assert result["skipped"] >= 1
+
 
 def test_push_pauses_at_bounce_threshold(mock_pool):
     # bounce_count/bounce_messages_sent >= 0.10 for campaign
@@ -252,15 +255,18 @@ def test_classify_reply_stores_class(mock_pool):
     classify_reply(mock_pool, activity_id, "Interested", None, "ai")
     # activity.payload["reply_class"] == "Interested"
 
+
 def test_human_mark_wins_over_ai(mock_pool):
     classify_reply(mock_pool, activity_id, "Not interested", None, "ai")
     classify_reply(mock_pool, activity_id, "Interested", member_id, "human")
     # payload["reply_class"] == "Interested", source == "human"
 
+
 def test_ai_cannot_override_human(mock_pool):
     classify_reply(mock_pool, activity_id, "Interested", member_id, "human")
     classify_reply(mock_pool, activity_id, "Not interested", None, "ai")
     # payload["reply_class"] == "Interested" (unchanged)
+
 
 def test_unsubscribe_adds_to_suppression(mock_pool):
     classify_reply(mock_pool, activity_id, "Unsubscribe", None, "sequencer")
@@ -319,17 +325,19 @@ git commit -m "feat(py): M10 inbox — reply classification with human-wins rule
 
 ```python
 def test_sync_meeting_matches_domain_to_account(mock_pool):
-    meeting_id = sync_meeting(mock_pool, org_id, ws_id, integ_id, "ext1",
-                              now(), ["acme.com"])
+    meeting_id = sync_meeting(mock_pool, org_id, ws_id, integ_id, "ext1", now(), ["acme.com"])
     assert isinstance(meeting_id, UUID)
+
 
 def test_confirm_meeting_emits_held(mock_pool):
     confirm_meeting(mock_pool, meeting_id, now(), "confirmed")
     # outbox has meeting.held event
 
+
 def test_unconfirmed_meeting_does_not_emit_held(mock_pool):
     confirm_meeting(mock_pool, meeting_id, now(), "unconfirmed")
     # no meeting.held in outbox
+
 
 def test_create_task_returns_uuid(mock_pool):
     task_id = create_task(mock_pool, org_id, ws_id, acct_id, "Follow up", None, "reply")
@@ -396,16 +404,19 @@ def test_create_integration_returns_uuid(mock_pool):
     int_id = create_integration(mock_pool, ctx, "HubSpot", "CRMs", "Read")
     assert isinstance(int_id, UUID)
 
+
 def test_deliver_webhook_calls_url(mock_pool, httpx_mock):
     httpx_mock.add_response(url="https://example.com/hook", status_code=200)
     status = deliver_webhook(mock_pool, sub_id, event_id, "score.band_changed", {})
     assert status == "delivered"
+
 
 def test_replay_uses_stored_payload(mock_pool, httpx_mock):
     httpx_mock.add_response(url="https://example.com/hook", status_code=200)
     status = replay_webhook_delivery(mock_pool, delivery_id)
     assert status == "delivered"
     # sent body matches stored webhook_delivery.payload bytes exactly
+
 
 def test_replay_idempotent_for_delivered(mock_pool):
     # delivery already has status='delivered'
@@ -508,24 +519,41 @@ dependencies = [
 ```python
 async def test_valid_token_resolves(client):
     # Insert api_token with token_hash = sha256("test-token")
-    resp = await client.get("/v1/entities", headers={"Authorization": "Bearer test-token"},
-                            params={"workspace_id": str(ws_id)})
+    resp = await client.get(
+        "/v1/entities",
+        headers={"Authorization": "Bearer test-token"},
+        params={"workspace_id": str(ws_id)},
+    )
     assert resp.status_code == 200
+
 
 async def test_missing_token_returns_401(client):
     resp = await client.get("/v1/entities", params={"workspace_id": str(ws_id)})
     assert resp.status_code == 401
 
+
 async def test_revoked_token_returns_401(client):
     # token with revoked_at = now()
-    resp = await client.get("/v1/entities", headers={"Authorization": "Bearer revoked-token"},
-                            params={"workspace_id": str(ws_id)})
+    resp = await client.get(
+        "/v1/entities",
+        headers={"Authorization": "Bearer revoked-token"},
+        params={"workspace_id": str(ws_id)},
+    )
     assert resp.status_code == 401
+
 
 async def test_read_token_cannot_post(client):
     # Read-scoped token
-    resp = await client.post("/v1/campaigns", headers={"Authorization": "Bearer read-token"},
-                             json={"name": "x", "motion": "Vertical", "brief_id": str(brief_id), "workspace_id": str(ws_id)})
+    resp = await client.post(
+        "/v1/campaigns",
+        headers={"Authorization": "Bearer read-token"},
+        json={
+            "name": "x",
+            "motion": "Vertical",
+            "brief_id": str(brief_id),
+            "workspace_id": str(ws_id),
+        },
+    )
     assert resp.status_code == 403
 ```
 
@@ -581,16 +609,22 @@ git commit -m "feat(api): API service foundation — FastAPI /v1, token auth, sc
 async def test_valid_inbound_webhook_stores_activity(client):
     payload = {"external_id": "evt1", "type": "email_replied", "account_external_id": "acct1"}
     sig = compute_hmac(payload_bytes, secret)
-    resp = await client.post(f"/v1/webhooks/{integration_id}",
-                              content=json.dumps(payload),
-                              headers={"X-Signal-Signature": f"sha256={sig}"})
+    resp = await client.post(
+        f"/v1/webhooks/{integration_id}",
+        content=json.dumps(payload),
+        headers={"X-Signal-Signature": f"sha256={sig}"},
+    )
     assert resp.status_code == 200
 
+
 async def test_invalid_signature_returns_401(client):
-    resp = await client.post(f"/v1/webhooks/{integration_id}",
-                              content=b'{"foo":"bar"}',
-                              headers={"X-Signal-Signature": "sha256=bad"})
+    resp = await client.post(
+        f"/v1/webhooks/{integration_id}",
+        content=b'{"foo":"bar"}',
+        headers={"X-Signal-Signature": "sha256=bad"},
+    )
     assert resp.status_code == 401
+
 
 async def test_duplicate_event_idempotent(client):
     # POST same external_id twice
@@ -652,17 +686,23 @@ from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP("signal-intel")
 
+
 @mcp.tool()
 async def get_account_card(account_id: str, workspace_id: str) -> dict: ...
+
 
 @mcp.tool()
 async def search_account(query: str, workspace_id: str, limit: int = 10) -> list[dict]: ...
 
+
 @mcp.tool()
 async def get_claims(entity_id: str, predicate_key: str | None = None) -> list[dict]: ...
 
+
 @mcp.tool()
-async def find_accounts(workspace_id: str, band: str | None = None, stage: str | None = None, limit: int = 20) -> list[dict]: ...
+async def find_accounts(
+    workspace_id: str, band: str | None = None, stage: str | None = None, limit: int = 20
+) -> list[dict]: ...
 ```
 
 Mount in `main.py`:
@@ -726,9 +766,11 @@ def test_compute_metric_accounts_discovered(mock_pool):
     assert "value" in result
     assert isinstance(result["value"], int)
 
+
 def test_compute_metric_unknown_key_raises(mock_pool):
     with pytest.raises(ValueError, match="unknown metric"):
         compute_metric(mock_pool, ws_id, brief_id, "not_a_metric")
+
 
 def test_get_funnel_returns_all_stages(mock_pool):
     funnel = get_funnel(mock_pool, ws_id, brief_id)
@@ -793,13 +835,18 @@ def test_submit_dsr_deletion_calls_rpc(mock_pool):
     # suppression_list has row for person_id (via process_dsr_deletion)
     # entity.display_name == '[deleted]'
 
+
 def test_submit_dsr_access_returns_snapshot(mock_pool):
     result = submit_dsr(mock_pool, org_id, person_id, "access", "user@example.com")
     # returns dict with "claims", "activity", "contact_points" keys
 
+
 def test_add_evaluation_example_appends(mock_pool):
-    add_evaluation_example(mock_pool, org_id, ws_id, bv_id, {"verdict": "Confirmed", "correct": True})
+    add_evaluation_example(
+        mock_pool, org_id, ws_id, bv_id, {"verdict": "Confirmed", "correct": True}
+    )
     # evaluation_set.examples has 1 item
+
 
 def test_is_suppressed_returns_true_for_suppressed(mock_pool):
     # person in suppression_list
@@ -874,7 +921,10 @@ Add at the top of `app.py`:
 ```python
 from signal_core.modules.m09_activation import push_campaign_batch
 from signal_core.modules.m10_inbox import classify_reply as _classify_reply, get_inbox as _get_inbox
-from signal_core.modules.m12_meetings import sync_meeting as _sync_meeting, suggest_next_step as _suggest_next_step
+from signal_core.modules.m12_meetings import (
+    sync_meeting as _sync_meeting,
+    suggest_next_step as _suggest_next_step,
+)
 from signal_core.modules.m13_integrations import deliver_webhook as _deliver_webhook
 from signal_core.modules.m16_reporting import compute_metric as _compute_metric
 ```

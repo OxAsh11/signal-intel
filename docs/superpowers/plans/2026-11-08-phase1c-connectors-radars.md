@@ -314,17 +314,20 @@ git commit -m "feat(db): radar/radar_query schema + S2 write-path RPCs (migratio
 import pytest
 from signal_core.connectors.base import FetchGuard, FetchBlocked
 
+
 @pytest.mark.asyncio
 async def test_private_ip_blocked():
     g = FetchGuard()
     with pytest.raises(FetchBlocked):
         await g.check("http://192.168.1.1/page")
 
+
 @pytest.mark.asyncio
 async def test_loopback_blocked():
     g = FetchGuard()
     with pytest.raises(FetchBlocked):
         await g.check("http://127.0.0.1/page")
+
 
 @pytest.mark.asyncio
 async def test_public_ip_allowed(httpserver):
@@ -333,15 +336,18 @@ async def test_public_ip_allowed(httpserver):
     g = FetchGuard()
     await g.check(httpserver.url_for("/page"))  # must not raise
 
+
 @pytest.mark.asyncio
 async def test_robots_disallowed(httpserver):
     httpserver.expect_request("/robots.txt").respond_with_data(
         "User-agent: *\nDisallow: /page\n", content_type="text/plain"
     )
     from signal_core.connectors.base import FetchDisallowed
+
     g = FetchGuard()
     with pytest.raises(FetchDisallowed):
         await g.check(httpserver.url_for("/page"))
+
 
 @pytest.mark.asyncio
 async def test_robots_404_treated_as_no_rules(httpserver):
@@ -349,8 +355,10 @@ async def test_robots_404_treated_as_no_rules(httpserver):
     g = FetchGuard()
     await g.check(httpserver.url_for("/page"))  # must not raise
 
+
 def test_content_hash_stable():
     from signal_core.connectors.base import content_hash
+
     assert content_hash(b"hello") == content_hash(b"hello")
     assert content_hash(b"hello") != content_hash(b"world")
 ```
@@ -362,11 +370,15 @@ Expected: FAIL (module not found).
 
 ```python
 class FetchBlocked(Exception): ...
+
+
 class FetchDisallowed(Exception): ...
+
 
 def content_hash(raw: bytes) -> str:
     # SHA-256 hex of raw bytes.
     ...
+
 
 class FetchGuard:
     # Cache: robots rules per origin, TTL 1 hour.
@@ -377,6 +389,7 @@ class FetchGuard:
         # 3. Fetch /robots.txt with aiohttp (10s timeout); 404/5xx → no rules.
         # 4. Parse with urllib.robotparser; check User-agent='*' and the given path.
         ...
+
 
 def save_payload(raw: bytes, prefix: str) -> str | None:
     # Write to object storage if STORAGE_URL is set; return path.
@@ -391,6 +404,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Protocol
 
+
 @dataclass
 class SourcePayload:
     url: str
@@ -400,11 +414,12 @@ class SourcePayload:
     language: str
     raw: bytes
 
+
 class Connector(Protocol):
     source_type: str
+
     async def fetch(
-        self, config: dict, queries: list[str], cursor: dict,
-        guard: "FetchGuard", limit: int
+        self, config: dict, queries: list[str], cursor: dict, guard: "FetchGuard", limit: int
     ) -> tuple[list[SourcePayload], dict]: ...
 ```
 
@@ -475,6 +490,7 @@ import pytest
 from signal_core.connectors.csv_upload import CsvConnector
 from signal_core.connectors.base import FetchGuard
 
+
 @pytest.mark.asyncio
 async def test_csv_produces_one_payload_per_data_row(tmp_path):
     rows = [["name", "domain"], ["Acme", "acme.com"], ["Beta Inc", "beta.io"]]
@@ -489,14 +505,18 @@ async def test_csv_produces_one_payload_per_data_row(tmp_path):
     assert payloads[0].url.startswith("csv:")
     assert payloads[0].content_hash != payloads[1].content_hash
 
+
 @pytest.mark.asyncio
 async def test_csv_header_only_returns_zero_payloads(tmp_path):
     path = tmp_path / "empty.csv"
     path.write_text("name,domain\n")
     conn = CsvConnector()
     guard = FetchGuard()
-    payloads, _ = await conn.fetch(config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000)
+    payloads, _ = await conn.fetch(
+        config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000
+    )
     assert payloads == []
+
 
 @pytest.mark.asyncio
 async def test_csv_deduplicates_identical_rows(tmp_path):
@@ -504,7 +524,9 @@ async def test_csv_deduplicates_identical_rows(tmp_path):
     path.write_text("name,domain\nAcme,acme.com\nAcme,acme.com\n")
     conn = CsvConnector()
     guard = FetchGuard()
-    payloads, _ = await conn.fetch(config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000)
+    payloads, _ = await conn.fetch(
+        config={"storage_path": str(path)}, queries=[], cursor={}, guard=guard, limit=1000
+    )
     hashes = [p.content_hash for p in payloads]
     assert len(set(hashes)) == len(hashes)  # all unique hashes (deduped at upload layer)
 ```
@@ -582,6 +604,7 @@ async def test_website_strips_html(httpserver):
         "<html><body><h1>Hello</h1><p>World</p></body></html>", content_type="text/html"
     )
     from signal_core.connectors.website import WebsiteConnector
+
     guard = FetchGuard()
     conn = WebsiteConnector()
     payloads, _ = await conn.fetch(
@@ -591,10 +614,12 @@ async def test_website_strips_html(httpserver):
     assert b"<h1>" not in payloads[0].raw
     assert b"Hello" in payloads[0].raw
 
+
 # News connector (fake mode)
 @pytest.mark.asyncio
 async def test_news_fake_returns_two_payloads():
     from signal_core.connectors.news import NewsConnector
+
     guard = FetchGuard()
     conn = NewsConnector()
     payloads, _ = await conn.fetch(
@@ -602,10 +627,12 @@ async def test_news_fake_returns_two_payloads():
     )
     assert len(payloads) == 2
 
+
 # Job posts connector (fake mode)
 @pytest.mark.asyncio
 async def test_jobs_fake_returns_two_payloads():
     from signal_core.connectors.job_posts import JobPostConnector
+
     guard = FetchGuard()
     conn = JobPostConnector()
     payloads, _ = await conn.fetch(
@@ -680,10 +707,19 @@ async def test_generate_queries_returns_radar_query_set(fake_gateway, fake_pool)
     from signal_core.modules.m02_radar import generate_queries
     from signal_core.ai_gateway.gateway import CallContext
     from uuid import uuid4
-    ctx = CallContext(org_id=uuid4(), workspace_id=uuid4(), brief_id=uuid4(),
-                      job_id=None, job_type="radar.generate_queries", job_args={})
-    config = {"hypothesis": "firms using CAD software and hiring engineers",
-              "icp": {"geographies": ["USA", "Canada"]}}
+
+    ctx = CallContext(
+        org_id=uuid4(),
+        workspace_id=uuid4(),
+        brief_id=uuid4(),
+        job_id=None,
+        job_type="radar.generate_queries",
+        job_args={},
+    )
+    config = {
+        "hypothesis": "firms using CAD software and hiring engineers",
+        "icp": {"geographies": ["USA", "Canada"]},
+    }
     result = await generate_queries(config, fake_gateway, ctx)
     assert len(result.queries) >= 1
     assert all(q.query_text for q in result.queries)
@@ -703,6 +739,7 @@ class RadarQuery(BaseModel):
     query_text: str
     language: str = "en"
     source: Literal["hypothesis", "icp"] = "hypothesis"
+
 
 class RadarQuerySet(BaseModel):
     queries: list[RadarQuery] = Field(max_length=20)
@@ -775,11 +812,15 @@ async def fetch_news(radar_id: str, org_id: str, workspace_id: str, brief_id: st
     conn = NewsConnector()
     guard = FetchGuard()
     payloads, next_cursor = await conn.fetch(
-        config=radar["config"], queries=[q["query_text"] for q in queries],
-        cursor=radar["cursor_state"], guard=guard, limit=500
+        config=radar["config"],
+        queries=[q["query_text"] for q in queries],
+        cursor=radar["cursor_state"],
+        guard=guard,
+        limit=500,
     )
-    created = await create_source_records(pool, UUID(org_id), UUID(workspace_id),
-                                          f"radar:{radar_id}", payloads)
+    created = await create_source_records(
+        pool, UUID(org_id), UUID(workspace_id), f"radar:{radar_id}", payloads
+    )
     await _update_cursor(pool, UUID(radar_id), next_cursor, len(payloads), created)
     return {"fetched": len(payloads), "created": created}
 ```
@@ -820,6 +861,7 @@ elif evt == "brief.version_published":
 
 ```python
 RADAR_HEALTH_CRON = "30 * * * *"  # every hour at :30
+
 
 @app.periodic(cron=RADAR_HEALTH_CRON, periodic_id="radar.health_check")
 @job(app, type="radar.health_check", kill_switch=kill_switch, queue="system", retry=0)

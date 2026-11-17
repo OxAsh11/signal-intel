@@ -206,6 +206,7 @@ from unittest.mock import AsyncMock, MagicMock, call
 from uuid import UUID, uuid4
 from signal_core.derivation.writer import upsert_verdict, upsert_memory_chunk
 
+
 @pytest.mark.asyncio
 async def test_upsert_verdict_calls_rpc():
     pool = AsyncMock()
@@ -223,6 +224,7 @@ async def test_upsert_verdict_calls_rpc():
     sql = conn.execute.call_args[0][0]
     assert "app.upsert_verdict" in sql
 
+
 @pytest.mark.asyncio
 async def test_upsert_memory_chunk_calls_rpc():
     pool = AsyncMock()
@@ -234,8 +236,19 @@ async def test_upsert_memory_chunk_calls_rpc():
     chunk_id = uuid4()
     cur.fetchone = AsyncMock(return_value=(chunk_id,))
     result = await upsert_memory_chunk(
-        pool, uuid4(), uuid4(), None, None,
-        "source_record", uuid4(), 0, "hello", [0.1] * 1024, "voyage-3", "tenant", None
+        pool,
+        uuid4(),
+        uuid4(),
+        None,
+        None,
+        "source_record",
+        uuid4(),
+        0,
+        "hello",
+        [0.1] * 1024,
+        "voyage-3",
+        "tenant",
+        None,
     )
     assert result == chunk_id
     sql = conn.execute.call_args[0][0]
@@ -263,6 +276,7 @@ Expected: ImportError / ModuleNotFoundError
 `packages/signal_core/src/signal_core/derivation/__init__.py`:
 ```python
 from signal_core.derivation.writer import upsert_verdict, upsert_memory_chunk
+
 __all__ = ["upsert_verdict", "upsert_memory_chunk"]
 ```
 
@@ -332,6 +346,7 @@ from uuid import uuid4
 from signal_core.modules.m05_verdict import compute_verdict, VerdictOutput
 from signal_core.metering import CallContext
 
+
 @pytest.mark.asyncio
 async def test_compute_verdict_no_brief_version_returns_none():
     pool = AsyncMock()
@@ -347,6 +362,7 @@ async def test_compute_verdict_no_brief_version_returns_none():
     result = await compute_verdict(pool, gateway, uuid4(), uuid4(), ctx)
     assert result is None
     gateway.run.assert_not_called()
+
 
 @pytest.mark.asyncio
 async def test_compute_verdict_no_claims_returns_unverified(monkeypatch):
@@ -450,10 +466,12 @@ from signal_core.modules.m05_index import chunk_text, index_source_record
 from signal_core.ai_gateway.errors import AiNotConfigured
 from signal_core.metering import CallContext
 
+
 def test_chunk_text_single_chunk():
     text = "hello world"
     chunks = chunk_text(text)
     assert chunks == ["hello world"]
+
 
 def test_chunk_text_splits_at_size():
     text = "a" * 2000
@@ -462,9 +480,11 @@ def test_chunk_text_splits_at_size():
     assert len(chunks[0]) == 1500
     assert chunks[1] == "a" * 700  # 2000 - 1500 + 200 overlap
 
+
 def test_chunk_text_empty():
     assert chunk_text("") == []
     assert chunk_text("   ") == []
+
 
 @pytest.mark.asyncio
 async def test_index_no_content_returns_zero():
@@ -481,6 +501,7 @@ async def test_index_no_content_returns_zero():
     result = await index_source_record(pool, gateway, uuid4(), ctx)
     assert result == 0
 
+
 @pytest.mark.asyncio
 async def test_index_embedder_not_configured_returns_zero(monkeypatch):
     pool = AsyncMock()
@@ -490,7 +511,9 @@ async def test_index_embedder_not_configured_returns_zero(monkeypatch):
     cur = AsyncMock()
     conn.cursor.return_value.__aenter__ = AsyncMock(return_value=cur)
     conn.cursor.return_value.__aexit__ = AsyncMock(return_value=False)
-    cur.fetchone = AsyncMock(return_value=(uuid4(), uuid4(), None, None, "source_record", "some content"))
+    cur.fetchone = AsyncMock(
+        return_value=(uuid4(), uuid4(), None, None, "source_record", "some content")
+    )
     gateway = MagicMock()
     gateway.embed = AsyncMock(side_effect=AiNotConfigured("no embedder"))
     gateway.model_for = MagicMock(return_value="voyage-3")
@@ -572,6 +595,7 @@ Add to `services/worker/tests/test_worker.py`:
 def test_build_app_registers_verdict_compute(app_fixture):
     assert "verdict.compute" in app_fixture.tasks
 
+
 def test_build_app_registers_index_chunk_embed(app_fixture):
     assert "index.chunk_embed" in app_fixture.tasks
 ```
@@ -592,11 +616,15 @@ In `build_app()`, after the identity section, add:
 # Verdict computation job (Phase 1e / M5)
 # ------------------------------------------------------------------
 
+
 @job(app, type="verdict.compute", kill_switch=kill_switch, queue="derive", retry=2)
-async def verdict_compute_task(*, entity_id: str, workspace_id: str, org_id: str, **_: Any) -> str | None:
+async def verdict_compute_task(
+    *, entity_id: str, workspace_id: str, org_id: str, **_: Any
+) -> str | None:
     assert pool is not None and gateway is not None, "pool and gateway required"
     from uuid import UUID as _UUID
     import signal_core.modules.m05_verdict as _m05_verdict
+
     ctx = CallContext(
         org_id=_UUID(org_id),
         workspace_id=_UUID(workspace_id),
@@ -605,17 +633,22 @@ async def verdict_compute_task(*, entity_id: str, workspace_id: str, org_id: str
         job_type="verdict.compute",
         job_args={"entity_id": entity_id, "workspace_id": workspace_id},
     )
-    return await _m05_verdict.compute_verdict(pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx)
+    return await _m05_verdict.compute_verdict(
+        pool, gateway, _UUID(entity_id), _UUID(workspace_id), ctx
+    )
+
 
 # ------------------------------------------------------------------
 # Indexer job (Phase 1e / S9)
 # ------------------------------------------------------------------
+
 
 @job(app, type="index.chunk_embed", kill_switch=kill_switch, queue="derive", retry=2)
 async def index_chunk_embed_task(*, source_record_id: str, **_: Any) -> int:
     assert pool is not None and gateway is not None, "pool and gateway required"
     from uuid import UUID as _UUID
     import signal_core.modules.m05_index as _m05_index
+
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
@@ -641,6 +674,7 @@ Wire module handles after `build_app` sections:
 ```python
 import signal_core.modules.m05_verdict as _m05_verdict
 import signal_core.modules.m05_index as _m05_index
+
 _m05_verdict.verdict_compute_job = verdict_compute_task
 _m05_index.index_chunk_embed_job = index_chunk_embed_task
 ```
@@ -654,6 +688,7 @@ try:
     if _m05_index.index_chunk_embed_job is not None:
         import contextlib
         from procrastinate.exceptions import AlreadyEnqueued
+
         with contextlib.suppress(AlreadyEnqueued):
             await _m05_index.index_chunk_embed_job.configure(
                 queueing_lock=str(source_record_id)
@@ -692,6 +727,7 @@ async def _defer_verdict(org_id: UUID, workspace_id: UUID) -> None:
     import signal_core.modules.m05_verdict as _m05_verdict
     import contextlib
     from procrastinate.exceptions import AlreadyEnqueued
+
     try:
         if _m05_verdict.verdict_compute_job is not None:
             with contextlib.suppress(AlreadyEnqueued):
