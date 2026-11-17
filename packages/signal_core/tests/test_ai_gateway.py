@@ -196,6 +196,32 @@ async def test_provider_429_retried_then_fails_without_ledger_row() -> None:
     assert not budget.reservations  # released
 
 
+async def test_provider_error_keeps_anthropic_reason() -> None:
+    """A 400 such as "credit balance too low" must say why, not just the status code."""
+
+    def handler(request: httpx2.Request) -> httpx2.Response:
+        return httpx2.Response(
+            400,
+            json={
+                "type": "error",
+                "error": {
+                    "type": "invalid_request_error",
+                    "message": "Your credit balance is too low to access the Anthropic API.",
+                },
+            },
+        )
+
+    client = AsyncAnthropic(
+        api_key="x", http_client=httpx2.AsyncClient(transport=httpx2.MockTransport(handler))
+    )
+    provider = AnthropicProvider(SecretStr("x"), client=client)
+    with pytest.raises(AiProviderError) as err:
+        await provider.complete(model=SONNET, system="s", user="u", max_tokens=8, json_schema=None)
+    assert "400" in str(err.value)
+    assert "invalid_request_error" in str(err.value)
+    assert "credit balance is too low" in str(err.value)
+
+
 async def test_anthropic_request_uses_structured_output_config() -> None:
     seen: dict[str, Any] = {}
 

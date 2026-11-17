@@ -36,6 +36,20 @@ def strict_schema(schema: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _status_message(exc: APIStatusError) -> str:
+    """Status plus Anthropic's own error type and message (e.g. "credit balance is too low").
+
+    The body never holds the API key; the message is capped so a large body cannot flood logs.
+    """
+    body: dict[str, Any] = exc.body if isinstance(exc.body, dict) else {}
+    raw = body.get("error")
+    error: dict[str, Any] = raw if isinstance(raw, dict) else {}
+    kind = error.get("type") or ""
+    message = str(error.get("message") or "")[:300]
+    detail = ": ".join(p for p in (kind, message) if p)
+    return f"anthropic status {exc.status_code}" + (f" ({detail})" if detail else "")
+
+
 class AnthropicProvider:
     name = "anthropic"
 
@@ -69,7 +83,7 @@ class AnthropicProvider:
                 **extra,
             )
         except APIStatusError as exc:
-            raise AiProviderError(f"anthropic status {exc.status_code}") from None
+            raise AiProviderError(_status_message(exc)) from None
         except APIConnectionError as exc:
             raise AiProviderError(f"anthropic connection error: {type(exc).__name__}") from None
         except AnthropicError as exc:
