@@ -60,7 +60,7 @@ test.describe('CSV radar upload', () => {
     await page.getByLabel('Radar name').fill('Prospect list');
     await page.getByLabel('CSV file').setInputFiles({ name: 'prospects.csv', mimeType: 'text/csv', buffer: Buffer.from(CSV) });
     await page.getByRole('button', { name: /Upload/ }).click();
-    await expect(page.getByRole('alert')).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'The file could not be stored' })).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/briefs/${briefId}/radars/upload`));
   });
 });
