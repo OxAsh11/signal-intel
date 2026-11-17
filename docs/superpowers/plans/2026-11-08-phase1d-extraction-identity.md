@@ -140,12 +140,14 @@ class RelevanceJudgement(BaseModel):
     relevant: bool
     reason: str
 
+
 class MentionExtract(BaseModel):
     entity_type: str  # 'company' | 'person'
     raw_name: str | None = None
     raw_domain: str | None = None
     raw_country: str | None = None
     raw_attributes: dict = {}
+
 
 class ClaimExtract(BaseModel):
     mention_index: int  # index into the mentions list this claim references
@@ -155,6 +157,7 @@ class ClaimExtract(BaseModel):
     quote_original: str | None = None
     quote_language: str | None = None
     confidence: int  # 0-100
+
 
 class ExtractionResult(BaseModel):
     mentions: list[MentionExtract]
@@ -169,13 +172,19 @@ async def test_judge_relevance_relevant(fake_pool, fake_gateway, fake_source_rec
     result = await judge_relevance(fake_pool, fake_gateway, fake_source_record["id"], ctx)
     assert result is True
 
-async def test_judge_relevance_irrelevant_updates_status(fake_pool, fake_gateway, fake_source_record):
+
+async def test_judge_relevance_irrelevant_updates_status(
+    fake_pool, fake_gateway, fake_source_record
+):
     # fake_gateway returns relevant=False
     result = await judge_relevance(fake_pool, fake_gateway, fake_source_record["id"], ctx)
     assert result is False
     # verify update_extraction_status called with 'irrelevant'
 
-async def test_extract_structured_creates_mentions_and_claims(fake_pool, fake_gateway, fake_source_record):
+
+async def test_extract_structured_creates_mentions_and_claims(
+    fake_pool, fake_gateway, fake_source_record
+):
     result = await extract_structured(fake_pool, fake_gateway, fake_source_record["id"], ctx)
     assert len(result.mentions) > 0
 ```
@@ -213,6 +222,7 @@ async def extract_relevance_judge_job(*, source_record_id: str) -> None:
         relevant = await judge_relevance(pool, gw, UUID(source_record_id), ctx)
         if relevant:
             await extract_structured_job.defer_async(source_record_id=source_record_id)
+
 
 @kill_switched("extract.structured")
 @app.task(queue="extract", name="extract.structured")
@@ -288,17 +298,29 @@ Routing:
 - [ ] **Step 1: Write failing tests**
 
 ```python
-async def test_resolve_mention_exact_match_attaches(fake_pool_with_entity, fake_gateway, fake_mention):
-    result = await resolve_mention(fake_pool_with_entity, fake_gateway, fake_mention["id"], ws_id, ctx)
-    assert result == 'attached'
+async def test_resolve_mention_exact_match_attaches(
+    fake_pool_with_entity, fake_gateway, fake_mention
+):
+    result = await resolve_mention(
+        fake_pool_with_entity, fake_gateway, fake_mention["id"], ws_id, ctx
+    )
+    assert result == "attached"
 
-async def test_resolve_mention_low_confidence_creates_entity(fake_pool_empty, fake_gateway, fake_mention):
+
+async def test_resolve_mention_low_confidence_creates_entity(
+    fake_pool_empty, fake_gateway, fake_mention
+):
     result = await resolve_mention(fake_pool_empty, fake_gateway, fake_mention["id"], ws_id, ctx)
-    assert result == 'created'
+    assert result == "created"
 
-async def test_resolve_mention_mid_confidence_queues(fake_pool_fuzzy_match, fake_gateway, fake_mention):
-    result = await resolve_mention(fake_pool_fuzzy_match, fake_gateway, fake_mention["id"], ws_id, ctx)
-    assert result == 'queued'
+
+async def test_resolve_mention_mid_confidence_queues(
+    fake_pool_fuzzy_match, fake_gateway, fake_mention
+):
+    result = await resolve_mention(
+        fake_pool_fuzzy_match, fake_gateway, fake_mention["id"], ws_id, ctx
+    )
+    assert result == "queued"
 ```
 
 - [ ] **Step 2: Run tests to confirm failure**
@@ -326,6 +348,7 @@ Key logic:
 @kill_switched("identity.resolve")
 @app.task(queue="identity", name="identity.resolve")
 async def identity_resolve_job(*, mention_id: str, workspace_id: str) -> None: ...
+
 
 @kill_switched("identity.duplicate_sweep")
 @app.task(queue="identity", name="identity.duplicate_sweep", schedule=CronExpression("0 2 * * *"))
@@ -458,7 +481,7 @@ async def extract_backfill(pool, brief_id: UUID, workspace_id: UUID) -> int:
         async with conn.cursor() as cur:
             await cur.execute(
                 "select id from public.source_record where workspace_id = %s and extraction_status = 'pending'",
-                (str(workspace_id),)
+                (str(workspace_id),),
             )
             rows = await cur.fetchall()
     for (sr_id,) in rows:

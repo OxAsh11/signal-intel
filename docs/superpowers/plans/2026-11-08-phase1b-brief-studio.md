@@ -206,23 +206,34 @@ git commit -m "feat(db): brief studio schema — draft_config, exclusion_list, b
 ```python
 @pytest.mark.asyncio
 async def test_draft_has_required_fields(fake_gateway, mock_pool):
-    draft = await run_brief_intake(UUID("…"), "CAD firms that are hiring", fake_ctx(), fake_gateway, mock_pool)
+    draft = await run_brief_intake(
+        UUID("…"), "CAD firms that are hiring", fake_ctx(), fake_gateway, mock_pool
+    )
     # run_brief_intake returns None; check that save_brief_draft was called
     assert mock_pool.last_call_fn == "app.save_brief_draft"
 
+
 def test_brief_draft_model_validates():
-    raw = {"offer": "CAD software", "hypothesis": "firms using SolidWorks",
-           "examples": {"positive": ["A","B","C"], "negative": ["X","Y"]},
-           "sources": {"radar_types": ["job_postings"]}}
+    raw = {
+        "offer": "CAD software",
+        "hypothesis": "firms using SolidWorks",
+        "examples": {"positive": ["A", "B", "C"], "negative": ["X", "Y"]},
+        "sources": {"radar_types": ["job_postings"]},
+    }
     draft = BriefDraft.model_validate(raw)
     assert len(draft.examples.positive) == 3
 
+
 def test_brief_draft_model_rejects_too_few_examples():
     with pytest.raises(ValidationError):
-        BriefDraft.model_validate({
-            "offer": "X", "hypothesis": "Y",
-            "examples": {"positive": ["A","B"], "negative": ["X","Y"]},  # only 2 positive
-            "sources": {"radar_types": ["news"]}})
+        BriefDraft.model_validate(
+            {
+                "offer": "X",
+                "hypothesis": "Y",
+                "examples": {"positive": ["A", "B"], "negative": ["X", "Y"]},  # only 2 positive
+                "sources": {"radar_types": ["news"]},
+            }
+        )
 ```
 
 - [ ] **Step 2: Run test to verify it fails**
@@ -273,6 +284,7 @@ Compute SHA-256 of `v1.md` (normalised line endings) and add entry:
 ```python
 from pydantic import BaseModel, field_validator
 
+
 class BriefExamples(BaseModel):
     positive: list[str]
     negative: list[str]
@@ -291,6 +303,7 @@ class BriefExamples(BaseModel):
             raise ValueError("at least 2 negative examples required")
         return v
 
+
 class BriefSources(BaseModel):
     radar_types: list[str]
 
@@ -301,16 +314,19 @@ class BriefSources(BaseModel):
             raise ValueError("at least 1 radar type required")
         return v
 
+
 class BriefIcp(BaseModel):
     verticals: list[str] = []
     geographies: list[str] = []
     size_bands: list[str] = []
     commercial_roles: list[str] = []
 
+
 class BriefPersonas(BaseModel):
     buyer: list[str] = []
     user: list[str] = []
     influencer: list[str] = []
+
 
 class BriefDraft(BaseModel):
     offer: str
@@ -320,6 +336,7 @@ class BriefDraft(BaseModel):
     icp: BriefIcp = Field(default_factory=BriefIcp)
     personas: BriefPersonas = Field(default_factory=BriefPersonas)
 
+
 OUTPUT_MODELS["brief_intake"] = BriefDraft
 ```
 
@@ -327,6 +344,7 @@ OUTPUT_MODELS["brief_intake"] = BriefDraft
 
 ```python
 """M1 Brief Studio — Python side: AI intake job."""
+
 from pydantic import BaseModel
 from uuid import UUID
 from psycopg_pool import AsyncConnectionPool
@@ -338,11 +356,13 @@ from signal_core.metering import CallContext
 PROMPT_NAME = "brief_intake"
 PROMPT_VERSION = 1
 
+
 class BriefIntakeInput(BaseModel):
     brief_id: UUID
     description: str
     org_id: UUID
     workspace_id: UUID
+
 
 async def run_brief_intake(
     inp: BriefIntakeInput,
@@ -365,12 +385,11 @@ async def run_brief_intake(
         config = draft.model_dump()
     except Exception:
         async with pool.connection() as conn:
-            await conn.execute(
-                "select app.fail_brief_intake(%s)", (str(inp.brief_id),)
-            )
+            await conn.execute("select app.fail_brief_intake(%s)", (str(inp.brief_id),))
         raise
     async with pool.connection() as conn:
         import json
+
         await conn.execute(
             "select app.save_brief_draft(%s, %s)",
             (str(inp.brief_id), json.dumps(config)),
@@ -440,8 +459,10 @@ async def brief_intake(
     brief_id: str, description: str, org_id: str, workspace_id: str, **_: Any
 ) -> None:
     inp = BriefIntakeInput(
-        brief_id=UUID(brief_id), description=description,
-        org_id=UUID(org_id), workspace_id=UUID(workspace_id),
+        brief_id=UUID(brief_id),
+        description=description,
+        org_id=UUID(org_id),
+        workspace_id=UUID(workspace_id),
     )
     await run_brief_intake(inp, gateway, pool)
     log.info("brief.intake.done", brief_id=brief_id)
