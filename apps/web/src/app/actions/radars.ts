@@ -17,6 +17,9 @@ async function rpc(fn: string, args: Record<string, unknown>) {
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
+/** Matches the signal-uploads bucket limit and the server action body limit in next.config.ts. */
+const CSV_MAX_BYTES = 10 * 1024 * 1024;
+
 /**
  * Create a new radar attached to a brief.
  * Calls the SECURITY DEFINER RPC `public.create_radar`.
@@ -92,6 +95,8 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
   if (!workspace) return { error: 'Missing workspace ID.' };
   if (!name) return { error: 'Enter a name for the radar.' };
   if (!(file instanceof File) || file.size === 0) return { error: 'Select a CSV file to upload.' };
+  if (!/\.csv$/i.test(file.name)) return { error: 'Upload a .csv file (the first row is the header).' };
+  if (file.size > CSV_MAX_BYTES) return { error: 'The file is over 10 MB. Split it into smaller files.' };
 
   // Step 1: Upload the CSV to Supabase Storage first (before creating the radar).
   const supabase = await createClient();

@@ -12,6 +12,8 @@ const nextConfig: NextConfig = {
   partialPrefetching: true,
   transpilePackages: ['@signal/ui', '@signal/contracts'],
   poweredByHeader: false,
+  // CSV radar uploads go through a server action; the default 1 MB would refuse most lists.
+  experimental: { serverActions: { bodySizeLimit: '11mb' } },
   turbopack: {
     rules: {
       '*.css': {
