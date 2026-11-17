@@ -1,17 +1,34 @@
 {
   "v": 3,
-  "layout": "files",
-  "createdOnFiles": { "v": 1, "at": "2026-11-06T06:40:00Z" },
-  "title": "Signal Intel",
-  "namespace": "SignalIntel",
-  "libraries": [
-    { "name": "react", "version": "18" },
-    { "name": "react-dom", "version": "18" }
-  ],
-  "sections": {},
-  "groups": [],
   "assetGroups": {},
   "blobs": {},
-  "docs": { "readme": "project/README.md", "sections": [] },
-  "lastChange": { "by": "Ashish Mishra", "at": "2026-11-06T06:40:00Z", "via": "Claude Code", "note": "First version from the PRD: tokens, 13 domain components, brand book, cover." }
+  "createdOnFiles": {
+    "at": "2026-11-06T06:40:00Z",
+    "v": 1
+  },
+  "docs": {
+    "readme": "project/README.md",
+    "sections": []
+  },
+  "groups": [],
+  "lastChange": {
+    "at": "2026-11-14T13:00:00Z",
+    "by": "Ashish Mishra",
+    "via": "Claude Code",
+    "note": "Light system on the Mixpanel guideline structure: white page, colour families with the guideline gradients (no purple), DM Sans/DM Mono, pill primary buttons; new Card and FamilyTag; matches the code in PR #9."
+  },
+  "layout": "files",
+  "libraries": [
+    {
+      "name": "react",
+      "version": "18"
+    },
+    {
+      "name": "react-dom",
+      "version": "18"
+    }
+  ],
+  "namespace": "SignalIntel",
+  "sections": {},
+  "title": "Signal Intel"
 }

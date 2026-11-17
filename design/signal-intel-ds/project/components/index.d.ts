@@ -10,7 +10,7 @@ export type PushMode = 'off' | 'dry run' | 'live';
 export interface ButtonProps extends React.ButtonHTMLAttributes<HTMLButtonElement> {
   variant?: 'primary' | 'secondary' | 'quiet' | 'danger';
   size?: 'md' | 'sm';
-  /** Estimated spend, shown inside the button, e.g. "≈ $42". Required on any action that spends. */
+  /** Estimated spend, shown inside the button, e.g. "≈ $42". Required on any action that spends. Primary buttons get a right chevron. */
   cost?: string;
 }
 export declare function Button(props: ButtonProps): React.ReactElement;
@@ -81,8 +81,25 @@ export declare function CostPreview(props: CostPreviewProps): React.ReactElement
 export interface PushModeSwitchProps { value?: PushMode; onChange?: (mode: PushMode) => void }
 export declare function PushModeSwitch(props: PushModeSwitchProps): React.ReactElement;
 
+/** Colour family of a component kind: pool discovery, mint judgement, grass engagement, mustard needs you, lava cost and alerts. */
+export type Family = 'pool' | 'mint' | 'grass' | 'mustard' | 'lava';
+
+export interface CardProps {
+  family?: Family;
+  /** content: grey card with the family's small fade (8px radius). feature: the family's product-card gradient (24px radius). */
+  kind?: 'content' | 'feature';
+  className?: string;
+  children: React.ReactNode;
+}
+export declare function Card(props: CardProps): React.ReactElement;
+
+export interface FamilyTagProps { family: Family; children: React.ReactNode }
+export declare function FamilyTag(props: FamilyTagProps): React.ReactElement;
+
 export interface MetricTileProps {
   label: string;
+  /** Tints the tile with its family's small fade. */
+  family?: Family;
   value: string;
   /** Link to the accounts or events behind the number. Required in the app. */
   href: string;
@@ -113,6 +130,7 @@ declare global {
       ReplyClassTag: typeof ReplyClassTag; DerivedValue: typeof DerivedValue; EvidenceQuote: typeof EvidenceQuote;
       ScoreBreakdown: typeof ScoreBreakdown; CostPreview: typeof CostPreview; PushModeSwitch: typeof PushModeSwitch;
       MetricTile: typeof MetricTile; HealthIndicator: typeof HealthIndicator; ReviewQueueItem: typeof ReviewQueueItem;
+      Card: typeof Card; FamilyTag: typeof FamilyTag;
     };
   }
 }

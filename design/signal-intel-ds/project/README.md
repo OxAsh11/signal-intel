@@ -1,51 +1,97 @@
-Signal Intel is an evidence instrument. Users open it to answer three questions: which companies match my hypothesis, how sure are we, and how do we reach them. The interface is calm, dense and exact, closer to a research terminal than a CRM. Its whole job is to make a claim and its receipt impossible to separate.
+Signal Intel is an evidence instrument. Users open it to answer three questions: which companies match my hypothesis, how sure are we, and how do we reach them. The interface is light, calm and exact. Its whole job is to make a claim and its receipt impossible to separate.
+
+The visual system follows the structure of the Mixpanel brand guidelines (brand.mixpanel.com, April 2026): white page, grey cards, near-black type, pill primary buttons and colour-family gradients. It is Signal Intel's own system. It never uses Mixpanel's purple, logo, illustrations or licensed fonts.
 
 ## Principles
 
 1. **Every claim has a receipt.** A verdict, score or stage is always one click from the quotes and sources behind it. Use `EvidenceQuote` for every receipt and `DerivedValue` for every computed value.
-2. **Derived looks derived.** Computed values sit on `surface-sunken` with no border and an Explain action. Anything a person can edit has a bordered input on `surface` with a `line-strong` border. Never mix the two looks.
-3. **Cost before action.** Any control that spends money or AI tokens shows its estimate on the button (`Button` `cost`) and opens a `CostPreview` first.
-4. **Loud failure.** Health, incomplete data and silence are shown as states (`HealthIndicator`, `MetricTile` `incomplete`), never hidden in a log.
-5. **Every number links.** A figure on screen is a link to the rows behind it.
+2. **Colour names the kind of thing.** Each kind of component has one colour family, used the same way on every screen. A card's family tells you what it is before you read it, and a `FamilyTag` says it in words as well.
+3. **Derived looks derived.** Computed values sit on `surface-sunken` with no border and an Explain action. Anything a person can edit has a bordered input with a `line-strong` border.
+4. **Cost before action.** Any control that spends money or AI tokens shows its estimate on the button (`Button` `cost`) and opens a `CostPreview` first.
+5. **Loud failure.** Health, incomplete data and silence are shown as states (`HealthIndicator`, `MetricTile` `incomplete`), never hidden in a log.
+6. **Every number links.** A figure on screen is a link to the rows behind it.
+7. **AI drafts, people decide.** Inputs the AI can fill are shown as the AI's draft with "Change", never as a blank form.
 
 ## Content fundamentals
 
 - **Voice:** plain, exact and neutral. The platform reports what it found and how sure it is. It never sells or cheers. No exclamation marks, no emoji.
-- **Person:** address the user as "you" in instructions ("You can compare any two versions"). The platform does not refer to itself as "I" or "we".
-- **Casing:** sentence case for buttons, titles and menus ("Publish version"). Uppercase only for the `label` style (column headers and field labels).
-- **Canonical names:** use the PRD Appendix terms exactly and capitalised as there: Brief, Brief version, Confirmed, Likely, Unverified, Contradicted, High, Medium, Low, Excluded, Untouched … Handed off, Interested, Referral, Not now. Never say "list" for a Brief, "folder" for a source, "lead" for an account, or "organisation" for a target company.
-- **Numbers:** tabular mono (`value`, `metric`). Estimates carry "≈". Money shows its currency. Times are relative ("3 days ago") with the exact timestamp in a tooltip.
-- **Errors and empty states** say what happened and what to do next ("No Confirmed accounts yet. The pilot found 4 Likely. Mark a few to calibrate."). An empty section always states its reason.
-- **Examples of house copy:** "Expand to Germany · ≈ $186", "Rests on 2 claims", "Silent: 0 events in expected 2 h window", "Same company: merge", "Over budget: needs Admin approval".
+- **Person:** address the user as "you". The platform never calls itself "I" or "we".
+- **Casing:** sentence case for buttons, titles and menus ("Start pilot"). Uppercase only for labels, column headers and eyebrows.
+- **Canonical names:** use the PRD Appendix terms exactly and capitalised as there: Brief, Brief version, Confirmed, Likely, Unverified, Contradicted, High, Medium, Low, Excluded, Untouched … Handed off, Interested, Referral, Not now. Never say "list" for a Brief, "lead" for an account or "organisation" for a target company.
+- **Numbers:** tabular mono. Estimates carry "≈". Money shows its currency (₹, $). Times are relative ("3 days ago"), with the exact time in a tooltip.
+- **Empty states** say why the section is empty and what fills it ("No radars yet. Publishing a Brief creates them from its sources.").
+- **Examples of house copy:** "9 hotel groups match your Brief. 3 are Confirmed.", "Rests on 3 claims", "Silent: 0 posts in 26 h", "Same company: merge", "Over budget: needs Admin approval".
 
 ## Visual foundations
 
-**Colour.** The neutrals are cool and slightly blue: `paper` (page), `surface` (panels and tables), `surface-sunken` (headers, wells, derived values), `line` (hairlines) and `line-strong` (control borders). Text is `ink`, with `ink-muted` for metadata; `ink-faint` is only for icons and placeholders. There is **one accent, `signal`** (Prussian blue), used for the primary action, links, selection, focus and the High band. `signal-soft` tints selected rows. Text on a signal fill is `on-signal`.
+**Colour modes.** Every surface is in one of three modes:
+- **Light White:** the page (`paper`, #FFFFFF).
+- **Light Gray:** cards and insets (`surface-sunken`, #F4F4F4; table headers #FAFAFA).
+- **Tinted:** a family's shade 02 with its shade 09 text, used for tags.
 
-- **Evidence colours:** `marker` and `marker-soft` mark the exact words a claim rests on, like a highlighter on a printout. They are used only inside `EvidenceQuote`.
-- **Verdict colour:** `verdict-confirmed` (deep teal) for Confirmed and Likely. Contradicted uses `danger`.
-- **Status colours:** `positive`, `caution` and `danger`, each with a `-soft` ground. Danger is orange, not red, and status always carries a word, glyph or shape as well, so nothing depends on red versus green.
-- Every text token's usage note names the grounds it passes 4.5:1 on, in both themes.
+Lines are `line` (#EAEAEA); control borders are `line-strong`. Headlines are `ink` (#1F2023), body text is `ink-body` (black at 70%), metadata is `ink-muted`. **Light only:** there is no dark theme, and the page never follows the computer's dark mode.
 
-**Type.** Three faces, each with one job:
-- `Instrument Sans` (styles `display`, `title`, `heading`, `body`, `body-sm`, `label`) for everything a person operates. Body is 14px because screens are dense.
-- `JetBrains Mono` (styles `metric`, `value`, `id`) for numbers, IDs and version stamps, always tabular.
-- `Source Serif 4` (`quote`) is reserved for **text quoted from a source**. Seeing serif means "the outside world said this". Never set the platform's own copy in it.
+**Accent.** `signal` (#39729A, from the pool family) is for links, selection, focus and the High band only. Primary actions are near-black, not accent.
 
-**Spacing and layout.** 4px grid (`space-1` to `space-8`). Tables use `space-2` vertical by `space-3` horizontal cell padding. Panels pad at `space-4`, and sections sit `space-6` apart. Desktop gutters are `space-8`, phones `space-4`. The app shell is a left sidebar with the 11 screens, a top bar holding the workspace and Brief switchers, the ⌘K command palette and the Review count.
+**Colour families and gradients.** These are the exact gradient values from the guidelines. Never purple.
 
-**Shape.** Small radii: `radius-xs` for pips and highlights, `radius-sm` for chips and inputs, `radius-md` for buttons and cards, `radius-lg` for dialogs only. Borders carry structure. `shadow-sm` lifts cards off `paper`, and `shadow-lg` is only for things that float (Explain panel, menus, dialogs, toasts).
+| Family | Meaning | Used for |
+| --- | --- | --- |
+| pool | discovery | pages, radars, sources |
+| mint | judgement | matches, evidence, verdicts, scores |
+| grass | engagement | sequences, replies, people, next steps, deals |
+| mustard | needs you | review queues, approvals |
+| lava | cost and alerts | spend, failures |
 
-**State.** Hover darkens a fill one step (`signal` to `signal-strong`) or tints a quiet control with `signal-soft`. Keyboard focus is always the `focus-ring` shadow: a 2px surface gap, then a solid 2px signal ring. Disabled controls use `surface-sunken` with `ink-faint` and say why.
+- **Feature cards** use `--gradient-product-card-<family>`: 24px radius and 32px padding, with copy in the light top of the card. Use one or two per screen.
+- **Content cards and metric tiles** use `--gradient-bg-sm-<family>`, a fade at the bottom of a #F4F4F4 card: 8px radius and 24px padding.
+- **Tags** use the tinted mode, family shade 02 with shade 09 text.
 
-**Motion.** Short and functional: 120–160 ms ease-out for popovers and row expansion. Nothing animates on load. Everything respects `prefers-reduced-motion`.
+**Evidence colours.** `marker` and `marker-soft` mark the exact words a claim rests on, only inside `EvidenceQuote`. Verdicts use `verdict-confirmed` (deep mint) for Confirmed and Likely, and `danger` for Contradicted. Status always carries a word, glyph or shape as well as colour.
 
-**Data display.** Ordered states use form as well as colour: band pips (3/2/1/none), the seven-step stage track, verdict glyphs (● ◐ ○ ✕) and health shapes (dot, diamond, square, hollow ring). Charts use `signal` for the measured series, `line` for the grid and `ink-muted` for axis text.
+**Type.**
+- **DM Sans:** everything a person operates. 400 for body, 500 for headings.
+- **DM Mono:** numbers, IDs, dates and version stamps. Always tabular.
+- **Source Serif 4:** reserved for text quoted from a source. Seeing serif means "the outside world said this".
+
+Garnett and Apercu Mono, the guideline fonts, are licensed, so DM Sans and DM Mono stand in.
+
+**Spacing and layout.**
+- An 8px scale.
+- The page container is at most 1440px wide and centred, with side margins of 48px (wide screens), 40px, 32px and 16px (phones).
+- A right-hand rail sits beside the content on wide screens and drops below it under 1180px.
+- The sidebar becomes a scrolling row on phones.
+- No page scrolls sideways; wide tables scroll inside their own box.
+
+**Shape.**
+- 4px: inputs and secondary buttons.
+- 6px: tags and chips.
+- 8px: content cards.
+- 16px: dialogs.
+- 24px: feature cards.
+- 40px: primary buttons (pill).
+
+Borders carry structure. Shadows are only for things that float.
+
+**Buttons.**
+- **Primary:** a #1F2023 pill with white text and a right chevron, 40px high (28px small).
+- **Secondary:** a 1px outline with a 4px radius.
+- **Quiet:** text only.
+
+**Motion.** Short and functional, 120–160 ms. Nothing animates on load. Everything respects `prefers-reduced-motion`.
 
 ## Iconography
 
-There is no icon set or logo yet. Set the name "Signal Intel" in `Instrument Sans` 600 wherever a mark would appear. In the app, use **Lucide** icons (outline, 1.5px stroke, 16px in tables, 20px in navigation), coloured with `ink-muted` and `signal` when active. This is a substitution until a brand icon set exists. Status glyphs are Unicode (● ◐ ○ ✕ ▲ ✓), never emoji.
+There is no icon set or logo yet. Set the name "Signal Intel" in DM Sans 500 next to a small pool-to-mint gradient dot. In the app, use Lucide outline icons (1.5px stroke). Status glyphs are Unicode (● ◐ ○ ✕ ▲ ✓), never emoji.
 
 ## Components
 
-`window.SignalIntel` (React 18): `Button`, `VerdictBadge`, `BandChip`, `StageBadge`, `ReplyClassTag`, `DerivedValue`, `EvidenceQuote`, `ScoreBreakdown`, `CostPreview`, `PushModeSwitch`, `MetricTile`, `HealthIndicator`, `ReviewQueueItem`. In the product codebase these are rebuilt as typed React components in `packages/ui` on Tailwind v4 and shadcn/ui, reading these same tokens. Each component's guidelines say what the consumer provides.
+`window.SignalIntel` (React 18):
+- **Surfaces:** `Card`, `FamilyTag`.
+- **Actions:** `Button`, `CostPreview`, `PushModeSwitch`.
+- **Status:** `VerdictBadge`, `BandChip`, `StageBadge`, `ReplyClassTag`, `HealthIndicator`.
+- **Evidence:** `DerivedValue`, `EvidenceQuote`, `ScoreBreakdown`.
+- **Reporting:** `MetricTile` (takes a `family`).
+- **Review:** `ReviewQueueItem`.
+
+In the product codebase they are typed React components in `packages/ui`, reading these same tokens. `design/signal-intel-ds/project/tokens.json` in the repo is the source the code is generated from, and a lint rule rejects colours outside the system.

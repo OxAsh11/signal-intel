@@ -1,0 +1,17 @@
+<!-- @dsCard group="Surfaces" height=72 -->
+<!doctype html>
+<html lang="en">
+<head><meta charset="utf-8"><title>FamilyTag</title></head>
+<body>
+<div id="root"></div>
+<script>
+  var S = window.SignalIntel, h = React.createElement;
+  ReactDOM.createRoot(document.getElementById('root')).render(h('div', { className: 'si-row' },
+    h(S.FamilyTag, { family: 'pool' }, 'Discovery'),
+    h(S.FamilyTag, { family: 'mint' }, 'Judgement'),
+    h(S.FamilyTag, { family: 'grass' }, 'Engagement'),
+    h(S.FamilyTag, { family: 'mustard' }, 'Needs you · 4'),
+    h(S.FamilyTag, { family: 'lava' }, 'Cost and alerts')));
+</script>
+</body>
+</html>

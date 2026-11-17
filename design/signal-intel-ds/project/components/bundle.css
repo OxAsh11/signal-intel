@@ -1,28 +1,32 @@
-@import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;1,8..60,400&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=DM+Sans:opsz,wght@9..40,400;9..40,500&family=DM+Mono:wght@400;500&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;1,8..60,400&display=swap");
 
-/* Signal Intel — component styles. Every value comes from tokens.css. */
-body { margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 20px; background: var(--paper); color: var(--ink); }
+/* Signal Intel: component styles on the light system. Every value comes from tokens.css. Mirrors packages/ui/src/components.css. */
+body { margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 20px; background: var(--paper); color: var(--ink-body); color-scheme: light; }
 .si-row { display: flex; flex-wrap: wrap; gap: var(--space-3); align-items: center; padding: var(--space-4); }
 .si-col { display: flex; flex-direction: column; gap: var(--space-3); padding: var(--space-4); }
+
+/* Signal Intel — component styles. Every value comes from tokens.css. */
 .si-mono { font-family: var(--font-mono); font-variant-numeric: tabular-nums; }
-.si-label { font-size: 11px; line-height: 16px; font-weight: 600; letter-spacing: .06em; text-transform: uppercase; color: var(--ink-muted); }
+.si-label { font-size: 11px; line-height: 16px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-muted); }
 .si-muted { color: var(--ink-muted); }
 :where(button, a, [tabindex]):focus-visible { outline: 2px solid transparent; box-shadow: var(--focus-ring); }
 
-/* Button */
-.si-btn { font: inherit; font-weight: 500; display: inline-flex; align-items: center; gap: var(--space-2); height: 32px; padding: 0 var(--space-3); border-radius: var(--radius-md); border: 1px solid var(--line-strong); background: var(--surface); color: var(--ink); cursor: pointer; white-space: nowrap; }
+/* Button: primary = near-black pill with arrow; secondary = outline, 4px; quiet = text (light system) */
+.si-btn { font: inherit; font-weight: 500; display: inline-flex; align-items: center; justify-content: center; gap: var(--space-2); height: 40px; padding: 0 20px; border-radius: var(--radius-sm); border: 1px solid var(--ink); background: transparent; color: var(--ink); cursor: pointer; white-space: nowrap; text-decoration: none; }
 .si-btn:hover { background: var(--surface-sunken); }
-.si-btn-primary { background: var(--signal); border-color: var(--signal); color: var(--on-signal); }
-.si-btn-primary:hover { background: var(--signal-strong); border-color: var(--signal-strong); }
-.si-btn-quiet { background: transparent; border-color: transparent; color: var(--signal); }
-.si-btn-quiet:hover { background: var(--signal-soft); }
-.si-btn-danger { background: var(--danger); border-color: var(--danger); color: var(--on-danger); }
-.si-btn-sm { height: 26px; padding: 0 var(--space-2); font-size: 13px; }
+.si-btn-primary { border-radius: var(--radius-pill); background: var(--ink); border-color: var(--ink); color: #ffffff; }
+.si-btn-primary:hover { background: var(--ink-muted); border-color: var(--ink-muted); }
+.si-btn-quiet { background: transparent; border-color: transparent; color: var(--ink); padding: 0 8px; }
+.si-btn-quiet:hover { background: transparent; text-decoration: underline; }
+.si-btn-danger { border-radius: var(--radius-pill); background: var(--danger); border-color: var(--danger); color: var(--on-danger); }
+.si-btn-sm { height: 28px; padding: 0 12px; font-size: 13px; }
 .si-btn[disabled] { cursor: not-allowed; background: var(--surface-sunken); border-color: var(--line); color: var(--ink-faint); }
 .si-btn-cost { font-family: var(--font-mono); font-size: 12px; opacity: .85; }
+.si-btn-arrow { width: 8px; height: 12px; flex: none; }
+.si-btn-sm .si-btn-arrow { width: 6px; height: 9px; }
 
 /* Shared chip shape */
-.si-chip { display: inline-flex; align-items: center; gap: var(--space-1); height: 22px; padding: 0 var(--space-2); border-radius: var(--radius-sm); font-size: 12px; font-weight: 600; line-height: 1; border: 1px solid transparent; white-space: nowrap; }
+.si-chip { display: inline-flex; align-items: center; gap: var(--space-1); height: 24px; padding: 0 10px; border-radius: var(--radius-tag); font-size: 12px; font-weight: 500; line-height: 1; border: 1px solid transparent; white-space: nowrap; }
 .si-glyph { font-size: 10px; line-height: 1; }
 
 /* VerdictBadge */
@@ -118,7 +122,7 @@ body { margin: 0; font-family: var(--font-sans); font-size: 14px; line-height: 2
 /* MetricTile */
 .si-metric { display: flex; flex-direction: column; gap: var(--space-1); min-width: 160px; padding: var(--space-4); background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); color: inherit; text-decoration: none; }
 a.si-metric:hover { border-color: var(--signal); }
-.si-metric-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 28px; line-height: 32px; font-weight: 500; letter-spacing: -.02em; color: var(--ink); }
+.si-metric-num { font-family: var(--font-mono); font-variant-numeric: tabular-nums; font-size: 28px; line-height: 32px; font-weight: 400; letter-spacing: -.02em; color: var(--ink); }
 .si-metric-sub { display: flex; justify-content: space-between; gap: var(--space-2); font-size: 12px; color: var(--ink-muted); }
 .si-metric-ver { font-family: var(--font-mono); font-size: 11px; }
 .si-metric-incomplete { color: var(--caution); font-weight: 600; }
@@ -148,4 +152,58 @@ a.si-metric:hover { border-color: var(--signal); }
 .si-review-actions { display: flex; flex-wrap: wrap; gap: var(--space-2); padding: var(--space-3) var(--space-4); background: var(--surface-sunken); border-top: 1px solid var(--line); }
 @media (max-width: 520px) { .si-review-cands { grid-template-columns: 1fr; } .si-cand + .si-cand { border-left: 0; border-top: 1px solid var(--line); } }
 
+/* Light system: colour families, gradient cards, tags, tables, page.
+   Gradients are the Mixpanel guideline tokens, exact values. Never purple. */
+:root {
+  --gradient-bg-sm-pool: linear-gradient(180deg, rgba(190,225,250,0) 25%, #A4D6F8 100%);
+  --gradient-bg-sm-mint: linear-gradient(180deg, rgba(196,241,237,0) 25%, #ADECE6 100%);
+  --gradient-bg-sm-lava: linear-gradient(180deg, rgba(255,200,188,0) 25%, #FFA693 100%);
+  --gradient-bg-sm-mustard: linear-gradient(180deg, rgba(252,228,177,0) 25%, #FAD482 100%);
+  --gradient-bg-sm-grass: linear-gradient(180deg, rgba(165,215,191,0) 25%, #81C8A6 100%);
+  --gradient-product-card-pool: linear-gradient(180deg, #F2FCFB, #C4F1ED, #72BEF4, #5698C7);
+  --gradient-product-card-mint: linear-gradient(180deg, #F0F9FE, #BEE1FA, #5FB6AC, #5FB6AC);
+  --gradient-product-card-lava: linear-gradient(180deg, #FEF8EB, #FAD482, #FF7557, #CC5849);
+  --gradient-product-card-mustard: linear-gradient(180deg, #FFF7F2, #FFDBC2, #F8BC3C, #CA9430);
+  --gradient-product-card-grass: linear-gradient(180deg, #FFF7F2, #FFDBC2, #5EB88D, #2C885C);
+}
+.si-fam-pool    { --f02: #D7EDFC; --f09: #1D4B6D; --f-sm: var(--gradient-bg-sm-pool);    --f-card: var(--gradient-product-card-pool); }
+.si-fam-mint    { --f02: #DBF7F4; --f09: #205F56; --f-sm: var(--gradient-bg-sm-mint);    --f-card: var(--gradient-product-card-mint); }
+.si-fam-grass   { --f02: #C8E7D8; --f09: #0F472C; --f-sm: var(--gradient-bg-sm-grass);   --f-card: var(--gradient-product-card-grass); }
+.si-fam-mustard { --f02: #FDECC8; --f09: #6E4319; --f-sm: var(--gradient-bg-sm-mustard); --f-card: var(--gradient-product-card-mustard); }
+.si-fam-lava    { --f02: #FFD7CF; --f09: #661D2D; --f-sm: var(--gradient-bg-sm-lava);    --f-card: var(--gradient-product-card-lava); }
+
+.si-card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius-md); padding: 24px; display: flex; flex-direction: column; gap: 12px; min-width: 0; box-sizing: border-box; }
+.si-card.si-flush { padding: 0; gap: 0; overflow: hidden; }
+.si-gcard { background: var(--f-sm), var(--surface-sunken); }
+.si-fcard { background: var(--f-card); border-radius: var(--radius-xl); padding: 32px; display: flex; flex-direction: column; gap: 16px; min-width: 0; box-sizing: border-box; color: var(--ink); }
+.si-fcard p, .si-fcard li { color: rgba(0, 0, 0, .78); }
+.si-ftag { display: inline-flex; align-items: center; align-self: flex-start; gap: 6px; padding: 4px 12px; border-radius: var(--radius-tag); background: var(--f02); color: var(--f09); font-size: 12px; line-height: 16px; font-weight: 400; letter-spacing: .02em; white-space: nowrap; }
+.si-ftag::before { content: ""; width: 6px; height: 6px; border-radius: 6px; background: var(--f09); }
+.si-metric.si-fam-pool, .si-metric.si-fam-mint, .si-metric.si-fam-grass, .si-metric.si-fam-mustard, .si-metric.si-fam-lava { background: var(--f-sm), var(--surface); }
+.si-metric[class*="si-fam-"] .si-label { color: var(--f09); }
+.si-meta { font-family: var(--font-mono); font-size: 12px; line-height: 16px; color: var(--ink-muted); }
+.si-h1 { margin: 0; font-size: clamp(24px, 1.9vw, 34px); line-height: 1.2; font-weight: 500; letter-spacing: -0.02em; color: var(--ink); text-wrap: balance; }
+.si-h2 { margin: 0; font-size: 18px; line-height: 1.4; font-weight: 500; color: var(--ink); }
+.si-lede { margin: 0; max-width: 78ch; font-size: 16px; line-height: 1.6; color: var(--ink-body); }
+.si-eyebrow { font-size: 12px; line-height: 16px; font-weight: 500; letter-spacing: .2em; text-transform: uppercase; color: var(--ink-muted); }
+
+.si-table-box { overflow-x: auto; }
+.si-table { width: 100%; border-collapse: collapse; }
+.si-table th { text-align: left; padding: 10px 16px; font-size: 11px; font-weight: 500; letter-spacing: .12em; text-transform: uppercase; color: var(--ink-muted); background: #fafafa; white-space: nowrap; border-bottom: 1px solid var(--line); }
+.si-table td { padding: 12px 16px; border-bottom: 1px solid var(--line); vertical-align: top; color: var(--ink-body); }
+.si-table tr:last-child td { border-bottom: 0; }
+.si-table tbody tr:hover td { background: #fafafa; }
+
+/* Page: container 1440, guideline margins 48/40/32/16; right rail drops below under 1180px */
+.si-page { width: 100%; max-width: 1440px; margin: 0 auto; box-sizing: border-box; padding: 40px 48px 64px; display: flex; flex-direction: column; gap: 32px; }
+.si-cols { display: grid; grid-template-columns: minmax(0, 1fr) clamp(300px, 24vw, 400px); gap: 24px; align-items: start; }
+.si-tiles { display: grid; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)); gap: 12px; }
+@media (max-width: 1439px) { .si-page { padding: 32px 40px 56px; } }
+@media (max-width: 1199px) { .si-page { padding: 32px; } }
+@media (max-width: 1179px) { .si-cols { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 807px) { .si-page { padding: 24px 16px 48px; gap: 24px; } .si-fcard { padding: 24px; border-radius: var(--radius-lg); } }
+
 @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
+
+.si-brand-dot { display: inline-block; width: 10px; height: 10px; border-radius: 40px; background: linear-gradient(180deg, #72BEF4, #5FB6AC); }
+@media (max-width: 807px) { .si-table { display: block; overflow-x: auto; } }
