@@ -17,6 +17,9 @@ async function rpc(fn: string, args: Record<string, unknown>) {
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
+/** Matches the signal-uploads bucket limit and the server action body limit in next.config.ts. */
+const CSV_MAX_BYTES = 10 * 1024 * 1024;
+
 /**
  * Create a new radar attached to a brief.
  * Calls the SECURITY DEFINER RPC `public.create_radar`.
@@ -92,6 +95,8 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
   if (!workspace) return { error: 'Missing workspace ID.' };
   if (!name) return { error: 'Enter a name for the radar.' };
   if (!(file instanceof File) || file.size === 0) return { error: 'Select a CSV file to upload.' };
+  if (!/\.csv$/i.test(file.name)) return { error: 'Upload a .csv file (the first row is the header).' };
+  if (file.size > CSV_MAX_BYTES) return { error: 'The file is over 10 MB. Split it into smaller files.' };
 
   // Step 1: Upload the CSV to Supabase Storage first (before creating the radar).
   const supabase = await createClient();
@@ -104,11 +109,11 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
     .from('signal-uploads')
     .upload(storagePath, fileBuffer, { contentType: 'text/csv', upsert: false });
 
-  if (uploadError) return { error: friendlyError(uploadError.message) };
+  if (uploadError) return { error: `The file could not be stored: ${friendlyError(uploadError.message)}` };
 
   // Step 2: Create the radar with the storage path already in config so the
   // worker can find the file immediately when radar.fetch_queued fires.
-  const { data: radarId, error: createError } = await rpc('create_radar', {
+  const { error: createError } = await rpc('create_radar', {
     p_ws: workspace,
     p_brief: brief,
     p_connector_type: 'csv_upload',
@@ -119,14 +124,6 @@ export async function uploadCsvRadar(_: ActionState, form: FormData): Promise<Ac
 
   revalidatePath(`/briefs/${brief}`);
   redirect(`/briefs/${brief}`);
-}
-
-/**
- * Form-compatible wrapper around uploadCsvRadar for direct use as a form `action`.
- * Returns void so it satisfies the HTML form action type constraint.
- */
-export async function csvRadarFormAction(form: FormData): Promise<void> {
-  await uploadCsvRadar({}, form);
 }
 
 /** Add a user query to a radar (M2: users can edit the query set). Fields: `radar`, `brief`, `text`. */
