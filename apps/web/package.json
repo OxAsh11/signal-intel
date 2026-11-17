@@ -22,7 +22,7 @@
     "server-only": "^0.0.1"
   },
   "devDependencies": {
-    "@playwright/test": "1.56.1",
+    "@playwright/test": "1.64.1",
     "@tailwindcss/turbopack": "^4",
     "@types/node": "^24",
     "@types/pg": "8.15.6",
