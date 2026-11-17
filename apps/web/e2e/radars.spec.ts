@@ -45,8 +45,7 @@ test.describe('CSV radar upload', () => {
     expect(queued.n).toBe(1);
   });
 
-  test('a failed upload says why instead of doing nothing', async ({ page }) => {
-    // Another workspace's id: the storage policy refuses it, and the page must show the reason.
+  test('a rejected upload says why instead of doing nothing', async ({ page }) => {
     await page.goto('/briefs/new');
     await page.locator('textarea[name="description"]').fill(FLYTBASE_DESCRIPTION);
     await page.getByRole('button', { name: /Draft my Brief/ }).click();
@@ -54,13 +53,15 @@ test.describe('CSV radar upload', () => {
     const briefId = page.url().split('/').pop()!;
 
     await page.goto(`/briefs/${briefId}/radars/upload`);
-    await page.locator('input[name="workspace"]').evaluate((el) => {
-      (el as HTMLInputElement).value = '00000000-0000-4000-8000-000000000000';
-    });
     await page.getByLabel('Radar name').fill('Prospect list');
-    await page.getByLabel('CSV file').setInputFiles({ name: 'prospects.csv', mimeType: 'text/csv', buffer: Buffer.from(CSV) });
+    await page.getByLabel('CSV file').setInputFiles({ name: 'prospects.pdf', mimeType: 'application/pdf', buffer: Buffer.from('%PDF-1.4') });
     await page.getByRole('button', { name: /Upload/ }).click();
-    await expect(page.getByRole('alert').filter({ hasText: 'The file could not be stored' })).toBeVisible();
+    await expect(page.getByRole('alert').filter({ hasText: 'Upload a .csv file' })).toBeVisible();
     await expect(page).toHaveURL(new RegExp(`/briefs/${briefId}/radars/upload`));
+    const [n] = await sql<{ n: number }>(
+      `select count(*)::int as n from public.radar where brief_id = $1 and connector_type = 'csv_upload'`,
+      [briefId],
+    );
+    expect(n.n).toBe(0);
   });
 });
