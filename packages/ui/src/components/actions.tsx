@@ -41,12 +41,11 @@ export interface MetricTileProps {
 
 export function MetricTile({ label, value, href, version, delta, incomplete, family }: MetricTileProps) {
   return (
-    <a className={cx('si-metric', family && `si-fam-${family}`)} href={href}>
+    <a className={cx('si-metric', family && `si-fam-${family}`)} href={href} title={`How this is counted: ${version}`}>
       <span className="si-label">{label}</span>
       <span className="si-metric-num">{value}</span>
       <span className="si-metric-sub">
         {incomplete ? <span className="si-metric-incomplete">▲ Incomplete period</span> : <span>{delta ?? ''}</span>}
-        <span className="si-metric-ver">{version}</span>
       </span>
     </a>
   );
