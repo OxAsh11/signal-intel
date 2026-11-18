@@ -1,0 +1,14 @@
+{"predicates": [
+   {"key": "drone_programme", "label": "Runs or plans a drone programme", "value_type": "boolean",
+    "allowed_values": null, "extraction_hint": "Announced, tendered or hiring for drone operations",
+    "decay_half_life_days": 365, "role": "signal"},
+   {"key": "industry", "label": "Industry", "value_type": "enum",
+    "allowed_values": ["energy", "utilities", "public safety", "mining", "drone vendor"],
+    "extraction_hint": "", "decay_half_life_days": null, "role": "fit.vertical"},
+   {"key": "site_count", "label": "Industrial sites", "value_type": "number", "allowed_values": null,
+    "extraction_hint": "Plants, substations or sites operated", "decay_half_life_days": 730, "role": "scale"}],
+ "evidence_rules": [
+   {"predicate": "drone_programme", "kind": "requires", "op": "is_true", "value": null,
+    "min_sources": 1, "max_age_days": 730},
+   {"predicate": "industry", "kind": "disqualifies", "op": "one_of", "value": ["drone vendor"],
+    "min_sources": 1, "max_age_days": null}]}
