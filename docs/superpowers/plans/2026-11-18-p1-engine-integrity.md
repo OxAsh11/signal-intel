@@ -257,7 +257,7 @@ Roadmap: [2026-11-18-redesign-roadmap.md](2026-11-18-redesign-roadmap.md).
 **Changes:**
 - In `_derive`, handle `claim.created` (entity = `payload["entity_id"]`) and `entity.merged` (entity =
   `payload["winner"]`) **before** the early return that requires `workspace_id`.
-- In the `verdict.changed` branch, also `_enqueue("radar.yield_compute", f"yield:{workspace_id}",
+- In the `verdict.changed` branch, also `_enqueue("radar.yield_compute", "yield:all" (global: `compute_radar_yield()` scans every workspace; changed in final review),
   timestamp=<now epoch int>)` so the Discovery funnel matches Today (gap #13). The hourly cron stays as a
   backstop.
 
