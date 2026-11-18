@@ -4,6 +4,7 @@ import contextlib
 import json
 import os
 import tempfile
+import time
 from collections.abc import Callable
 from typing import Any, Literal
 from uuid import UUID
@@ -1369,6 +1370,31 @@ def build_app(
             row: tuple[Any, ...] | None = await cur.fetchone()
         return row
 
+    async def _fetch_all(sql: str, params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
+        assert pool is not None
+        async with pool.connection() as db_conn:
+            cur = await db_conn.execute(sql, params)
+            rows: list[tuple[Any, ...]] = await cur.fetchall()
+        return rows
+
+    async def _recompute_verdicts(entity_id: str, org_id: str) -> int:
+        """Queue a verdict for the entity in every workspace that tracks it as an account.
+
+        Claim and merge events are org-scoped (no workspace), so the workspaces come from the
+        accounts. The per-entity-per-workspace lock collapses a burst of claims into one job."""
+        rows = await _fetch_all(
+            "select workspace_id from public.account where entity_id = %s", (entity_id,)
+        )
+        for (ws,) in rows:
+            await _enqueue(
+                "verdict.compute",
+                f"verdict:{entity_id}:{ws}",
+                entity_id=entity_id,
+                workspace_id=str(ws),
+                org_id=org_id,
+            )
+        return len(rows)
+
     async def _advance_stage(
         account_id: str, kind: str, activity_id: str | None, org_id: str, workspace_id: str
     ) -> None:
@@ -1387,7 +1413,16 @@ def build_app(
         Every consumer is idempotent, so a replayed event only repeats work."""
         org_id = str(event.get("org_id") or "")
         workspace_id = str(event.get("workspace_id") or "")
-        if pool is None or not org_id or not workspace_id:
+        if pool is None or not org_id:
+            return
+        # Org-scoped events (no workspace): new evidence or a merge re-judges the entity.
+        if evt == "claim.created":
+            await _recompute_verdicts(str(payload["entity_id"]), org_id)
+            return
+        if evt == "entity.merged":
+            await _recompute_verdicts(str(payload["winner"]), org_id)
+            return
+        if not workspace_id:
             return
         tenant = {"workspace_id": workspace_id, "org_id": org_id}
 
@@ -1404,6 +1439,10 @@ def build_app(
             )
             if row is not None:
                 await _enqueue("score.compute", f"score:{row[0]}", account_id=str(row[0]), **tenant)
+            # Keep the Discovery funnel in step with Today; the hourly cron is the backstop.
+            await _enqueue(
+                "radar.yield_compute", f"yield:{workspace_id}", timestamp=int(time.time())
+            )
         elif evt == "contact_point.verified":
             row = await _fetch_one(
                 "select account_id from public.contact_point where id = %s",

@@ -71,6 +71,8 @@ PAGE = (
     "Acme Engineering (acme-eng.example) designs every project in Revit and is hiring ten BIM "
     "coordinators for its twelve sites in the Netherlands."
 )
+# A later page names the same company without a domain: it must attach, not go to Review.
+PAGE_2 = "Acme Engineering designs every project in Revit and has opened a new studio in Rotterdam."
 
 
 def _free_port() -> int:
@@ -156,6 +158,32 @@ class FakeGateway:
                 "extraction must see the page text"
             )
             return {"relevant": True, "reason": "names a company and a tool"}
+        if name == "extraction" and "Rotterdam" in variables["content"]:
+            return {
+                "mentions": [
+                    {
+                        "entity_type": "company",
+                        "raw_name": "Acme Engineering",
+                        "raw_country": "NL",
+                        "raw_attributes": {},
+                    }
+                ],
+                "claims": [
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "uses_revit",
+                        "value": True,
+                        "quote": "designs every project in Revit",
+                        "confidence": 90,
+                    },
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "vertical",
+                        "value": "engineering",
+                        "confidence": 75,
+                    },
+                ],
+            }
         if name == "extraction":
             return {
                 "mentions": [
@@ -429,6 +457,82 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         )[0]
         assert (verdict, claim_count) == ("Confirmed", 3)
 
+        # ── A second page names the company without a domain: it attaches, and the new
+        # claims re-judge the verdict through the claim and merge events ──
+        first_computed_at = await db.one(
+            "select computed_at from public.verdict where entity_id = %s and brief_version_id = %s",
+            (entity, brief_version),
+        )
+        verdict_jobs_before = sum(
+            1
+            for j in connector.jobs.values()
+            if j["task_name"] == "verdict.compute" and j["args"]["entity_id"] == str(entity)
+        )
+        payload_2 = SourcePayload(
+            url="https://news.example/acme-rotterdam",
+            fetched_at=datetime.now(UTC),
+            content_hash=hashlib.sha256(PAGE_2.encode()).hexdigest(),
+            payload_ref=None,
+            language="en",
+            raw=PAGE_2.encode(),
+        )
+        assert await create_source_records(pool, ORG, WS, "radar:e2e", "website", [payload_2]) == 1
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        source_record_2 = await db.one(
+            "select id from public.source_record where org_id = %s and id <> %s",
+            (ORG, source_record),
+        )
+        assert (
+            await db.one(
+                "select extraction_status::text from public.source_record where id = %s",
+                (source_record_2,),
+            )
+            == "extracted"
+        )
+        assert (
+            await db.one("select count(*) from public.review_item where workspace_id = %s", (WS,))
+            == 0
+        )
+        assert (
+            await db.one(
+                "select entity_id from public.mention where source_record_id = %s",
+                (source_record_2,),
+            )
+            == entity
+        )
+        claims_by_source = dict(
+            await db.admin(
+                "select source_record_id, count(*) from public.claim where entity_id = %s"
+                " group by source_record_id",
+                (entity,),
+            )
+        )
+        assert claims_by_source == {source_record: 3, source_record_2: 2}
+        assert (
+            await db.one("select count(*) from public.account where workspace_id = %s", (WS,)) == 1
+        )
+        recomputed_at = await db.one(
+            "select computed_at from public.verdict where entity_id = %s and brief_version_id = %s",
+            (entity, brief_version),
+        )
+        assert recomputed_at > first_computed_at, "the verdict was not recomputed after the merge"
+        assert (
+            sum(
+                1
+                for j in connector.jobs.values()
+                if j["task_name"] == "verdict.compute"
+                and j["args"]["entity_id"] == str(entity)
+                and j["status"] == "succeeded"
+            )
+            > verdict_jobs_before
+        )
+        # The verdict change also queued a radar yield refresh for the workspace.
+        assert any(
+            j["task_name"] == "radar.yield_compute" and j["queueing_lock"] == f"yield:{WS}"
+            for j in connector.jobs.values()
+        )
+
         band, evidence, scale = (
             await db.admin(
                 "select band::text, evidence, scale from public.score where account_id = %s and brief_version_id = %s",
@@ -693,7 +797,7 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             card = await mcp_server.get_account_card(str(account), str(WS))
             assert card["display_name"] == "Acme Engineering" and card["verdict"] == "Confirmed"
             assert len(await mcp_server.search_account("acme", str(WS))) == 1
-            assert len(await mcp_server.get_claims(str(entity), str(WS))) == 3
+            assert len(await mcp_server.get_claims(str(entity), str(WS))) == 5  # both pages
             assert len(await mcp_server.find_accounts(str(WS), band="High")) == 1
             with pytest.raises(mcp_server.WorkspaceNotPermitted):
                 await mcp_server.find_accounts(str(uuid4()))
@@ -887,7 +991,7 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         assert gateway.calls.count("verdict") == judged
 
         # A new claim that says the opposite: the verdict is judged again and goes to review
-        # with both claims.
+        # with every uses_revit claim (one yes from each page, and the no).
         await db.admin(
             "select app.create_claim(%s, %s, (select id from public.predicate where key = 'uses_revit'"
             " and workspace_id = %s), 'false'::jsonb, 'moved every project off Revit', null, null, %s,"
@@ -902,9 +1006,9 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
                 " where verdict_id = %s and reason = 'conflict' and status = 'pending'",
                 (verdict_id,),
             )
-            == 2
+            == 3
         )
-        # Asking again about the same two claims does not add a second item.
+        # Asking again about the same claims does not add a second item.
         await m05.compute_verdict(pool, gateway, entity, WS, ctx)  # type: ignore[arg-type]
         assert (
             await db.one(
