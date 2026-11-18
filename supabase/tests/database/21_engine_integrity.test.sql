@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(9);
+select plan(11);
 
 insert into auth.users (id, email, aud, role) values
   ('00000000-0000-4000-8000-00000000ea01', 'a@ei.test', 'authenticated', 'authenticated');
@@ -46,6 +46,16 @@ select is((select count(*)::int from public.outbox where event = 'entity.merged'
   and payload->>'loser' = (select v::text from ids where k = 'e2')), 1, '8. entity.merged is emitted with the loser');
 select ok(exists (select 1 from pg_constraint where conname = 'meeting_person_entity_fk' and contype = 'f'
   and conrelid = 'public.meeting'::regclass), '9. meeting.person_entity_id has a foreign key');
+
+-- The dedupe flag is scoped to create_claim: outside it, confidence and quote stay immutable.
+select throws_ok(
+  $$update public.claim set confidence = 99 where id = (select v from ids where k = 'c1')$$,
+  '42501', 'column confidence of claim is immutable',
+  '10. a direct confidence update outside create_claim is blocked');
+select throws_ok(
+  $$update public.claim set quote = 'edited' where id = (select v from ids where k = 'c1')$$,
+  '42501', 'column quote of claim is immutable',
+  '11. a direct quote update outside create_claim is blocked');
 
 select * from finish();
 rollback;
