@@ -37,6 +37,7 @@ WORKSPACE_ID = uuid4()
 SOURCE_RECORD_ID = uuid4()
 PREDICATE_ID = uuid4()
 PREDICATE_KEY = "uses_hiring"
+FETCHED_AT = datetime(2026, 11, 10, 8, 30, tzinfo=UTC)
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +123,11 @@ class FakeConn:
                     str(sr["workspace_id"]),
                     sr.get("url", "https://example.com/article"),
                     sr.get("payload_ref"),
+                    sr.get("fetched_at", FETCHED_AT),
                 )
             ]
+        if "public.mention" in sql_lower:  # the record's still-provisional mentions
+            return [(str(m),) for m in self._source_record.get("provisional_mentions", [])]
         if "public.predicate" in sql_lower:
             return self._predicates
         if "app.create_entity" in sql_lower:
@@ -623,6 +627,193 @@ def test_parse_source_date() -> None:
     assert parse_source_date(None, fetched) == fetched
     assert parse_source_date("2027-01-01", fetched) == fetched
     assert parse_source_date("Nov 2026", fetched) == fetched
+
+
+# ---------------------------------------------------------------------------
+# Tests: one bad claim drops only itself (non-finite, null, list, out-of-range confidence)
+# ---------------------------------------------------------------------------
+
+
+def _raw_resp(claims_json: list[str]) -> str:
+    """A response with hand-written claim JSON (NaN and 1e400 are not expressible via dumps)."""
+    mentions = json.dumps([{"entity_type": "company", "raw_name": "Acme", "raw_attributes": {}}])
+    return '{"mentions": ' + mentions + ', "claims": [' + ", ".join(claims_json) + "]}"
+
+
+_VALID_HIRING = (
+    '{"mention_index": 0, "predicate_key": "uses_hiring", "value": true, "confidence": 80}'
+)
+
+
+def _sites(value: str, confidence: str = "80") -> str:
+    return (
+        '{"mention_index": 0, "predicate_key": "sites", "value": '
+        + value
+        + ', "confidence": '
+        + confidence
+        + "}"
+    )
+
+
+@pytest.mark.parametrize(
+    "bad_claim",
+    [
+        pytest.param(_sites("NaN"), id="value-nan"),
+        pytest.param(_sites("Infinity"), id="value-infinity"),
+        pytest.param(_sites("-Infinity"), id="value-neg-infinity"),
+        pytest.param(_sites("1e400"), id="value-1e400"),
+        pytest.param(_sites("null"), id="value-null"),
+        pytest.param(_sites("[3]"), id="value-list"),
+        pytest.param(_sites('{"n": 3}'), id="value-object"),
+        pytest.param(_sites("3", "150"), id="confidence-150"),
+        pytest.param(_sites("3", "-1"), id="confidence-negative"),
+        pytest.param(_sites("3", "0.9"), id="confidence-fractional"),
+        pytest.param(_sites("3", '"80"'), id="confidence-string"),
+        pytest.param(_sites("3", "true"), id="confidence-bool"),
+        pytest.param(_sites("3", "NaN"), id="confidence-nan"),
+        pytest.param(_sites("3", "null"), id="confidence-null"),
+    ],
+)
+async def test_extract_bad_claim_dropped_alone(bad_claim: str) -> None:
+    gw = _make_gateway(_raw_resp([bad_claim, _VALID_HIRING]))
+    pool = FakePool(_fake_source_record(), _fake_predicates())
+
+    with structlog.testing.capture_logs() as logs:
+        await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    claim_args = [a for sql, a in pool.calls if "create_claim" in sql]
+    assert len(claim_args) == 1
+    assert claim_args[0][2] == str(PREDICATE_ID)  # the valid hiring claim is written
+    assert claim_args[0][3] == "true"
+    status_calls = [a for sql, a in pool.calls if "update_extraction_status" in sql]
+    assert [a[1] for a in status_calls] == ["extracted"]
+    invalid = [e for e in logs if e["event"] == "extraction.claim_invalid"]
+    assert len(invalid) == 1
+    assert invalid[0]["predicate_key"] == "sites"
+
+
+async def test_extract_integral_float_confidence_kept_as_int() -> None:
+    gw = _make_gateway(_raw_resp([_sites("3", "80.0")]))
+    pool = FakePool(_fake_source_record(), _fake_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    claim_args = [a for sql, a in pool.calls if "create_claim" in sql]
+    assert len(claim_args) == 1
+    assert claim_args[0][3] == "3"
+    assert claim_args[0][10] == 80 and type(claim_args[0][10]) is int
+
+
+def test_claim_schema_sent_to_the_model_is_unchanged() -> None:
+    """Lenient parsing must not loosen the structured-output schema the provider sees."""
+    props = _m03_extraction.ClaimExtract.model_json_schema()["properties"]
+    assert props["value"] == {
+        "anyOf": [{"type": "string"}, {"type": "integer"}, {"type": "number"}, {"type": "boolean"}],
+        "title": "Value",
+    }
+    assert props["confidence"] == {"title": "Confidence", "type": "integer"}
+
+
+# ---------------------------------------------------------------------------
+# Tests: a retried extraction job is idempotent
+# ---------------------------------------------------------------------------
+
+
+class _LockedJob:
+    """Fake procrastinate task: records configure(queueing_lock) + defer_async calls."""
+
+    def __init__(self, deferred: list[dict] | None = None, lock: str | None = None) -> None:
+        self.deferred: list[dict] = deferred if deferred is not None else []
+        self._lock = lock
+
+    def configure(self, **kwargs: Any) -> _LockedJob:
+        return _LockedJob(self.deferred, kwargs.get("queueing_lock"))
+
+    async def defer_async(self, **kwargs: Any) -> None:
+        self.deferred.append({"queueing_lock": self._lock, **kwargs})
+
+
+@pytest.fixture
+def identity_job(monkeypatch: pytest.MonkeyPatch) -> _LockedJob:
+    from signal_core.modules import m04_identity
+
+    job = _LockedJob()
+    monkeypatch.setattr(m04_identity, "identity_resolve_job", job)
+    return job
+
+
+async def test_extract_status_written_inside_transaction(identity_job: _LockedJob) -> None:
+    gw = _make_gateway(_resp([_claim(PREDICATE_KEY, True)]))
+    pool = FakePool(_fake_source_record(), _fake_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    tx_conn = pool.tx_events[0][1]
+    status = [(cid, a) for cid, sql, a in pool.log if "update_extraction_status" in sql]
+    assert status == [(tx_conn, (str(SOURCE_RECORD_ID), "extracted", None))]
+    order = [sql for _, sql, _ in pool.log]
+    status_at = next(i for i, sql in enumerate(order) if "update_extraction_status" in sql)
+    last_claim = max(i for i, sql in enumerate(order) if "create_claim" in sql)
+    assert status_at > last_claim
+    # Identity is dispatched once per mention, after the commit that marks the record extracted.
+    assert len(identity_job.deferred) == 1
+
+
+async def test_extract_already_extracted_makes_no_ai_call_and_no_writes(
+    identity_job: _LockedJob,
+) -> None:
+    provisional = uuid4()
+    record = _fake_source_record() | {
+        "extraction_status": "extracted",
+        "provisional_mentions": [provisional],
+    }
+    gw = _make_gateway(_resp([_claim(PREDICATE_KEY, True)]))
+    pool = FakePool(record, _fake_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert gw._budget.lines == []  # type: ignore[attr-defined]
+    writes = ("app.", "insert ", "update ", "delete ")
+    assert [sql for sql, _ in pool.calls if any(w in sql.lower() for w in writes)] == []
+    assert pool.tx_events == []
+    # Mentions the crashed run never handed to identity still converge.
+    assert identity_job.deferred == [
+        {
+            "queueing_lock": f"identity:{provisional}",
+            "mention_id": str(provisional),
+            "workspace_id": str(WORKSPACE_ID),
+        }
+    ]
+    mention_sql = [sql for sql, _ in pool.calls if "public.mention" in sql.lower()]
+    assert len(mention_sql) == 1 and "'provisional'" in mention_sql[0]
+
+
+async def test_extract_second_run_after_success_is_a_no_op(identity_job: _LockedJob) -> None:
+    """Run once, then again on the same (now 'extracted') record: one AI call in total."""
+    gw = _make_gateway(_resp([_claim(PREDICATE_KEY, True)]))
+    record = _fake_source_record()
+    pool = FakePool(record, _fake_predicates())
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+    lines_after_first = len(gw._budget.lines)  # type: ignore[attr-defined]
+    assert lines_after_first > 0
+    record["extraction_status"] = "extracted"  # what the committed transaction wrote
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert len(gw._budget.lines) == lines_after_first  # type: ignore[attr-defined]
+    assert len([1 for sql, _ in pool.calls if "create_claim" in sql]) == 1
+    assert len([1 for sql, _ in pool.calls if "create_entity" in sql]) == 1
+    assert len([1 for sql, _ in pool.calls if "update_extraction_status" in sql]) == 1
+
+
+async def test_extract_observed_at_falls_back_to_fetched_at() -> None:
+    gw = _make_gateway(_resp([_claim(PREDICATE_KEY, True)], source_date=None))
+    pool = FakePool(_fake_source_record(), _fake_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    (claim_args,) = [a for sql, a in pool.calls if "create_claim" in sql]
+    assert claim_args[8] == FETCHED_AT
 
 
 # ---------------------------------------------------------------------------

@@ -329,6 +329,15 @@ def test_validate_claim_value() -> None:
     assert validate_claim_value(p("entity_ref"), str(UUID(int=1))) is None
     assert validate_claim_value(p("entity_ref"), "nope") is not None
     assert validate_claim_value(p("weird"), "x") is not None
+    # Non-finite numbers are not JSON: Postgres jsonb would reject the whole transaction.
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        assert validate_claim_value(p("number"), bad) is not None
+    assert validate_claim_value(p("number"), 10**6) is None
+    # Non-scalars never fit any predicate.
+    for t in ("boolean", "number", "text", "enum", "date", "entity_ref"):
+        assert validate_claim_value(p(t, ["a"]), None) is not None
+        assert validate_claim_value(p(t, ["a"]), [1]) is not None
+        assert validate_claim_value(p(t, ["a"]), {"a": 1}) is not None
 
 
 def test_factory_without_keys_is_not_configured() -> None:

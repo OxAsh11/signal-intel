@@ -423,6 +423,25 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         assert (
             await db.one("select count(*) from public.source_record where org_id = %s", (ORG,)) == 1
         )
+        # A retried extraction job on a committed record makes no AI call and writes nothing.
+        counts_sql = (
+            "select (select count(*) from public.entity where org_id = %s),"
+            " (select count(*) from public.mention where org_id = %s),"
+            " (select count(*) from public.claim where org_id = %s)"
+        )
+        counts_before = (await db.admin(counts_sql, (ORG, ORG, ORG)))[0]
+        ai_calls_before = len(gateway.calls)
+        await app.tasks["extract.structured"].defer_async(source_record_id=str(source_record))
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert len(gateway.calls) == ai_calls_before
+        assert (await db.admin(counts_sql, (ORG, ORG, ORG)))[0] == counts_before
+        # The page gave no date: its claims are observed at the record's fetch time.
+        assert await db.one(
+            "select bool_and(c.observed_at = sr.fetched_at) from public.claim c"
+            " join public.source_record sr on sr.id = c.source_record_id where sr.id = %s",
+            (source_record,),
+        )
 
         account, entity, stage = (
             await db.admin(
