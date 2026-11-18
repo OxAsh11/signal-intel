@@ -12,7 +12,12 @@ from signal_core.ai_gateway.providers.fake import FakeProvider
 from signal_core.config import Settings
 from signal_core.contracts.enums import UsageUnit
 from signal_core.metering import CallContext, MemoryBudgetGuard, MemoryPriceBook
-from signal_core.modules.m04_identity import resolve_mention
+from signal_core.modules.m04_identity import (
+    _lookup_aliases,
+    name_alias_value,
+    normalise_company_name,
+    resolve_mention,
+)
 
 # ---------------------------------------------------------------------------
 # Shared IDs
@@ -63,7 +68,12 @@ class FakeConn:
         *,
         entity_id: UUID | None = None,
         exact_rows: list[tuple] | None = None,
+        name_rows: list[tuple] | None = None,
+        mention_row: tuple | None = None,
     ) -> None:
+        # name_rows: (entity_id, country_part) rows for the exact-name query
+        self._name_rows = name_rows or []
+        self._mention_row = mention_row
         # alias_rows: returned for fuzzy (similarity) queries
         # exact_rows: returned for exact alias lookups (default = alias_rows for
         #             tests that don't distinguish; pass [] to force fuzzy path)
@@ -76,6 +86,8 @@ class FakeConn:
         self.calls.append((sql, args))
         sql_lower = sql.lower()
         if "public.mention" in sql_lower:
+            if self._mention_row is not None:
+                return [self._mention_row]
             return [
                 (
                     str(MENTION_ID),
@@ -95,6 +107,8 @@ class FakeConn:
                 # Enrichment query: SELECT e.id, e.display_name, array_agg(aliases)
                 # Build 3-column tuples from candidate entity IDs.
                 return [(r[0], "Acme Corp", []) for r in self._alias_rows]
+            if "split_part" in sql_lower:
+                return self._name_rows
             if "similarity" in sql_lower:
                 # Fuzzy name_country query → return fuzzy alias rows.
                 return self._alias_rows
@@ -142,8 +156,16 @@ class FakePool:
         *,
         entity_id: UUID | None = None,
         exact_rows: list[tuple] | None = None,
+        name_rows: list[tuple] | None = None,
+        mention_row: tuple | None = None,
     ) -> None:
-        self.conn = FakeConn(alias_rows, entity_id=entity_id, exact_rows=exact_rows)
+        self.conn = FakeConn(
+            alias_rows,
+            entity_id=entity_id,
+            exact_rows=exact_rows,
+            name_rows=name_rows,
+            mention_row=mention_row,
+        )
 
     def connection(self) -> FakeConnCtx:
         return FakeConnCtx(self.conn)
@@ -304,3 +326,84 @@ async def test_resolve_mention_tiebreak_no_winner_queues() -> None:
     result = await resolve_mention(pool, gw, MENTION_ID, WORKSPACE_ID, _ctx())
 
     assert result == "queued"
+
+
+# ---------------------------------------------------------------------------
+# Tests: exact normalised-name match (repeat sightings)
+# ---------------------------------------------------------------------------
+
+
+def _mention(name: str, country: str | None) -> dict[str, Any]:
+    return {"raw_name": name, "raw_country": country, "raw_domain": None, "raw_attributes": {}}
+
+
+def _mention_row(name: str, country: str | None) -> tuple:
+    return (
+        str(MENTION_ID),
+        str(ORG_ID),
+        str(SOURCE_RECORD_ID),
+        "company",
+        name,
+        None,
+        country,
+        {},
+        None,
+        None,
+    )
+
+
+async def test_exact_name_same_country_attaches_95() -> None:
+    conn = FakeConn([], exact_rows=[], name_rows=[(str(ENTITY_ID), "in")])
+    found = await _lookup_aliases(conn, ORG_ID, _mention("Acme", "IN"))
+    assert found == [(str(ENTITY_ID), "name_country", 95)]
+
+
+async def test_exact_name_missing_country_attaches_95() -> None:
+    # Alias has no country, mention has one.
+    conn = FakeConn([], exact_rows=[], name_rows=[(str(ENTITY_ID), "")])
+    assert await _lookup_aliases(conn, ORG_ID, _mention("Acme", "IN")) == [
+        (str(ENTITY_ID), "name_country", 95)
+    ]
+    # Alias has a country, mention has none.
+    conn = FakeConn([], exact_rows=[], name_rows=[(str(ENTITY_ID), "in")])
+    assert await _lookup_aliases(conn, ORG_ID, _mention("Acme", None)) == [
+        (str(ENTITY_ID), "name_country", 95)
+    ]
+
+
+async def test_exact_name_different_country_not_candidate() -> None:
+    conn = FakeConn([], exact_rows=[], name_rows=[(str(ENTITY_ID), "no")])
+    assert await _lookup_aliases(conn, ORG_ID, _mention("Fugro", "IN")) == []
+
+
+async def test_exact_name_query_uses_normalised_name() -> None:
+    """Old-style aliases (lower+strip) still match: the mention side is normalised."""
+    conn = FakeConn([], exact_rows=[], name_rows=[(str(ENTITY_ID), "in")])
+    await _lookup_aliases(conn, ORG_ID, _mention("  ACME Engineering ", "IN"))
+    name_calls = [args for sql, args in conn.calls if "split_part" in sql.lower()]
+    assert name_calls == [(str(ORG_ID), "acme engineering")]
+    assert name_alias_value("Acme Engineering", "IN") == "acme engineering|in"
+    assert name_alias_value("Acme Engineering", None) == "acme engineering"
+
+
+def test_normalise_company_name() -> None:
+    assert normalise_company_name("  ACME  Engineering, ") == "acme engineering"
+    assert normalise_company_name('"Acme"') == "acme"
+
+
+async def test_resolve_mention_exact_name_returns_attached() -> None:
+    pool = FakePool(
+        [],
+        exact_rows=[],
+        name_rows=[(str(ENTITY_ID), "us")],
+        mention_row=_mention_row("Acme Corp", "US"),
+    )
+    gw = _make_gateway("{}")  # AI must not be called
+
+    result = await resolve_mention(pool, gw, MENTION_ID, WORKSPACE_ID, _ctx())
+
+    assert result == "attached"
+    resolve_calls = [args for sql, args in pool.conn.calls if "app.resolve_mention" in sql]
+    assert len(resolve_calls) == 1
+    assert resolve_calls[0][1] == str(ENTITY_ID)
+    assert resolve_calls[0][3] == 95

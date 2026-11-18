@@ -17,6 +17,8 @@ duplicate_sweep re-runs resolution on all unresolved mentions for an org.
 from __future__ import annotations
 
 import json
+import re
+import unicodedata
 from typing import Any
 from uuid import UUID
 
@@ -36,6 +38,27 @@ TIEBREAK_PROMPT_VERSION = 1
 
 # Alias types checked in priority order (highest → lowest).
 _EXACT_ALIAS_TYPES = ("registry_id", "profile_url", "domain")
+
+# An exact normalised-name match in a compatible country is a repeat sighting.
+EXACT_NAME_CONFIDENCE = 95
+
+_WHITESPACE = re.compile(r"\s+")
+# Quotes and punctuation stripped from both ends of a name (kept inside: "Acme & Sons").
+_EDGE_PUNCTUATION = " .,;:!?\"'`()[]{}<>-_/\\|*#@~^"
+
+
+def normalise_company_name(name: str) -> str:
+    """NFKC, casefold, collapse whitespace, strip surrounding punctuation and quotes."""
+    text = unicodedata.normalize("NFKC", name).casefold()
+    text = _WHITESPACE.sub(" ", text)
+    return text.strip(_EDGE_PUNCTUATION)
+
+
+def name_alias_value(name: str, country: str | None) -> str:
+    """The name_country alias value: '<norm>|<country lower>', or '<norm>' with no country."""
+    norm = normalise_company_name(name)
+    country_norm = (country or "").lower().strip()
+    return f"{norm}|{country_norm}" if country_norm else norm
 
 
 # ---------------------------------------------------------------------------
@@ -122,8 +145,28 @@ async def _lookup_aliases(
         return []
 
     raw_country = (mention.get("raw_country") or "").lower().strip()
-    name_norm = raw_name.lower().strip()
-    name_country = f"{name_norm}|{raw_country}" if raw_country else name_norm
+    name_norm = normalise_company_name(raw_name)
+    name_country = name_alias_value(raw_name, raw_country)
+
+    # Exact normalised-name match: attaches when the countries are compatible
+    # (equal, or missing on either side). A different country is not a candidate.
+    if name_norm:
+        cur = await conn.execute(
+            "SELECT entity_id, split_part(value_normalised, '|', 2) AS country"
+            " FROM public.entity_alias"
+            " WHERE org_id = %s AND alias_type = 'name_country'"
+            " AND split_part(value_normalised, '|', 1) = %s"
+            " LIMIT 5",
+            (str(org_id), name_norm),
+        )
+        name_rows = await cur.fetchall()
+        exact = [
+            (str(row[0]), "name_country", EXACT_NAME_CONFIDENCE)
+            for row in name_rows
+            if not raw_country or not row[1] or row[1] == raw_country
+        ]
+        if exact:
+            return exact
 
     cur = await conn.execute(
         "SELECT entity_id, similarity(value_normalised, %s) AS sim"
@@ -417,9 +460,7 @@ async def _create_new(
     # Create name_country alias so future mentions can find this entity.
     raw_name = mention.get("raw_name")
     if raw_name:
-        raw_country = (mention.get("raw_country") or "").lower().strip()
-        name_norm = raw_name.lower().strip()
-        value_normalised = f"{name_norm}|{raw_country}" if raw_country else name_norm
+        value_normalised = name_alias_value(raw_name, mention.get("raw_country"))
         async with pool.connection() as conn:
             await conn.execute(
                 "SELECT app.create_entity_alias(%s, %s, %s::public.alias_type, %s, %s::smallint, %s)",  # noqa: E501
