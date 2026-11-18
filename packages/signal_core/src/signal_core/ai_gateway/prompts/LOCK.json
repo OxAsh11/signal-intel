@@ -11,6 +11,7 @@
   "radar_queries/v1": "36e01ba2abaaada2f95b76be3ba14c93f00c45b79e74bec2fbd502352ccd5bc5",
   "radar_queries/v2": "12a50ca0bc865e3a2a78ca6cc2046e1f02f93962f3e8758664b4156bd4b93fc8",
   "relevance_judge/v1": "f7f19e230c7a5f8692eea58835f400bae9e820c4ebb5ae895e3169e70c3b687d",
+  "relevance_judge/v2": "5f75f7ca6b4c67651a0ec8d4b33cd23058e9687925a0620be0a282a6c324171b",
   "reply_classify/v1": "58714570e9bc72734cabbaeef36769458bc34f547f0de39f75b2bc72c9a71942",
   "research/v1": "f5dc6885a8113c6a7cce2d7415031d76e866162e9ee91fdc9ad7669f65896726",
   "verdict/v1": "c7ecc25242c6e0ba5353ee7228fdb56511fcc89d8cafacaae73089030baa9ab9",

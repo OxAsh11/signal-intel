@@ -22,6 +22,7 @@ from psycopg_pool import AsyncConnectionPool
 from pydantic import BaseModel
 
 import signal_core.modules.m05_index as _m05_index
+from signal_core import briefs
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
@@ -36,7 +37,8 @@ log = get_logger(__name__)
 extract_relevance_judge_job: Any = None
 
 RELEVANCE_PROMPT_NAME = "relevance_judge"
-RELEVANCE_PROMPT_VERSION = 1
+RELEVANCE_PROMPT_VERSION = 2
+NO_BRIEF_HYPOTHESIS = "Any organisation of commercial interest to the user."
 EXTRACTION_PROMPT_NAME = "extraction"
 EXTRACTION_PROMPT_VERSION = 2
 # Longest text sent to the model for one record (about 10k tokens).
@@ -153,6 +155,36 @@ async def _radar_lexicon(pool: AsyncConnectionPool, source_record_id: UUID) -> l
     return list(row[0] or []) if row else []
 
 
+async def relevance_hypothesis(
+    pool: AsyncConnectionPool, source_record_id: UUID, workspace_id: UUID
+) -> str:
+    """What the relevance judge tests the record against.
+
+    The hypothesis of the Brief behind the record's radar; failing that the hypotheses of the
+    workspace's active Briefs; failing that a neutral line.
+    """
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT bv.config FROM public.source_record sr"
+            " JOIN public.radar r ON r.id = sr.radar_id"
+            " JOIN public.brief b ON b.id = r.brief_id"
+            " JOIN public.brief_version bv ON bv.id = b.current_version_id"
+            " WHERE sr.id = %s",
+            (str(source_record_id),),
+        )
+        row = await cur.fetchone()
+    if row is not None:
+        config = row[0]
+        if isinstance(config, str):
+            config = json.loads(config)
+        hypothesis = str((config or {}).get("hypothesis") or "").strip()
+        if hypothesis:
+            return hypothesis
+    active = [b.hypothesis.strip() for b in await briefs.active_brief_versions(pool, workspace_id)]
+    active = [h for h in active if h]
+    return "\n- ".join(active) if active else NO_BRIEF_HYPOTHESIS
+
+
 async def _update_status(
     pool: AsyncConnectionPool,
     source_record_id: UUID,
@@ -206,12 +238,13 @@ async def judge_relevance(
         log.info("extraction.prefiltered", source_record_id=str(source_record_id))
         return False
 
+    hypothesis = await relevance_hypothesis(pool, source_record_id, source_record["workspace_id"])
     prompt = load_prompt(RELEVANCE_PROMPT_NAME, RELEVANCE_PROMPT_VERSION)
     try:
         result = await gateway.run(
             Capability.PREJUDGE,
             prompt,
-            {"content": text},
+            {"hypothesis": hypothesis, "content": text},
             RelevanceJudgement,
             ctx,
         )

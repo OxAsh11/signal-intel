@@ -149,6 +149,7 @@ class FakeGateway:
     @staticmethod
     def _answer(name: str, variables: dict[str, str]) -> dict[str, Any]:
         if name == "relevance_judge":
+            assert variables.get("hypothesis", "").strip(), "relevance needs the Brief hypothesis"
             if "fake tender" in variables["content"].lower():
                 return {"relevant": False, "reason": "fixture"}
             assert "designs every project in Revit" in variables["content"], (

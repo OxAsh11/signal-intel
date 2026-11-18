@@ -19,6 +19,7 @@ from signal_core.config import Settings
 from signal_core.contracts.enums import UsageUnit
 from signal_core.metering import CallContext, MemoryBudgetGuard, MemoryPriceBook
 from signal_core.modules.m03_extraction import (
+    NO_BRIEF_HYPOTHESIS,
     ExtractionResult,
     extract_backfill,
     extract_structured,
@@ -99,6 +100,14 @@ class FakeConn:
         sql_lower = sql.lower()
         if self.fail_on and self.fail_on in sql_lower:
             raise RuntimeError("simulated database error")
+        if "brief_version" in sql_lower:
+            if "public.source_record" in sql_lower:  # the record's radar -> Brief hypothesis
+                hyp = self._source_record.get("hypothesis")
+                return [({"hypothesis": hyp},)] if hyp is not None else []
+            return [  # briefs.active_brief_versions
+                (str(uuid4()), str(uuid4()), str(ORG_ID), {"hypothesis": h}, {}, "Active")
+                for h in self._source_record.get("active_hypotheses", [])
+            ]
         if "lexicon" in sql_lower:
             lexicon = self._source_record.get("lexicon")
             return [(lexicon,)] if lexicon is not None else []
@@ -347,6 +356,42 @@ async def test_judge_relevance_lexicon_hit_goes_to_ai() -> None:
     pool = FakePool(record)
 
     assert await judge_relevance(pool, gw, SOURCE_RECORD_ID, _ctx()) is True
+
+
+def _capture_variables(gw: AiGateway) -> list[dict[str, str]]:
+    seen: list[dict[str, str]] = []
+    original = gw.run
+
+    async def spy(capability: Any, prompt: Any, variables: Any, *a: Any, **k: Any) -> Any:
+        seen.append(dict(variables))
+        return await original(capability, prompt, variables, *a, **k)
+
+    gw.run = spy  # type: ignore[method-assign]
+    return seen
+
+
+async def test_relevance_uses_radar_brief_hypothesis() -> None:
+    gw = _make_gateway(json.dumps({"relevant": True, "reason": "ok"}))
+    seen = _capture_variables(gw)
+    record = _fake_source_record() | {"hypothesis": "Councils that buy cameras"}
+    await judge_relevance(FakePool(record), gw, SOURCE_RECORD_ID, _ctx())
+    assert seen[0]["hypothesis"] == "Councils that buy cameras"
+    assert "content" in seen[0]
+
+
+async def test_relevance_falls_back_to_active_briefs() -> None:
+    gw = _make_gateway(json.dumps({"relevant": True, "reason": "ok"}))
+    seen = _capture_variables(gw)
+    record = _fake_source_record() | {"active_hypotheses": ["Hypothesis A", "Hypothesis B"]}
+    await judge_relevance(FakePool(record), gw, SOURCE_RECORD_ID, _ctx())
+    assert seen[0]["hypothesis"] == "Hypothesis A\n- Hypothesis B"
+
+
+async def test_relevance_no_brief_uses_neutral_line() -> None:
+    gw = _make_gateway(json.dumps({"relevant": True, "reason": "ok"}))
+    seen = _capture_variables(gw)
+    await judge_relevance(FakePool(_fake_source_record()), gw, SOURCE_RECORD_ID, _ctx())
+    assert seen[0]["hypothesis"] == NO_BRIEF_HYPOTHESIS
 
 
 # ---------------------------------------------------------------------------
