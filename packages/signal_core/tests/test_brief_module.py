@@ -1,14 +1,17 @@
 """Tests for M01 Brief intake: BriefDraft model validation and run_brief_intake orchestration."""
 
+import json
 import re
 from decimal import Decimal
 from uuid import uuid4
 
 import pytest
+import structlog.testing
 from pydantic import ValidationError
 
 from signal_core.ai_gateway.gateway import Result
 from signal_core.ai_gateway.outputs import BriefDraft
+from signal_core.brief_columns import ColumnSpec
 from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
 
 # ---------------------------------------------------------------------------
@@ -42,23 +45,40 @@ def _make_inp() -> BriefIntakeInput:
 
 class _MockConn:
     def __init__(self) -> None:
-        self.calls: list[tuple[str, str]] = []  # (fn_name, sql)
+        self.calls: list[str] = []
+        self.args: list[tuple[str, tuple[str, ...]]] = []  # (fn_name, args)
+        self.existing: list[tuple[str, str, str]] = []
 
-    async def execute(self, sql: str, args: object = None) -> None:
+    async def execute(self, sql: str, args: tuple[str, ...] = ()) -> None:
         m = re.search(r"app\.\w+", sql)
         fn = m.group(0) if m else sql
         self.calls.append(fn)
+        self.args.append((fn, args))
+
+    def cursor(self) -> "_MockConnCtx":
+        return _MockConnCtx(_MockCursor(self))
 
     @property
     def last_call_fn(self) -> str | None:
         return self.calls[-1] if self.calls else None
 
 
-class _MockConnCtx:
+class _MockCursor:
     def __init__(self, conn: _MockConn) -> None:
         self._conn = conn
 
-    async def __aenter__(self) -> _MockConn:
+    async def execute(self, sql: str, args: object = None) -> None:
+        self._conn.calls.append("cursor")
+
+    async def fetchall(self) -> list[tuple[str, str, str]]:
+        return self._conn.existing
+
+
+class _MockConnCtx:
+    def __init__(self, conn: "_MockConn | _MockCursor") -> None:
+        self._conn = conn
+
+    async def __aenter__(self) -> "_MockConn | _MockCursor":
         return self._conn
 
     async def __aexit__(self, *_: object) -> None:
@@ -72,6 +92,9 @@ class MockPool:
     @property
     def last_call_fn(self) -> str | None:
         return self.conn.last_call_fn
+
+    def args_for(self, fn: str) -> list[tuple[str, ...]]:
+        return [a for f, a in self.conn.args if f == fn]
 
     def connection(self) -> _MockConnCtx:
         return _MockConnCtx(self.conn)
@@ -95,6 +118,52 @@ class _FakeGateway:
         **kwargs: object,
     ) -> Result[BriefDraft]:  # type: ignore[type-arg]
         draft = BriefDraft.model_validate(_VALID_RAW)
+        return Result(value=draft, extractor_version_id=uuid4(), cost_usd=Decimal("0.001"))
+
+
+_COLUMNS_RAW = {
+    **_VALID_RAW,
+    "name": "  Operators of industrial drone programmes ",
+    "predicates": [
+        {
+            "key": "drone_programme",
+            "label": "Runs a drone programme",
+            "value_type": "boolean",
+            "role": "signal",
+        },
+        {
+            "key": "industry",
+            "label": "Industry",
+            "value_type": "enum",
+            "allowed_values": ["energy", "mining"],
+            "role": "fit.vertical",
+        },
+        {"key": "Bad Key", "label": "Bad", "value_type": "boolean", "role": "info"},
+    ],
+    "evidence_rules": [
+        {"predicate": "drone_programme", "kind": "requires", "op": "is_true"},
+        {"predicate": "ghost", "kind": "requires", "op": "present"},
+    ],
+    "assumptions": ["Energy and mining sites count as industrial."],
+}
+
+
+class _RawGateway:
+    def __init__(self, raw: dict[str, object]) -> None:
+        self.raw = raw
+        self.variables: dict[str, str] = {}
+
+    async def run(
+        self,
+        capability: object,
+        prompt: object,
+        variables: dict[str, str],
+        output: object,
+        ctx: object,
+        **kwargs: object,
+    ) -> Result[BriefDraft]:  # type: ignore[type-arg]
+        self.variables = variables
+        draft = BriefDraft.model_validate(self.raw)
         return Result(value=draft, extractor_version_id=uuid4(), cost_usd=Decimal("0.001"))
 
 
@@ -157,3 +226,50 @@ async def test_run_brief_intake_calls_fail_and_reraises_on_gateway_error() -> No
     with pytest.raises(RuntimeError, match="simulated gateway failure"):
         await run_brief_intake(inp, _FailingGateway(), pool)  # type: ignore[arg-type]
     assert pool.last_call_fn == "app.fail_brief_intake"
+
+
+async def test_intake_saves_cleaned_columns_and_names_the_brief() -> None:
+    pool = MockPool()
+    pool.conn.existing = [("size", "Size", "number")]
+    gw = _RawGateway(_COLUMNS_RAW)
+    inp = _make_inp()
+    with structlog.testing.capture_logs() as logs:
+        await run_brief_intake(inp, gw, pool)  # type: ignore[arg-type]
+
+    ((brief_id, saved),) = pool.args_for("app.save_brief_draft")
+    config = json.loads(saved)
+    assert brief_id == str(inp.brief_id)
+    assert "name" not in config
+    assert [p["key"] for p in config["predicates"]] == ["drone_programme", "industry"]
+    assert ColumnSpec.model_validate(config["predicates"][0]).role == "signal"
+    assert [r["predicate"] for r in config["evidence_rules"]] == ["drone_programme"]
+    assert config["assumptions"] == ["Energy and mining sites count as industrial."]
+    assert pool.args_for("app.apply_drafted_name") == [
+        (str(inp.brief_id), "Operators of industrial drone programmes")
+    ]
+    assert pool.conn.calls.index("app.apply_drafted_name") > pool.conn.calls.index(
+        "app.save_brief_draft"
+    )
+    dropped = [e for e in logs if e["event"] == "brief_intake.column_dropped"]
+    assert len(dropped) == 2
+    assert any("Bad Key" in e["reason"] for e in dropped)
+    assert json.loads(gw.variables["existing_predicates"]) == [
+        {"key": "size", "label": "Size", "value_type": "number"}
+    ]
+
+
+async def test_blank_name_does_not_call_apply_drafted_name() -> None:
+    pool = MockPool()
+    await run_brief_intake(_make_inp(), _RawGateway({**_COLUMNS_RAW, "name": "  "}), pool)  # type: ignore[arg-type]
+    assert pool.args_for("app.apply_drafted_name") == []
+    assert pool.last_call_fn == "app.save_brief_draft"
+
+
+def test_brief_draft_columns_default_empty_and_stay_lenient() -> None:
+    draft = BriefDraft.model_validate(_VALID_RAW)
+    assert draft.name == ""
+    assert draft.predicates == []
+    assert draft.evidence_rules == []
+    assert draft.assumptions == []
+    lenient = BriefDraft.model_validate({**_VALID_RAW, "predicates": [3, "x", {"key": 1}]})
+    assert len(lenient.predicates) == 3
