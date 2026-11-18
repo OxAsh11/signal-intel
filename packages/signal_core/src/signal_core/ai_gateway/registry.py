@@ -1,5 +1,6 @@
 """Predicate registry validation. Mirrors the database trigger `app.validate_claim`."""
 
+import math
 from dataclasses import dataclass
 from datetime import date
 from uuid import UUID
@@ -20,6 +21,9 @@ def validate_claim_value(p: Predicate, value: object) -> str | None:
         return None if isinstance(value, bool) else _mismatch(p)
     if t == "number":
         ok = isinstance(value, int | float) and not isinstance(value, bool)
+        if ok and isinstance(value, float) and not math.isfinite(value):
+            # NaN and Infinity are not JSON: jsonb (and so the trigger) would reject them.
+            return f"value {value!r} is not a finite number (predicate {p.key})"
         return None if ok else _mismatch(p)
     if t in {"text", "date", "enum", "entity_ref"} and not isinstance(value, str):
         return _mismatch(p)

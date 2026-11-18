@@ -669,3 +669,236 @@ async def test_brave_radar_without_queries_asks_for_them() -> None:
     assert gq["args"] == {"radar_id": radar_id, "org_id": org, "workspace_id": ws}
     fetch = [j for j in connector.jobs.values() if j["task_name"] == "source.fetch_tender"]
     assert [j["status"] for j in fetch] == ["succeeded"]
+
+
+# ----------------------------------------------------------------------
+# Task 5: claim/merge events recompute verdicts; verdict changes refresh yield
+# ----------------------------------------------------------------------
+
+
+class _RowsPool:
+    """Fake pool whose every query returns the same canned rows; records the SQL it saw."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows = rows
+        self.queries: list[tuple[str, Any]] = []
+
+    def connection(self) -> "_RowsPool._Ctx":
+        return _RowsPool._Ctx(self)
+
+    class _Cur:
+        def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+            self._rows = rows
+
+        async def fetchone(self) -> tuple[Any, ...] | None:
+            return self._rows[0] if self._rows else None
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            return list(self._rows)
+
+    class _Conn:
+        def __init__(self, pool: "_RowsPool") -> None:
+            self._pool = pool
+
+        async def execute(self, sql: str, args: Any = None) -> "_RowsPool._Cur":
+            self._pool.queries.append((sql, args))
+            return _RowsPool._Cur(self._pool.rows)
+
+    class _Ctx:
+        def __init__(self, pool: "_RowsPool") -> None:
+            self._pool = pool
+
+        async def __aenter__(self) -> "_RowsPool._Conn":
+            return _RowsPool._Conn(self._pool)
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+
+def _pooled_app(connector: InMemoryConnector, pool: _RowsPool) -> procrastinate.App:
+    return build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=pool,  # type: ignore[arg-type]
+    )
+
+
+async def _dispatch_events(app: procrastinate.App, events: list[dict[str, Any]]) -> None:
+    async with app.open_async():
+        for event in events:
+            await app.tasks[DISPATCH_TASK].defer_async(event_id=str(uuid4()), **event)
+        await app.run_worker_async(queues=["events"], wait=False, install_signal_handlers=False)
+
+
+def _jobs(connector: InMemoryConnector, name: str) -> list[dict[str, Any]]:
+    return [j for j in connector.jobs.values() if j["task_name"] == name]
+
+
+async def test_dispatch_claim_created_queues_verdict_per_account_workspace() -> None:
+    org_id, entity_id = str(uuid4()), str(uuid4())
+    ws_a, ws_b = str(uuid4()), str(uuid4())
+    pool = _RowsPool([(ws_a,), (ws_b,)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": org_id,
+                "workspace_id": None,  # claim events are org-scoped
+                "payload": {
+                    "entity_id": entity_id,
+                    "predicate_id": str(uuid4()),
+                    "source_record_id": str(uuid4()),
+                },
+            }
+        ],
+    )
+    verdicts = _jobs(connector, "verdict.compute")
+    assert sorted(j["queueing_lock"] for j in verdicts) == sorted(
+        [f"verdict:{entity_id}:{ws_a}", f"verdict:{entity_id}:{ws_b}"]
+    )
+    assert sorted(j["args"]["workspace_id"] for j in verdicts) == sorted([ws_a, ws_b])
+    assert all(j["args"]["entity_id"] == entity_id for j in verdicts)
+    assert all(j["args"]["org_id"] == org_id for j in verdicts)
+    sql, params = pool.queries[0]
+    assert "public.account" in sql and params == (entity_id,)
+
+
+async def test_dispatch_entity_merged_uses_winner() -> None:
+    org_id, winner, loser, ws = str(uuid4()), str(uuid4()), str(uuid4()), str(uuid4())
+    pool = _RowsPool([(ws,)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "entity.merged",
+                "org_id": org_id,
+                "workspace_id": None,
+                "payload": {"winner": winner, "loser": loser},
+            }
+        ],
+    )
+    (verdict,) = _jobs(connector, "verdict.compute")
+    assert verdict["args"] == {"entity_id": winner, "workspace_id": ws, "org_id": org_id}
+    assert verdict["queueing_lock"] == f"verdict:{winner}:{ws}"
+    assert pool.queries[0][1] == (winner,)
+
+
+async def test_dispatch_claim_burst_one_verdict_job() -> None:
+    org_id, entity_id, ws = str(uuid4()), str(uuid4()), str(uuid4())
+    connector = InMemoryConnector()
+    burst = [
+        {
+            "event": "claim.created",
+            "org_id": org_id,
+            "workspace_id": None,
+            "payload": {
+                "entity_id": entity_id,
+                "predicate_id": str(uuid4()),
+                "source_record_id": str(uuid4()),
+            },
+        }
+        for _ in range(10)
+    ]
+    await _dispatch_events(_pooled_app(connector, _RowsPool([(ws,)])), burst)
+    dispatched = _jobs(connector, DISPATCH_TASK)
+    assert len(dispatched) == 10 and all(j["status"] == "succeeded" for j in dispatched)
+    assert len(_jobs(connector, "verdict.compute")) == 1
+
+
+async def test_dispatch_verdict_changed_queues_yield() -> None:
+    org_id, ws, account_id = str(uuid4()), str(uuid4()), str(uuid4())
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, _RowsPool([(account_id,)])),
+        [
+            {
+                "event": "verdict.changed",
+                "org_id": org_id,
+                "workspace_id": ws,
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    (score,) = _jobs(connector, "score.compute")
+    assert score["args"]["account_id"] == account_id
+    # Select by queueing lock: between :45 and :55 UTC the periodic deferrer also queues the
+    # hourly radar.yield_compute cron (lock None), so there can be two yield jobs.
+    (yield_job,) = [
+        j for j in _jobs(connector, "radar.yield_compute") if j["queueing_lock"] is not None
+    ]
+    # One global lock: compute_radar_yield() scans every radar, so N workspaces whose verdicts
+    # change together must not queue N full scans.
+    assert yield_job["queueing_lock"] == "yield:all"
+    assert isinstance(yield_job["args"]["timestamp"], int)
+
+
+async def test_dispatch_verdict_changed_in_many_workspaces_queues_one_yield() -> None:
+    connector = InMemoryConnector()
+    events = [
+        {
+            "event": "verdict.changed",
+            "org_id": str(uuid4()),
+            "workspace_id": str(uuid4()),
+            "payload": {"entity_id": str(uuid4())},
+        }
+        for _ in range(3)
+    ]
+    await _dispatch_events(_pooled_app(connector, _RowsPool([])), events)
+    locked = [j for j in _jobs(connector, "radar.yield_compute") if j["queueing_lock"] is not None]
+    assert [j["queueing_lock"] for j in locked] == ["yield:all"]
+
+
+async def test_dispatch_claim_created_without_org_is_a_no_op() -> None:
+    pool = _RowsPool([(str(uuid4()),)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": "",
+                "workspace_id": None,
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+    assert pool.queries == []
+
+
+async def test_dispatch_claim_created_without_account_queues_nothing() -> None:
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, _RowsPool([])),
+        [
+            {
+                "event": "claim.created",
+                "org_id": str(uuid4()),
+                "workspace_id": None,
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+
+
+@pytest.mark.parametrize("evt", ["claim.created", "entity.merged"])
+async def test_dispatch_malformed_entity_event_is_a_no_op(evt: str) -> None:
+    pool = _RowsPool([(str(uuid4()),)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [{"event": evt, "org_id": str(uuid4()), "workspace_id": None, "payload": {}}],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+    assert pool.queries == []

@@ -100,4 +100,11 @@ describe('light system', () => {
     const { container } = render(<MetricTile label="Spend" value="$7" href="/x" version="def v1" family="lava" />);
     expect(container.querySelector('a')!.className).toBe('si-metric si-fam-lava');
   });
+
+  it('MetricTile with version renders no visible version text', () => {
+    const { container } = render(<MetricTile label="Spend" value="$7" href="/x" version="def v1" />);
+    expect(container.textContent).not.toContain('def v1');
+    const a = container.querySelector('a')!;
+    expect(a.getAttribute('title')).toContain('def v1');
+  });
 });

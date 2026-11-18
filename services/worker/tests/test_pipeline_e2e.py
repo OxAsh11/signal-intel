@@ -37,6 +37,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import api.mcp_server as mcp_server
+import signal_core.modules.m04_identity as m04
 import signal_core.modules.m05_verdict as m05
 import signal_core.modules.m13_integrations as m13
 from api.main import build_app as build_api
@@ -71,6 +72,8 @@ PAGE = (
     "Acme Engineering (acme-eng.example) designs every project in Revit and is hiring ten BIM "
     "coordinators for its twelve sites in the Netherlands."
 )
+# A later page names the same company without a domain: it must attach, not go to Review.
+PAGE_2 = "Acme Engineering designs every project in Revit and has opened a new studio in Rotterdam."
 
 
 def _free_port() -> int:
@@ -149,12 +152,39 @@ class FakeGateway:
     @staticmethod
     def _answer(name: str, variables: dict[str, str]) -> dict[str, Any]:
         if name == "relevance_judge":
+            assert variables.get("hypothesis", "").strip(), "relevance needs the Brief hypothesis"
             if "fake tender" in variables["content"].lower():
                 return {"relevant": False, "reason": "fixture"}
             assert "designs every project in Revit" in variables["content"], (
                 "extraction must see the page text"
             )
             return {"relevant": True, "reason": "names a company and a tool"}
+        if name == "extraction" and "Rotterdam" in variables["content"]:
+            return {
+                "mentions": [
+                    {
+                        "entity_type": "company",
+                        "raw_name": "Acme Engineering",
+                        "raw_country": "NL",
+                        "raw_attributes": {},
+                    }
+                ],
+                "claims": [
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "uses_revit",
+                        "value": True,
+                        "quote": "designs every project in Revit",
+                        "confidence": 90,
+                    },
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "vertical",
+                        "value": "engineering",
+                        "confidence": 75,
+                    },
+                ],
+            }
         if name == "extraction":
             return {
                 "mentions": [
@@ -170,17 +200,17 @@ class FakeGateway:
                     {
                         "mention_index": 0,
                         "predicate_key": "uses_revit",
-                        "value": "true",
+                        "value": True,
                         "quote": "designs every project in Revit",
                         "confidence": 92,
                     },
                     {
                         "mention_index": 0,
                         "predicate_key": "vertical",
-                        "value": '"engineering"',
+                        "value": "engineering",
                         "confidence": 80,
                     },
-                    {"mention_index": 0, "predicate_key": "sites", "value": "12", "confidence": 70},
+                    {"mention_index": 0, "predicate_key": "sites", "value": 12, "confidence": 70},
                 ],
             }
         if name == "verdict":
@@ -393,6 +423,25 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         assert (
             await db.one("select count(*) from public.source_record where org_id = %s", (ORG,)) == 1
         )
+        # A retried extraction job on a committed record makes no AI call and writes nothing.
+        counts_sql = (
+            "select (select count(*) from public.entity where org_id = %s),"
+            " (select count(*) from public.mention where org_id = %s),"
+            " (select count(*) from public.claim where org_id = %s)"
+        )
+        counts_before = (await db.admin(counts_sql, (ORG, ORG, ORG)))[0]
+        ai_calls_before = len(gateway.calls)
+        await app.tasks["extract.structured"].defer_async(source_record_id=str(source_record))
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert len(gateway.calls) == ai_calls_before
+        assert (await db.admin(counts_sql, (ORG, ORG, ORG)))[0] == counts_before
+        # The page gave no date: its claims are observed at the record's fetch time.
+        assert await db.one(
+            "select bool_and(c.observed_at = sr.fetched_at) from public.claim c"
+            " join public.source_record sr on sr.id = c.source_record_id where sr.id = %s",
+            (source_record,),
+        )
 
         account, entity, stage = (
             await db.admin(
@@ -427,6 +476,120 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             )
         )[0]
         assert (verdict, claim_count) == ("Confirmed", 3)
+
+        # ── A second page names the company without a domain: it attaches, and the new
+        # claims re-judge the verdict through the claim and merge events ──
+        first_computed_at = await db.one(
+            "select computed_at from public.verdict where entity_id = %s and brief_version_id = %s",
+            (entity, brief_version),
+        )
+        verdict_jobs_before = sum(
+            1
+            for j in connector.jobs.values()
+            if j["task_name"] == "verdict.compute" and j["args"]["entity_id"] == str(entity)
+        )
+        payload_2 = SourcePayload(
+            url="https://news.example/acme-rotterdam",
+            fetched_at=datetime.now(UTC),
+            content_hash=hashlib.sha256(PAGE_2.encode()).hexdigest(),
+            payload_ref=None,
+            language="en",
+            raw=PAGE_2.encode(),
+        )
+        assert await create_source_records(pool, ORG, WS, "radar:e2e", "website", [payload_2]) == 1
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        source_record_2 = await db.one(
+            "select id from public.source_record where org_id = %s and id <> %s",
+            (ORG, source_record),
+        )
+        assert (
+            await db.one(
+                "select extraction_status::text from public.source_record where id = %s",
+                (source_record_2,),
+            )
+            == "extracted"
+        )
+        assert (
+            await db.one("select count(*) from public.review_item where workspace_id = %s", (WS,))
+            == 0
+        )
+        assert (
+            await db.one(
+                "select entity_id from public.mention where source_record_id = %s",
+                (source_record_2,),
+            )
+            == entity
+        )
+        claims_by_source = dict(
+            await db.admin(
+                "select source_record_id, count(*) from public.claim where entity_id = %s"
+                " group by source_record_id",
+                (entity,),
+            )
+        )
+        assert claims_by_source == {source_record: 3, source_record_2: 2}
+        assert (
+            await db.one("select count(*) from public.account where workspace_id = %s", (WS,)) == 1
+        )
+        recomputed_at = await db.one(
+            "select computed_at from public.verdict where entity_id = %s and brief_version_id = %s",
+            (entity, brief_version),
+        )
+        assert recomputed_at > first_computed_at, "the verdict was not recomputed after the merge"
+        assert (
+            sum(
+                1
+                for j in connector.jobs.values()
+                if j["task_name"] == "verdict.compute"
+                and j["args"]["entity_id"] == str(entity)
+                and j["status"] == "succeeded"
+            )
+            > verdict_jobs_before
+        )
+        # The verdict change also queued a radar yield refresh (one global scan).
+        assert any(
+            j["task_name"] == "radar.yield_compute" and j["queueing_lock"] == "yield:all"
+            for j in connector.jobs.values()
+        )
+
+        # A claim written straight to the store (no extraction, no identity job) reaches the
+        # verdict only through the claim.created event: the dispatcher must queue the recompute.
+        def succeeded_verdict_jobs() -> int:
+            return sum(
+                1
+                for j in connector.jobs.values()
+                if j["task_name"] == "verdict.compute"
+                and j["args"]["entity_id"] == str(entity)
+                and j["status"] == "succeeded"
+            )
+
+        before_claim_event = (succeeded_verdict_jobs(), recomputed_at)
+        new_claim = await db.one(
+            "select app.create_claim(%s, %s, (select id from public.predicate where key = 'sites'"
+            " and workspace_id = %s), '15'::jsonb, null, null, null, %s, now(), %s, 70::smallint)",
+            (ORG, entity, WS, source_record_2, CANARY_EXTRACTOR_VERSION),
+        )
+        assert new_claim is not None
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert (
+            await db.one(
+                "select count(*) from public.outbox where event = 'claim.created'"
+                " and aggregate_id = %s and published_at is not null",
+                (new_claim,),
+            )
+            == 1
+        )
+        assert succeeded_verdict_jobs() == before_claim_event[0] + 1
+        assert (
+            await db.one(
+                "select computed_at from public.verdict"
+                " where entity_id = %s and brief_version_id = %s",
+                (entity, brief_version),
+            )
+            > before_claim_event[1]
+        ), "claim.created did not recompute the verdict"
 
         band, evidence, scale = (
             await db.admin(
@@ -692,7 +855,9 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             card = await mcp_server.get_account_card(str(account), str(WS))
             assert card["display_name"] == "Acme Engineering" and card["verdict"] == "Confirmed"
             assert len(await mcp_server.search_account("acme", str(WS))) == 1
-            assert len(await mcp_server.get_claims(str(entity), str(WS))) == 3
+            assert (
+                len(await mcp_server.get_claims(str(entity), str(WS))) == 6
+            )  # both pages + direct
             assert len(await mcp_server.find_accounts(str(WS), band="High")) == 1
             with pytest.raises(mcp_server.WorkspaceNotPermitted):
                 await mcp_server.find_accounts(str(uuid4()))
@@ -886,7 +1051,7 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         assert gateway.calls.count("verdict") == judged
 
         # A new claim that says the opposite: the verdict is judged again and goes to review
-        # with both claims.
+        # with every uses_revit claim (one yes from each page, and the no).
         await db.admin(
             "select app.create_claim(%s, %s, (select id from public.predicate where key = 'uses_revit'"
             " and workspace_id = %s), 'false'::jsonb, 'moved every project off Revit', null, null, %s,"
@@ -901,9 +1066,9 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
                 " where verdict_id = %s and reason = 'conflict' and status = 'pending'",
                 (verdict_id,),
             )
-            == 2
+            == 3
         )
-        # Asking again about the same two claims does not add a second item.
+        # Asking again about the same claims does not add a second item.
         await m05.compute_verdict(pool, gateway, entity, WS, ctx)  # type: ignore[arg-type]
         assert (
             await db.one(
@@ -1024,6 +1189,49 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             >= 1
         )
         assert _failed_jobs(connector) == []
+
+        # ── Exact-name identity against the real schema: same type, live, compatible country ─
+        async def _alias(entity_type: str, value: str) -> UUID:
+            new_id = await db.one(
+                "select app.create_entity(%s, %s::public.entity_type, %s)",
+                (ORG, entity_type, value.split("|")[0]),
+            )
+            await db.admin(
+                "select app.create_entity_alias(%s, %s, 'name_country'::public.alias_type,"
+                " %s, 50::smallint, %s)",
+                (ORG, new_id, value, source_record),
+            )
+            return UUID(str(new_id))
+
+        def _mention(entity_type: str, name: str, country: str) -> dict[str, Any]:
+            return {
+                "entity_type": entity_type,
+                "raw_name": name,
+                "raw_country": country,
+                "raw_domain": None,
+                "raw_attributes": {},
+            }
+
+        person = await _alias("person", "jordan blake|gb")
+        # Sorted before "in" too, so neither heap nor index order can put "in" in the first five.
+        for country in ("ae", "at", "be", "ch", "de", "dk"):
+            await _alias("company", f"fugro|{country}")
+        fugro_in = await _alias("company", "fugro|in")
+        async with pool.connection() as lookup_conn:
+            assert await m04._lookup_aliases(
+                lookup_conn, ORG, _mention("company", "Fugro", "IN")
+            ) == [(str(fugro_in), "name_country", 95)]
+            # A company never matches a person's name alias; a person never gets the 95 rule.
+            assert (
+                await m04._lookup_aliases(
+                    lookup_conn, ORG, _mention("company", "Jordan Blake", "GB")
+                )
+                == []
+            )
+            person_hits = await m04._lookup_aliases(
+                lookup_conn, ORG, _mention("person", "Jordan Blake", "GB")
+            )
+            assert person_hits and all(c[0] == str(person) and c[2] <= 89 for c in person_hits)
 
         # ── Removing a member revokes their tokens at once ────────────────────
         await db.admin("update public.member set status = 'removed' where id = %s", (MEMBER,))
