@@ -37,6 +37,7 @@ from psycopg import AsyncConnection
 from psycopg_pool import AsyncConnectionPool
 
 import api.mcp_server as mcp_server
+import signal_core.modules.m04_identity as m04
 import signal_core.modules.m05_verdict as m05
 import signal_core.modules.m13_integrations as m13
 from api.main import build_app as build_api
@@ -1169,6 +1170,49 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             >= 1
         )
         assert _failed_jobs(connector) == []
+
+        # ── Exact-name identity against the real schema: same type, live, compatible country ─
+        async def _alias(entity_type: str, value: str) -> UUID:
+            new_id = await db.one(
+                "select app.create_entity(%s, %s::public.entity_type, %s)",
+                (ORG, entity_type, value.split("|")[0]),
+            )
+            await db.admin(
+                "select app.create_entity_alias(%s, %s, 'name_country'::public.alias_type,"
+                " %s, 50::smallint, %s)",
+                (ORG, new_id, value, source_record),
+            )
+            return UUID(str(new_id))
+
+        def _mention(entity_type: str, name: str, country: str) -> dict[str, Any]:
+            return {
+                "entity_type": entity_type,
+                "raw_name": name,
+                "raw_country": country,
+                "raw_domain": None,
+                "raw_attributes": {},
+            }
+
+        person = await _alias("person", "jordan blake|gb")
+        # Sorted before "in" too, so neither heap nor index order can put "in" in the first five.
+        for country in ("ae", "at", "be", "ch", "de", "dk"):
+            await _alias("company", f"fugro|{country}")
+        fugro_in = await _alias("company", "fugro|in")
+        async with pool.connection() as lookup_conn:
+            assert await m04._lookup_aliases(
+                lookup_conn, ORG, _mention("company", "Fugro", "IN")
+            ) == [(str(fugro_in), "name_country", 95)]
+            # A company never matches a person's name alias; a person never gets the 95 rule.
+            assert (
+                await m04._lookup_aliases(
+                    lookup_conn, ORG, _mention("company", "Jordan Blake", "GB")
+                )
+                == []
+            )
+            person_hits = await m04._lookup_aliases(
+                lookup_conn, ORG, _mention("person", "Jordan Blake", "GB")
+            )
+            assert person_hits and all(c[0] == str(person) and c[2] <= 89 for c in person_hits)
 
         # ── Removing a member revokes their tokens at once ────────────────────
         await db.admin("update public.member set status = 'removed' where id = %s", (MEMBER,))
