@@ -828,9 +828,31 @@ async def test_dispatch_verdict_changed_queues_yield() -> None:
     )
     (score,) = _jobs(connector, "score.compute")
     assert score["args"]["account_id"] == account_id
-    (yield_job,) = _jobs(connector, "radar.yield_compute")
-    assert yield_job["queueing_lock"] == f"yield:{ws}"
+    # Select by queueing lock: between :45 and :55 UTC the periodic deferrer also queues the
+    # hourly radar.yield_compute cron (lock None), so there can be two yield jobs.
+    (yield_job,) = [
+        j for j in _jobs(connector, "radar.yield_compute") if j["queueing_lock"] is not None
+    ]
+    # One global lock: compute_radar_yield() scans every radar, so N workspaces whose verdicts
+    # change together must not queue N full scans.
+    assert yield_job["queueing_lock"] == "yield:all"
     assert isinstance(yield_job["args"]["timestamp"], int)
+
+
+async def test_dispatch_verdict_changed_in_many_workspaces_queues_one_yield() -> None:
+    connector = InMemoryConnector()
+    events = [
+        {
+            "event": "verdict.changed",
+            "org_id": str(uuid4()),
+            "workspace_id": str(uuid4()),
+            "payload": {"entity_id": str(uuid4())},
+        }
+        for _ in range(3)
+    ]
+    await _dispatch_events(_pooled_app(connector, _RowsPool([])), events)
+    locked = [j for j in _jobs(connector, "radar.yield_compute") if j["queueing_lock"] is not None]
+    assert [j["queueing_lock"] for j in locked] == ["yield:all"]
 
 
 async def test_dispatch_claim_created_without_org_is_a_no_op() -> None:

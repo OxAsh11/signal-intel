@@ -1445,9 +1445,9 @@ def build_app(
             if row is not None:
                 await _enqueue("score.compute", f"score:{row[0]}", account_id=str(row[0]), **tenant)
             # Keep the Discovery funnel in step with Today; the hourly cron is the backstop.
-            await _enqueue(
-                "radar.yield_compute", f"yield:{workspace_id}", timestamp=int(time.time())
-            )
+            # One global lock: compute_radar_yield() scans every radar, so a burst of verdict
+            # changes across N workspaces must queue one scan, not N.
+            await _enqueue("radar.yield_compute", "yield:all", timestamp=int(time.time()))
         elif evt == "contact_point.verified":
             row = await _fetch_one(
                 "select account_id from public.contact_point where id = %s",

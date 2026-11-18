@@ -547,9 +547,9 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             )
             > verdict_jobs_before
         )
-        # The verdict change also queued a radar yield refresh for the workspace.
+        # The verdict change also queued a radar yield refresh (one global scan).
         assert any(
-            j["task_name"] == "radar.yield_compute" and j["queueing_lock"] == f"yield:{WS}"
+            j["task_name"] == "radar.yield_compute" and j["queueing_lock"] == "yield:all"
             for j in connector.jobs.values()
         )
 
