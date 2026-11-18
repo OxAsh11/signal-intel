@@ -533,6 +533,44 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             for j in connector.jobs.values()
         )
 
+        # A claim written straight to the store (no extraction, no identity job) reaches the
+        # verdict only through the claim.created event: the dispatcher must queue the recompute.
+        def succeeded_verdict_jobs() -> int:
+            return sum(
+                1
+                for j in connector.jobs.values()
+                if j["task_name"] == "verdict.compute"
+                and j["args"]["entity_id"] == str(entity)
+                and j["status"] == "succeeded"
+            )
+
+        before_claim_event = (succeeded_verdict_jobs(), recomputed_at)
+        new_claim = await db.one(
+            "select app.create_claim(%s, %s, (select id from public.predicate where key = 'sites'"
+            " and workspace_id = %s), '15'::jsonb, null, null, null, %s, now(), %s, 70::smallint)",
+            (ORG, entity, WS, source_record_2, CANARY_EXTRACTOR_VERSION),
+        )
+        assert new_claim is not None
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert (
+            await db.one(
+                "select count(*) from public.outbox where event = 'claim.created'"
+                " and aggregate_id = %s and published_at is not null",
+                (new_claim,),
+            )
+            == 1
+        )
+        assert succeeded_verdict_jobs() == before_claim_event[0] + 1
+        assert (
+            await db.one(
+                "select computed_at from public.verdict"
+                " where entity_id = %s and brief_version_id = %s",
+                (entity, brief_version),
+            )
+            > before_claim_event[1]
+        ), "claim.created did not recompute the verdict"
+
         band, evidence, scale = (
             await db.admin(
                 "select band::text, evidence, scale from public.score where account_id = %s and brief_version_id = %s",
@@ -797,7 +835,9 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
             card = await mcp_server.get_account_card(str(account), str(WS))
             assert card["display_name"] == "Acme Engineering" and card["verdict"] == "Confirmed"
             assert len(await mcp_server.search_account("acme", str(WS))) == 1
-            assert len(await mcp_server.get_claims(str(entity), str(WS))) == 5  # both pages
+            assert (
+                len(await mcp_server.get_claims(str(entity), str(WS))) == 6
+            )  # both pages + direct
             assert len(await mcp_server.find_accounts(str(WS), band="High")) == 1
             with pytest.raises(mcp_server.WorkspaceNotPermitted):
                 await mcp_server.find_accounts(str(uuid4()))

@@ -831,3 +831,52 @@ async def test_dispatch_verdict_changed_queues_yield() -> None:
     (yield_job,) = _jobs(connector, "radar.yield_compute")
     assert yield_job["queueing_lock"] == f"yield:{ws}"
     assert isinstance(yield_job["args"]["timestamp"], int)
+
+
+async def test_dispatch_claim_created_without_org_is_a_no_op() -> None:
+    pool = _RowsPool([(str(uuid4()),)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": "",
+                "workspace_id": None,
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+    assert pool.queries == []
+
+
+async def test_dispatch_claim_created_without_account_queues_nothing() -> None:
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, _RowsPool([])),
+        [
+            {
+                "event": "claim.created",
+                "org_id": str(uuid4()),
+                "workspace_id": None,
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+
+
+@pytest.mark.parametrize("evt", ["claim.created", "entity.merged"])
+async def test_dispatch_malformed_entity_event_is_a_no_op(evt: str) -> None:
+    pool = _RowsPool([(str(uuid4()),)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [{"event": evt, "org_id": str(uuid4()), "workspace_id": None, "payload": {}}],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+    assert pool.queries == []

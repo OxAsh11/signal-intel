@@ -1416,11 +1416,16 @@ def build_app(
         if pool is None or not org_id:
             return
         # Org-scoped events (no workspace): new evidence or a merge re-judges the entity.
-        if evt == "claim.created":
-            await _recompute_verdicts(str(payload["entity_id"]), org_id)
-            return
-        if evt == "entity.merged":
-            await _recompute_verdicts(str(payload["winner"]), org_id)
+        if evt in ("claim.created", "entity.merged"):
+            # A merge re-judges the surviving entity; a claim re-judges its own entity.
+            entity_id = payload.get("winner" if evt == "entity.merged" else "entity_id")
+            if not entity_id:
+                # Malformed payload: a retry would fail the same way, so drop it loudly.
+                log.warning(
+                    "dispatch.missing_entity", event_type=evt, event_id=event.get("event_id")
+                )
+                return
+            await _recompute_verdicts(str(entity_id), org_id)
             return
         if not workspace_id:
             return
