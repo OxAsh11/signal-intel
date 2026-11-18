@@ -170,17 +170,17 @@ class FakeGateway:
                     {
                         "mention_index": 0,
                         "predicate_key": "uses_revit",
-                        "value": "true",
+                        "value": True,
                         "quote": "designs every project in Revit",
                         "confidence": 92,
                     },
                     {
                         "mention_index": 0,
                         "predicate_key": "vertical",
-                        "value": '"engineering"',
+                        "value": "engineering",
                         "confidence": 80,
                     },
-                    {"mention_index": 0, "predicate_key": "sites", "value": "12", "confidence": 70},
+                    {"mention_index": 0, "predicate_key": "sites", "value": 12, "confidence": 70},
                 ],
             }
         if name == "verdict":

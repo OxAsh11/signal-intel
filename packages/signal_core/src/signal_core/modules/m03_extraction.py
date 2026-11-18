@@ -14,16 +14,18 @@ from __future__ import annotations
 
 import json
 import unicodedata
+from datetime import UTC, date, datetime
 from typing import Any, Literal
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel
 
 import signal_core.modules.m05_index as _m05_index
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
+from signal_core.ai_gateway.registry import Predicate, validate_claim_value
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
 
@@ -36,7 +38,7 @@ extract_relevance_judge_job: Any = None
 RELEVANCE_PROMPT_NAME = "relevance_judge"
 RELEVANCE_PROMPT_VERSION = 1
 EXTRACTION_PROMPT_NAME = "extraction"
-EXTRACTION_PROMPT_VERSION = 1
+EXTRACTION_PROMPT_VERSION = 2
 # Longest text sent to the model for one record (about 10k tokens).
 MAX_CONTENT_CHARS = 40_000
 
@@ -62,25 +64,28 @@ class MentionExtract(BaseModel):
 class ClaimExtract(BaseModel):
     mention_index: int  # 0-based index into the mentions list this claim references
     predicate_key: str
-    value: str  # JSON string — validated below
+    value: str | int | float | bool  # a typed JSON value; checked against the predicate
     quote: str | None = None
     quote_original: str | None = None
     quote_language: str | None = None
     confidence: int  # 0-100
 
-    @field_validator("value")
-    @classmethod
-    def value_must_be_json(cls, v: str) -> str:
-        try:
-            json.loads(v)
-        except (json.JSONDecodeError, TypeError) as exc:
-            raise ValueError(f"claim.value must be valid JSON: {exc}") from exc
-        return v
-
 
 class ExtractionResult(BaseModel):
     mentions: list[MentionExtract]
     claims: list[ClaimExtract]
+    source_date: str | None = None  # ISO date of the article or posting, else null
+
+
+def parse_source_date(value: str | None, fetched_at: datetime) -> datetime:
+    """The ISO date at 00:00 UTC; *fetched_at* when missing, unparseable or in the future."""
+    if not value:
+        return fetched_at
+    try:
+        parsed = datetime.combine(date.fromisoformat(value.strip()), datetime.min.time(), UTC)
+    except ValueError:
+        return fetched_at
+    return fetched_at if parsed > fetched_at else parsed
 
 
 # ---------------------------------------------------------------------------
@@ -244,17 +249,29 @@ async def extract_structured(
     org_id: UUID = source_record["org_id"]
     workspace_id: UUID = source_record["workspace_id"]
 
-    # Load workspace predicates for prompt injection and claim linkage.
+    # Load workspace predicates for prompt injection, validation and claim linkage.
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            "SELECT id, key, extraction_hint"
+            "SELECT id, key, label, value_type, allowed_values, extraction_hint"
             " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
             (str(workspace_id),),
         )
         pred_rows = await cur.fetchall()
 
-    predicates_list = [{"key": row[1], "hint": row[2] or ""} for row in pred_rows]
+    predicates_list = [
+        {
+            "key": row[1],
+            "label": row[2],
+            "value_type": row[3],
+            "allowed_values": row[4],
+            "hint": row[5] or "",
+        }
+        for row in pred_rows
+    ]
     pred_by_key: dict[str, UUID] = {row[1]: UUID(str(row[0])) for row in pred_rows}
+    predicate_by_key: dict[str, Predicate] = {
+        row[1]: Predicate(key=row[1], value_type=row[3], allowed_values=row[4]) for row in pred_rows
+    }
     predicates_text = json.dumps(predicates_list)
 
     try:
@@ -270,25 +287,49 @@ async def extract_structured(
         raise
 
     extraction = result.value
-    entity_ids: list[UUID] = []
-    mention_ids: list[UUID] = []
+    now = datetime.now(UTC)
+    observed_at = parse_source_date(extraction.source_date, now)
 
-    # ── Create provisional entities and mentions ──────────────────────────────
-    for mention in extraction.mentions:
-        try:
-            # Provisional entity: M4 identity resolution will resolve/merge this later.
-            async with pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(
+    # Validate every claim against its predicate before any write. Invalid output is
+    # rejected, never coerced; one bad claim drops only itself.
+    valid_claims: list[tuple[ClaimExtract, UUID]] = []
+    for claim in extraction.claims:
+        predicate = predicate_by_key.get(claim.predicate_key)
+        if predicate is None:
+            log.warning(
+                "extraction.unknown_predicate",
+                predicate_key=claim.predicate_key,
+                source_record_id=str(source_record_id),
+            )
+            continue
+        error = validate_claim_value(predicate, claim.value)
+        if error is not None:
+            log.warning(
+                "extraction.claim_invalid",
+                predicate_key=claim.predicate_key,
+                error=error,
+                source_record_id=str(source_record_id),
+            )
+            continue
+        valid_claims.append((claim, pred_by_key[claim.predicate_key]))
+
+    mention_ids: list[UUID] = []
+    try:
+        # One transaction: a failure anywhere leaves no partial entities, mentions or claims.
+        async with pool.connection() as conn, conn.transaction():
+            entity_ids: list[UUID] = []
+            for mention in extraction.mentions:
+                # Provisional entity: M4 identity resolution will resolve/merge this later.
+                cur = await conn.execute(
                     "SELECT app.create_entity(%s, %s::public.entity_type, %s)",
                     (str(org_id), mention.entity_type, mention.raw_name or "unknown"),
                 )
                 ent_row = await cur.fetchone()
-            assert ent_row is not None
-            provisional_entity_id = UUID(str(ent_row[0]))
-            entity_ids.append(provisional_entity_id)
+                assert ent_row is not None
+                provisional_entity_id = UUID(str(ent_row[0]))
+                entity_ids.append(provisional_entity_id)
 
-            async with pool.connection() as conn, conn.cursor() as cur:
-                await cur.execute(
+                cur = await conn.execute(
                     "SELECT app.create_mention(%s, %s, %s::public.entity_type,"
                     " %s, %s, %s, %s::jsonb)",
                     (
@@ -302,60 +343,45 @@ async def extract_structured(
                     ),
                 )
                 men_row = await cur.fetchone()
-            assert men_row is not None
-            mention_id = UUID(str(men_row[0]))
-            mention_ids.append(mention_id)
+                assert men_row is not None
+                mention_id = UUID(str(men_row[0]))
+                mention_ids.append(mention_id)
 
-            # Link provisional entity to mention so M4 can reuse it instead of creating a second one.  # noqa: E501
-            async with pool.connection() as conn:
+                # Link provisional entity to mention so M4 can reuse it instead of creating a second one.  # noqa: E501
                 await conn.execute(
                     "SELECT app.resolve_mention(%s, %s, %s, %s::smallint)",
                     (str(mention_id), str(provisional_entity_id), "provisional", 0),
                 )
 
-        except Exception as exc:
-            await _update_status(pool, source_record_id, "failed", str(exc))
-            raise
-
-    # ── Create claims ─────────────────────────────────────────────────────────
-    for claim in extraction.claims:
-        if claim.mention_index >= len(entity_ids):
-            log.warning(
-                "extraction.claim_index_oob",
-                mention_index=claim.mention_index,
-                mentions=len(entity_ids),
-                source_record_id=str(source_record_id),
-            )
-            continue
-        predicate_id = pred_by_key.get(claim.predicate_key)
-        if predicate_id is None:
-            log.warning(
-                "extraction.unknown_predicate",
-                predicate_key=claim.predicate_key,
-                source_record_id=str(source_record_id),
-            )
-            continue
-        entity_id = entity_ids[claim.mention_index]
-        try:
-            async with pool.connection() as conn:
+            for claim, predicate_id in valid_claims:
+                if claim.mention_index < 0 or claim.mention_index >= len(entity_ids):
+                    log.warning(
+                        "extraction.claim_index_oob",
+                        mention_index=claim.mention_index,
+                        mentions=len(entity_ids),
+                        source_record_id=str(source_record_id),
+                    )
+                    continue
                 await conn.execute(
-                    "SELECT app.create_claim(%s, %s, %s, %s::jsonb, %s, %s, %s, %s, now(), %s, %s)",
+                    "SELECT app.create_claim(%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)",
                     (
                         str(org_id),
-                        str(entity_id),
+                        str(entity_ids[claim.mention_index]),
                         str(predicate_id),
-                        claim.value,
+                        json.dumps(claim.value),
                         claim.quote,
                         claim.quote_original,
                         claim.quote_language,
                         str(source_record_id),
+                        observed_at,
                         str(result.extractor_version_id),
                         claim.confidence,
                     ),
                 )
-        except Exception as exc:
-            await _update_status(pool, source_record_id, "failed", str(exc))
-            raise
+    except Exception as exc:
+        # The transaction has rolled back; record the failure on a fresh connection.
+        await _update_status(pool, source_record_id, "failed", str(exc))
+        raise
 
     # ── Dispatch identity resolution — after all claims are written ──────────
     # Deferring here (not inside the mention loop) guarantees claims exist when
