@@ -1,18 +1,17 @@
 'use client';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@signal/ui';
 import { ChipField, fieldInput } from './chip-field';
 import {
-  columnSpecs, describeRule, MAX_RULES, OP_LABELS, OPS_BY_TYPE,
+  columnSpecs, describeRule, MAX_RULES, OP_LABELS, OPS_BY_TYPE, parseDays,
   type BriefConfig, type ColumnSpec, type EvidenceRule, type RuleOp,
 } from '@/lib/briefs';
 
-type Row = { id: number; rule: EvidenceRule };
+/** `ageError`: what is wrong with the typed "newer than" days; the rule keeps its last valid value. */
+type Row = { id: number; rule: EvidenceRule; ageError: string | null };
 
 /** The value a new op starts with: a list for one_of/contains, nothing otherwise. */
 const startValue = (op: RuleOp): EvidenceRule['value'] => (op === 'one_of' || op === 'contains' ? [] : null);
-
-const toInt = (s: string) => (s.trim() === '' ? null : Number(s));
 
 function RuleValue({ rule, column, onChange }: { rule: EvidenceRule; column: ColumnSpec | undefined; onChange: (value: EvidenceRule['value']) => void }) {
   if (rule.op === 'one_of') {
@@ -53,9 +52,13 @@ function RuleValue({ rule, column, onChange }: { rule: EvidenceRule; column: Col
   return null;
 }
 
-function RulesEditor({ saved, onChange }: { saved: BriefConfig; onChange: (patch: Record<string, unknown>) => void }) {
+function RulesEditor({ saved, onChange, block }: {
+  saved: BriefConfig;
+  onChange: (patch: Record<string, unknown>) => void;
+  block: (problem: string | null) => void;
+}) {
   const columns = columnSpecs(saved);
-  const [rows, setRows] = useState<Row[]>(() => (saved.evidence_rules ?? []).map((rule, id) => ({ id, rule })));
+  const [rows, setRows] = useState<Row[]>(() => (saved.evidence_rules ?? []).map((rule, id) => ({ id, rule, ageError: null })));
   const nextId = useRef(rows.length);
 
   const commit = (next: Row[]) => {
@@ -64,6 +67,12 @@ function RulesEditor({ saved, onChange }: { saved: BriefConfig; onChange: (patch
   };
   const update = (id: number, patch: Partial<EvidenceRule>) =>
     commit(rows.map((r) => (r.id === id ? { ...r, rule: { ...r.rule, ...patch } } : r)));
+  const setAge = (id: number, input: HTMLInputElement) => {
+    const { value, error } = parseDays(input.value, input.validity.badInput);
+    commit(rows.map((r) => (r.id === id ? { ...r, ageError: error, rule: error ? r.rule : { ...r.rule, max_age_days: value } } : r)));
+  };
+  const firstProblem = rows.find((r) => r.ageError)?.ageError ?? null;
+  useEffect(() => block(firstProblem), [block, firstProblem]);
   const ruleFor = (col: ColumnSpec, kind: EvidenceRule['kind'] = 'requires'): EvidenceRule => {
     const op = OPS_BY_TYPE[col.value_type][0];
     return { predicate: col.key, kind, op, value: startValue(op), min_sources: 1, max_age_days: null };
@@ -116,7 +125,8 @@ function RulesEditor({ saved, onChange }: { saved: BriefConfig; onChange: (patch
             <label className="flex min-w-0 flex-col gap-1">
               <span className="text-[13px] text-ink-muted">Newer than (days; blank means any age)</span>
               <input aria-label="Newer than (days)" type="number" min={1} max={3650} step={1} defaultValue={rule.max_age_days ?? ''} placeholder="Any age"
-                onChange={(e) => update(r.id, { max_age_days: toInt(e.target.value) })} className={fieldInput} />
+                aria-invalid={r.ageError ? true : undefined} onChange={(e) => setAge(r.id, e.target)} className={fieldInput} />
+              {r.ageError ? <span role="alert" className="text-[13px] text-danger">{r.ageError}</span> : null}
             </label>
             <p className="m-0 text-[13px] text-ink-body sm:col-span-2">{describeRule(rule, columns)}</p>
             <div className="sm:col-span-2">
@@ -126,7 +136,7 @@ function RulesEditor({ saved, onChange }: { saved: BriefConfig; onChange: (patch
         );
       })}
       <div>
-        <Button size="sm" onClick={() => commit([...rows, { id: nextId.current++, rule: ruleFor(columns[0]) }])} disabled={rows.length >= MAX_RULES}>
+        <Button size="sm" onClick={() => commit([...rows, { id: nextId.current++, rule: ruleFor(columns[0]), ageError: null }])} disabled={rows.length >= MAX_RULES}>
           Add a rule
         </Button>
         {rows.length >= MAX_RULES ? <span className="ml-2 text-[13px] text-ink-muted">A Brief has at most {MAX_RULES} rules.</span> : null}
@@ -148,7 +158,7 @@ export function RulesField({ briefId, config, disabled }: { briefId: string; con
           ))}
         </ul>
       )}
-      renderEditor={(_draft, onChange) => <RulesEditor saved={config} onChange={onChange} />}
+      renderEditor={(_draft, onChange, block) => <RulesEditor saved={config} onChange={onChange} block={block} />}
     />
   );
 }

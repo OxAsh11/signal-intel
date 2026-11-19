@@ -1,14 +1,16 @@
 'use client';
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { Button } from '@signal/ui';
 import { ChipField, fieldInput } from './chip-field';
 import {
-  isColumnSpec, keyFromLabel, MAX_COLUMNS, OPS_BY_TYPE, ROLE_LABELS, TYPE_LABELS,
-  type BriefConfig, type ColumnSpec, type EvidenceRule, type Role, type ValueType,
+  columnKeyProblem, columnsFromWorkspace, columnSpecs, isColumnSpec, keyFromLabel, LEGACY_SEED_NOTICE, MAX_COLUMNS,
+  OPS_BY_TYPE, ROLE_LABELS, TYPE_LABELS,
+  type BriefConfig, type ColumnSpec, type EvidenceRule, type Role, type ValueType, type WorkspacePredicate,
 } from '@/lib/briefs';
 
 type Column = ColumnSpec | string;
-type Row = { id: number; col: Column; isNew: boolean };
+/** `keyFixed`: the key already exists as a workspace predicate, so it no longer follows the label. */
+type Row = { id: number; col: Column; keyFixed: boolean };
 
 const VALUE_TYPES = Object.keys(TYPE_LABELS) as ValueType[];
 const ROLES = Object.keys(ROLE_LABELS) as Role[];
@@ -84,8 +86,16 @@ function EnumChips({ values, onChange }: { values: string[]; onChange: (next: st
   );
 }
 
-function ColumnsEditor({ saved, onChange }: { saved: BriefConfig; onChange: (patch: Record<string, unknown>) => void }) {
-  const [rows, setRows] = useState<Row[]>(() => (saved.predicates ?? []).map((col, id) => ({ id, col, isNew: false })));
+function ColumnsEditor({ start, saved, existing, seeded, onChange, block }: {
+  start: Column[];
+  saved: BriefConfig;
+  existing: Map<string, WorkspacePredicate>;
+  seeded: boolean;
+  onChange: (patch: Record<string, unknown>) => void;
+  block: (problem: string | null) => void;
+}) {
+  const [rows, setRows] = useState<Row[]>(() =>
+    start.map((col, id) => ({ id, col, keyFixed: existing.has(isColumnSpec(col) ? col.key : col) })));
   const nextId = useRef(rows.length);
   const savedRules = saved.evidence_rules ?? [];
 
@@ -95,23 +105,36 @@ function ColumnsEditor({ saved, onChange }: { saved: BriefConfig; onChange: (pat
     onChange({ predicates: columns, evidence_rules: rulesThatFit(savedRules, columns) });
   };
   const update = (id: number, patch: Partial<ColumnSpec>) =>
-    commit(rows.map((r) => {
+    commit(rows.map((r, i) => {
       if (r.id !== id || !isColumnSpec(r.col)) return r;
       const col = { ...r.col, ...patch };
-      // The key comes from the label until the column is saved; after that it never changes.
-      if (r.isNew && patch.label !== undefined) col.key = keyFromLabel(patch.label);
+      // The key follows the label until the workspace collects it; after that it never changes.
+      if (!r.keyFixed && patch.label !== undefined) col.key = keyFromLabel(patch.label, i + 1);
       return { ...r, col };
     }));
   const add = () =>
     commit([...rows, {
-      id: nextId.current++, isNew: true,
+      id: nextId.current++, keyFixed: false,
       col: { key: '', label: '', value_type: 'text', allowed_values: null, extraction_hint: '', decay_half_life_days: null, role: 'info' },
     }]);
+
+  const specs = rows.flatMap((r) => (isColumnSpec(r.col) ? [r.col] : []));
+  // A new column has no key until it has a label; only a key that is there can be wrong.
+  const problems = new Map(rows.flatMap((r) => {
+    const c = r.col;
+    if (!isColumnSpec(c) || (!c.key && !c.label)) return [];
+    const others = specs.filter((o) => o !== c);
+    const problem = columnKeyProblem(c, others, existing.get(c.key)?.value_type);
+    return problem ? [[r.id, problem] as const] : [];
+  }));
+  const firstProblem = problems.values().next().value ?? null;
+  useEffect(() => block(firstProblem), [block, firstProblem]);
 
   const dropped = savedRules.length - rulesThatFit(savedRules, rows.map((r) => r.col)).length;
 
   return (
     <div className="flex flex-col gap-4">
+      {seeded ? <p className="m-0 text-[14px] text-ink">{LEGACY_SEED_NOTICE}</p> : null}
       {rows.map((r, i) => {
         const c = r.col;
         if (!isColumnSpec(c)) {
@@ -123,6 +146,8 @@ function ColumnsEditor({ saved, onChange }: { saved: BriefConfig; onChange: (pat
             </fieldset>
           );
         }
+        // The workspace already collects this key as this type: the type stays.
+        const typeFixed = r.keyFixed && existing.get(c.key)?.value_type === c.value_type;
         return (
           <fieldset key={r.id} className="m-0 grid min-w-0 gap-3 rounded-sm border border-line p-3 sm:grid-cols-2">
             <legend className="px-1 text-[13px] text-ink-muted">Column {i + 1}</legend>
@@ -132,16 +157,19 @@ function ColumnsEditor({ saved, onChange }: { saved: BriefConfig; onChange: (pat
                 <input aria-label="Label" value={c.label} maxLength={80} onChange={(e) => update(r.id, { label: e.target.value })} className={fieldInput} />
               </label>
               <span className="si-meta break-all">Key: {c.key || 'made from the label'}</span>
+              {problems.get(r.id) ? <span role="alert" className="text-[13px] text-danger">{problems.get(r.id)}</span> : null}
             </div>
             <label className="flex min-w-0 flex-col gap-1">
               <span className="text-[13px] text-ink-muted">Type</span>
               <select aria-label="Type" value={c.value_type} className={fieldInput}
+                disabled={typeFixed}
                 onChange={(e) => {
                   const value_type = e.target.value as ValueType;
                   update(r.id, { value_type, allowed_values: value_type === 'enum' ? (c.allowed_values ?? []) : null });
                 }}>
                 {VALUE_TYPES.map((t) => <option key={t} value={t}>{TYPE_LABELS[t]}</option>)}
               </select>
+              {typeFixed ? <span className="text-[13px] text-ink-muted">The workspace already collects this column, so its type stays.</span> : null}
             </label>
             <label className="flex min-w-0 flex-col gap-1">
               <span className="text-[13px] text-ink-muted">Role</span>
@@ -176,13 +204,25 @@ function ColumnsEditor({ saved, onChange }: { saved: BriefConfig; onChange: (pat
 }
 
 /** "Columns the AI fills": the facts extracted for every company, each with its scoring role. */
-export function ColumnsField({ briefId, config, disabled }: { briefId: string; config: BriefConfig; disabled: boolean }) {
+export function ColumnsField({ briefId, config, disabled, workspacePredicates }: {
+  briefId: string;
+  config: BriefConfig;
+  disabled: boolean;
+  workspacePredicates: WorkspacePredicate[];
+}) {
+  const existing = new Map(workspacePredicates.map((p) => [p.key, p]));
+  // A Brief without column specs collects every workspace column: its editor starts from them.
+  const seed = columnSpecs(config).length ? [] : columnsFromWorkspace(workspacePredicates);
   return (
     <ChipField briefId={briefId} fieldName="predicates" fields={['predicates', 'evidence_rules']} label="Columns the AI fills"
       disabled={disabled} currentConfig={config as Record<string, unknown>}
       isEmpty={(c) => !((c.predicates as unknown[] | undefined)?.length)}
       renderValue={(c) => <ColumnList columns={(c.predicates as Column[] | undefined) ?? []} />}
-      renderEditor={(_draft, onChange) => <ColumnsEditor saved={config} onChange={onChange} />}
+      editorStart={seed.length ? (c) => ({ ...c, predicates: seed, evidence_rules: [] }) : undefined}
+      renderEditor={(draft, onChange, block) => (
+        <ColumnsEditor start={(draft.predicates as Column[] | undefined) ?? []} saved={config} existing={existing}
+          seeded={seed.length > 0} onChange={onChange} block={block} />
+      )}
     />
   );
 }

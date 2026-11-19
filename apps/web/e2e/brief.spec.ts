@@ -38,6 +38,21 @@ async function craftInvalidRule(part: Locator): Promise<void> {
 /** The 22023 message from save_brief_draft_ui, as friendlyError shows it. */
 const INVALID_RULE_MESSAGE = 'Column "drone_programme": a boolean column has no rule "at_least".';
 
+/** After a refused save the open rules editor still shows each rule as it was, not its first options. */
+async function expectRulesUnchanged(rules: Locator): Promise<void> {
+  const rule1 = rules.getByRole('group', { name: 'Rule 1', exact: true });
+  await expect(rule1.getByLabel('Column', { exact: true })).toHaveValue('drone_programme');
+  await expect(rule1.getByLabel('Effect', { exact: true })).toHaveValue('requires');
+  const rule2 = rules.getByRole('group', { name: 'Rule 2', exact: true });
+  await expect(rule2.getByLabel('Column', { exact: true })).toHaveValue('industry');
+  await expect(rule2.getByLabel('Effect', { exact: true })).toHaveValue('disqualifies');
+  await expect(rule2.getByLabel('Test', { exact: true })).toHaveValue('one_of');
+}
+
+const DAYS_ERROR = 'Use a whole number of days from 1 to 3650, or leave it blank for any age.';
+const SEED_NOTICE =
+  "This Brief used every workspace column. They are listed so nothing stops being collected; remove any you don't need.";
+
 test.describe('Brief Studio', () => {
   test.beforeEach(async ({ page, context }) => {
     const user = await newUser('brief');
@@ -99,6 +114,15 @@ test.describe('Brief Studio', () => {
       [id],
     );
     expect(preds).toEqual([{ value_type: 'boolean' }]);
+
+    // Now the workspace collects these columns: a column's type and key stay as they are.
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    const first = columns.getByRole('group', { name: 'Column 1', exact: true });
+    await expect(first.getByLabel('Type', { exact: true })).toBeDisabled();
+    await first.getByLabel('Label', { exact: true }).fill('Drone programme');
+    await expect(first.getByText('Key: drone_programme', { exact: true })).toBeVisible();
+    await columns.getByRole('button', { name: 'Cancel', exact: true }).click();
   });
 
   test('adding a column and a rule saves to the draft', async ({ page }) => {
@@ -109,7 +133,14 @@ test.describe('Brief Studio', () => {
     await columns.getByRole('button', { name: 'Change', exact: true }).click();
     await columns.getByRole('button', { name: 'Add a column', exact: true }).click();
     const column = columns.getByRole('group', { name: 'Column 4', exact: true });
+    const save = columns.getByRole('button', { name: 'Save', exact: true });
+    // A label whose key another column has: said next to the key, and Save waits.
+    await column.getByLabel('Label', { exact: true }).fill('Industry');
+    await expect(column.getByRole('alert')).toHaveText('Another column of this Brief has the same key. Change the label.');
+    await expect(save).toBeDisabled();
     await column.getByLabel('Label', { exact: true }).fill('Hiring drone pilots');
+    await expect(column.getByRole('alert')).toHaveCount(0);
+    await expect(save).toBeEnabled();
     await expect(column.getByText('Key: hiring_drone_pilots')).toBeVisible();
     await column.getByLabel('Type', { exact: true }).selectOption('boolean');
     await column.getByLabel('Role', { exact: true }).selectOption('signal');
@@ -147,9 +178,20 @@ test.describe('Brief Studio', () => {
 
     const rules = rulesPart(page);
     await rules.getByRole('button', { name: 'Change', exact: true }).click();
+    const save = rules.getByRole('button', { name: 'Save', exact: true });
+    // Days that are not a whole number are never saved as "any age": Save waits for a fix.
+    const days = rules.getByRole('group', { name: 'Rule 1', exact: true }).getByLabel('Newer than (days)', { exact: true });
+    await days.fill('1.5');
+    await expect(rules.getByText(DAYS_ERROR, { exact: true })).toBeVisible();
+    await expect(save).toBeDisabled();
+    await days.fill('730');
+    await expect(rules.getByText(DAYS_ERROR, { exact: true })).toHaveCount(0);
+    await expect(save).toBeEnabled();
+
     await craftInvalidRule(rules);
-    await rules.getByRole('button', { name: 'Save', exact: true }).click();
+    await save.click();
     await expect(rules.getByText(INVALID_RULE_MESSAGE)).toBeVisible();
+    await expectRulesUnchanged(rules);
 
     // Nothing was saved: the draft keeps its two rules.
     const [draft] = await sql<{ n: number }>(
@@ -157,6 +199,66 @@ test.describe('Brief Studio', () => {
       [id],
     );
     expect(draft.n).toBe(2);
+  });
+
+  test('a Brief without column specs starts its Columns editor from the workspace columns', async ({ page }) => {
+    const id = await createBrief(page);
+    const [brief] = await sql<{ org_id: string; workspace_id: string }>(
+      'select org_id, workspace_id from public.brief where id = $1',
+      [id],
+    );
+    await sql(
+      `insert into public.predicate
+         (key, org_id, workspace_id, label, value_type, allowed_values, decay_half_life_days, extraction_hint)
+       values ('vertical', $1, $2, 'Vertical', 'enum', '["energy", "mining"]', null, 'Industry served'),
+              ('sites', $1, $2, 'Sites', 'number', null, 730, null),
+              ('uses_drones', $1, $2, 'Uses drones', 'boolean', null, null, '')`,
+      [brief.org_id, brief.workspace_id],
+    );
+    // A legacy draft: plain keys, no column specs, no rules.
+    const legacy = { ...FLYTBASE_DRAFT, predicates: ['vertical', 'sites'], evidence_rules: [] };
+    await sql('select app.save_brief_draft($1, $2::jsonb)', [id, JSON.stringify(legacy)]);
+    await page.reload();
+    await expect(page.getByText('Drafted by AI from your description.')).toBeVisible();
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    await expect(columns.getByText(SEED_NOTICE, { exact: true })).toBeVisible();
+    // Every workspace column, in key order, with the role its legacy key had.
+    const col = (n: number) => columns.getByRole('group', { name: `Column ${n}`, exact: true });
+    await expect(col(1).getByText('Key: sites', { exact: true })).toBeVisible();
+    await expect(col(1).getByLabel('Role', { exact: true })).toHaveValue('scale');
+    await expect(col(1).getByLabel('Type', { exact: true })).toBeDisabled();
+    await expect(col(2).getByText('Key: uses_drones', { exact: true })).toBeVisible();
+    await expect(col(2).getByLabel('Role', { exact: true })).toHaveValue('info');
+    await expect(col(3).getByText('Key: vertical', { exact: true })).toBeVisible();
+    await expect(col(3).getByLabel('Role', { exact: true })).toHaveValue('fit.vertical');
+    await expect(col(4)).toHaveCount(0);
+
+    // A new column on a key the workspace holds as another type is caught before saving.
+    await col(1).getByRole('button', { name: 'Remove column', exact: true }).click();
+    await columns.getByRole('button', { name: 'Add a column', exact: true }).click();
+    await col(3).getByLabel('Label', { exact: true }).fill('Sites');
+    await expect(col(3).getByRole('alert')).toContainText('The workspace already has a column "sites" of type Number.');
+    const save = columns.getByRole('button', { name: 'Save', exact: true });
+    await expect(save).toBeDisabled();
+    await col(3).getByLabel('Type', { exact: true }).selectOption('number');
+    await expect(col(3).getByRole('alert')).toHaveCount(0);
+    await save.click();
+    await expect(columns.getByRole('button', { name: 'Change', exact: true })).toBeVisible();
+
+    const [draft] = await sql<{ cols: { key: string; role: string; value_type: string }[] }>(
+      `select (select jsonb_agg(jsonb_build_object('key', e ->> 'key', 'role', e ->> 'role', 'value_type', e ->> 'value_type')
+                                order by o)
+                 from jsonb_array_elements(draft_config -> 'predicates') with ordinality t(e, o)) as cols
+         from public.brief where id = $1`,
+      [id],
+    );
+    expect(draft.cols).toEqual([
+      { key: 'uses_drones', role: 'info', value_type: 'boolean' },
+      { key: 'vertical', role: 'fit.vertical', value_type: 'enum' },
+      { key: 'sites', role: 'info', value_type: 'number' },
+    ]);
   });
 
   test('renaming a Brief', async ({ page, browser }) => {
@@ -252,6 +354,7 @@ test.describe('Brief page screens', () => {
       await craftInvalidRule(rules);
       await rules.getByRole('button', { name: 'Save', exact: true }).click();
       await expect(rules.getByText(INVALID_RULE_MESSAGE)).toBeVisible();
+      await expectRulesUnchanged(rules);
       await fits('the rule error');
       await page.screenshot({ path: `test-results/brief-${vp.name}-rule-error.png`, fullPage: true });
 
