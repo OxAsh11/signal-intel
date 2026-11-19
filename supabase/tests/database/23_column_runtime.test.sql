@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(66);
+select plan(74);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer, X = signed in but not a member.
@@ -121,6 +121,27 @@ select throws_ok(format('select public.save_brief_draft_ui(%L::uuid, %L::jsonb)'
 reset role;
 select ok((select draft_config is null from public.brief where id = (select v from ids where k = 'a')),
   '13. the refused save leaves nothing saved');
+
+select throws_ok(format('select app.validate_brief_columns(%L::jsonb)',
+    '{"predicates":["fleet_size",
+      {"key":"big_fleet","label":"Big fleet","value_type":"boolean","role":"info","fill_method":"formula",
+       "formula":"fleet_size > 10","inputs":["fleet_size"]}]}'),
+  '22023', 'column "big_fleet": formula input "fleet_size" has no column spec; give it one first',
+  '13b. an input naming a legacy key gets a clear message');
+
+-- A dense cyclic graph (12 formulas, each reading 10 others) is refused quickly, naming a shortest cycle.
+create temp table clock (k text primary key, v timestamptz) on commit drop;
+insert into clock values ('dense', clock_timestamp());
+select throws_ok(format('select app.validate_brief_columns(%L::jsonb)',
+    jsonb_build_object('predicates', (select jsonb_agg(jsonb_build_object(
+      'key', 'col_' || lpad(n::text, 2, '0'), 'label', 'Column ' || n, 'value_type', 'number', 'role', 'info',
+      'fill_method', 'formula', 'formula', '1',
+      'inputs', (select jsonb_agg('col_' || lpad((((n - 1 + j) % 12) + 1)::text, 2, '0')) from generate_series(1, 10) j)))
+      from generate_series(1, 12) n))),
+  '22023', 'formula columns form a cycle: col_01 → col_03 → col_01',
+  '13c. 12 formulas each reading 10 others are refused with a shortest cycle');
+select ok(clock_timestamp() - (select v from clock where k = 'dense') < interval '2 seconds',
+  '13d. the dense cycle check finishes in under 2 seconds');
 
 -- ── Publish syncs the formula column ─────────────────────────────────────────
 set local role authenticated;
@@ -248,6 +269,8 @@ select is((select count(*)::int from public.extractor_version
   1, '36. one formula extractor_version exists');
 select throws_ok(format('select app.derived_source_record(%L::uuid, %L)', (select v from ids where k = 'ws'), 'research'),
   '22023', null, '37. an unknown derived kind is refused');
+select is((select count(*)::int from public.outbox where aggregate_id = (select v from ids where k = 'dsr')), 0,
+  '37b. the derived record emits no source_record.created');
 
 -- ── Formula claims ───────────────────────────────────────────────────────────
 insert into ids select 'e1', app.create_entity((select v from ids where k = 'org'), 'company', 'RT Derived Co', 'tenant');
@@ -293,6 +316,18 @@ select is((select count(*)::int from public.outbox where event = 'claim.created'
 update public.predicate_run set status = 'succeeded', finished_at = now() - interval '1 hour',
        inputs_hash = app.run_inputs_hash(entity_id, predicate_id)
  where id = (select v from ids where k = 'r2');
+select throws_ok(format('select app.write_formula_claim(%L::uuid, %L::jsonb)', (select v from ids where k = 'r2'), 'true'),
+  '55000', null, '46b. a finished run cannot write a claim');
+with r as (
+  insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, finished_at)
+  values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e1'),
+          (select v from ids where k = 'f'), 2, 'cancelled', now() - interval '90 minutes', now() - interval '90 minutes')
+  returning id)
+insert into ids select 'rc', id from r;
+select throws_ok(format('select app.write_formula_claim(%L::uuid, %L::jsonb)', (select v from ids where k = 'rc'), 'true'),
+  '55000', null, '46c. a cancelled run cannot write a claim');
+select is((select count(*)::int from public.claim where entity_id = (select v from ids where k = 'e1')), 2,
+  '46d. the refused writes add no claim');
 
 -- ── Inputs hash ──────────────────────────────────────────────────────────────
 insert into ids select 'e_val', app.create_entity((select v from ids where k = 'org'), 'company', 'RT Value Co', 'tenant');
@@ -333,11 +368,13 @@ select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), 
 with r as (
   insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, finished_at, inputs_hash)
   values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e_stale'),
-          (select v from ids where k = 'f'), 2, 'succeeded', now() - interval '1 hour', now() - interval '1 hour',
+          (select v from ids where k = 'f'), 2, 'running', now() - interval '1 hour', null,
           app.run_inputs_hash((select v from ids where k = 'e_stale'), (select v from ids where k = 'f')))
   returning id)
 insert into ids select 'rs', id from r;
 select app.write_formula_claim((select v from ids where k = 'rs'), 'false');
+update public.predicate_run set status = 'succeeded', finished_at = now() - interval '1 hour'
+ where id = (select v from ids where k = 'rs');
 select is(app.cell_state((select v from ids where k = 'e_stale'), (select v from ids where k = 'f')), 'derived',
   '49. a formula claim with unchanged inputs is derived');
 select app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_stale'),
@@ -387,6 +424,7 @@ select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000
 select throws_ok(format('select * from public.cells(%L::uuid, %L::uuid[], %L::uuid[])', (select v from ids where k = 'ws'),
     array[(select v from ids where k = 'e1')], array[(select v from ids where k = 'f')]),
   '42501', null, '62. cells refuses a non-member');
+select is((select count(*)::int from public.predicate_run), 0, '62b. a non-member reads no runs');
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000cd03","role":"authenticated"}', true);
 select throws_ok(format('select * from public.cells(%L::uuid, %L::uuid[], %L::uuid[])', (select v from ids where k = 'ws'),
     (select array_agg(gen_random_uuid()) from generate_series(1, 501)), array[(select v from ids where k = 'f')]),

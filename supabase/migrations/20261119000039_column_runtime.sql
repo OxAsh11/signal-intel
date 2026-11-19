@@ -100,6 +100,93 @@ grant select on public.predicate_run to service_role;
 alter table public.usage_ledger add column predicate_run_id uuid references public.predicate_run (id);
 create index usage_ledger_run_idx on public.usage_ledger (predicate_run_id) where predicate_run_id is not null;
 
+-- ── 3a. Formula dependency order and cycles (shared by validate and sync) ──────
+-- p_inputs is {formula key: [input keys]}. Inputs that are not formula keys are already
+-- satisfied. Kahn-style peeling: repeatedly take the first ready formula (bytewise key order).
+-- Returns the formula keys in dependency order; keys left out sit on or behind a cycle.
+-- At most V rounds of a V·E scan.
+create function app.formula_order(p_inputs jsonb) returns text[]
+  language plpgsql immutable set search_path = ''
+as $$
+declare
+  v_done text[] := '{}';
+  v_k    text;
+begin
+  loop
+    select e.key into v_k
+      from jsonb_each(coalesce(p_inputs, '{}'::jsonb)) e
+     where not (e.key = any(v_done))
+       and not exists (select 1 from jsonb_array_elements_text(e.value) i
+                        where p_inputs ? i and not (i = any(v_done)))
+     order by e.key collate "C" limit 1;
+    exit when not found;
+    v_done := v_done || v_k;
+  end loop;
+  return v_done;
+end $$;
+
+-- A shortest dependency cycle among the formulas, as [k1, k2, …, k1], or null when there is
+-- none. Peels first (app.formula_order); if anything is left, a breadth-first search with a
+-- visited set from each remaining key (bytewise order) over the remaining keys: O(V·(V+E)).
+-- Ties go to the first start key, then to the first neighbour in key order.
+create function app.formula_cycle(p_inputs jsonb) returns text[]
+  language plpgsql immutable set search_path = ''
+as $$
+declare
+  v_order  text[] := app.formula_order(p_inputs);
+  v_rem    text[];
+  v_s      text;
+  v_u      text;
+  v_w      text;
+  v_parent jsonb;
+  v_front  text[];
+  v_next   text[];
+  v_found  text;
+  v_path   text[];
+  v_best   text[];
+begin
+  select coalesce(array_agg(k order by k collate "C"), '{}') into v_rem
+    from jsonb_object_keys(coalesce(p_inputs, '{}'::jsonb)) k
+   where not (k = any(v_order));
+  if cardinality(v_rem) = 0 then
+    return null;
+  end if;
+  foreach v_s in array v_rem loop
+    v_parent := jsonb_build_object(v_s, v_s);
+    v_front  := array[v_s];
+    v_found  := null;
+    <<bfs>>
+    while cardinality(v_front) > 0 loop
+      v_next := '{}';
+      foreach v_u in array v_front loop
+        for v_w in select i from jsonb_array_elements_text(p_inputs -> v_u) i
+                    where i = any(v_rem) order by i collate "C" loop
+          if v_w = v_s then
+            v_found := v_u;
+            exit bfs;
+          end if;
+          if not (v_parent ? v_w) then
+            v_parent := v_parent || jsonb_build_object(v_w, v_u);
+            v_next   := v_next || v_w;
+          end if;
+        end loop;
+      end loop;
+      v_front := v_next;
+    end loop;
+    if v_found is not null then
+      v_path := array[v_found];
+      while v_path[1] <> v_s loop
+        v_path := (v_parent ->> v_path[1]) || v_path;
+      end loop;
+      v_path := v_path || v_s;
+      if v_best is null or cardinality(v_path) < cardinality(v_best) then
+        v_best := v_path;
+      end if;
+    end if;
+  end loop;
+  return v_best;
+end $$;
+
 -- ── 3. Column spec checks (P2 checks kept; fill_method, formula, inputs, cycles added) ──
 create or replace function app.validate_brief_columns(p_cfg jsonb) returns void
   language plpgsql immutable set search_path = ''
@@ -121,6 +208,7 @@ declare
   v_n      jsonb;
   v_in     text;
   v_cycle  text[];
+  v_legacy text[] := '{}';   -- legacy plain keys (no spec)
 begin
   if jsonb_typeof(v_preds) <> 'array' then
     raise exception 'predicates must be a list of columns' using errcode = '22023';
@@ -139,6 +227,7 @@ begin
 
   for s in select value from jsonb_array_elements(v_preds) loop
     if jsonb_typeof(s) = 'string' then
+      v_legacy := v_legacy || (s #>> '{}');
       continue;                                   -- legacy: a key with no spec
     end if;
     if jsonb_typeof(s) <> 'object' then
@@ -236,6 +325,10 @@ begin
       if v_in = v_key then
         raise exception 'column "%": a formula cannot read its own column', v_key using errcode = '22023';
       end if;
+      if not (v_fills ? v_in) and v_in = any(v_legacy) then
+        raise exception 'column "%": formula input "%" has no column spec; give it one first', v_key, v_in
+          using errcode = '22023';
+      end if;
       if not (v_fills ? v_in) then
         raise exception 'column "%": input "%" is not a column of this Brief', v_key, v_in using errcode = '22023';
       end if;
@@ -246,19 +339,8 @@ begin
     end loop;
   end loop;
 
-  -- No dependency cycle among formula columns: report the shortest, starting at the first key.
-  with recursive edges(src, dst) as (
-    select e.key, i.value
-      from jsonb_each(v_inputs) e, jsonb_array_elements_text(e.value) i
-  ), walk(start, cur, path) as (
-    select src, dst, array[src, dst] from edges
-    union all
-    select w.start, e.dst, w.path || e.dst
-      from walk w join edges e on e.src = w.cur
-     where w.cur <> w.start and not (e.dst = any(w.path[2:]))
-  )
-  select path into v_cycle from walk where cur = start
-   order by array_length(path, 1), start collate "C" limit 1;
+  -- No dependency cycle among formula columns: peel, then name a shortest cycle (app.formula_cycle).
+  v_cycle := app.formula_cycle(v_inputs);
   if v_cycle is not null then
     raise exception 'formula columns form a cycle: %', array_to_string(v_cycle, ' → ') using errcode = '22023';
   end if;
@@ -376,7 +458,6 @@ declare
   v_preds  jsonb := case when jsonb_typeof(new.config -> 'predicates') = 'array'
                          then new.config -> 'predicates' else '[]'::jsonb end;
   v_order  jsonb;
-  v_done   text[];
   v_prev   jsonb;
   s        jsonb;
   p        public.predicate%rowtype;
@@ -395,17 +476,13 @@ begin
   select coalesce(jsonb_agg(e order by e ->> 'key'), '[]'::jsonb) into v_order
     from jsonb_array_elements(v_preds) e
    where jsonb_typeof(e) = 'object' and coalesce(e ->> 'fill_method', 'extract') <> 'formula';
-  select coalesce(array_agg(x ->> 'key'), '{}') into v_done from jsonb_array_elements(v_order) x;
-  loop
-    select e into s from jsonb_array_elements(v_preds) e
-     where jsonb_typeof(e) = 'object' and e ->> 'fill_method' = 'formula'
-       and not (e ->> 'key' = any(v_done))
-       and not exists (select 1 from jsonb_array_elements_text(e -> 'inputs') i where not (i = any(v_done)))
-     order by e ->> 'key' collate "C" limit 1;
-    exit when not found;
-    v_order := v_order || jsonb_build_array(s);
-    v_done  := v_done || (s ->> 'key');
-  end loop;
+  -- Formula columns in dependency order (validate refused any cycle, so all are placed).
+  select v_order || coalesce(jsonb_agg(e order by o.n), '[]'::jsonb) into v_order
+    from unnest(app.formula_order(
+           (select coalesce(jsonb_object_agg(x ->> 'key', x -> 'inputs'), '{}'::jsonb)
+              from jsonb_array_elements(v_preds) x
+             where jsonb_typeof(x) = 'object' and x ->> 'fill_method' = 'formula'))) with ordinality o(k, n)
+    join jsonb_array_elements(v_preds) e on jsonb_typeof(e) = 'object' and e ->> 'key' = o.k;
 
   for s in select e from jsonb_array_elements(v_order) e loop
     v_fill := coalesce(s ->> 'fill_method', 'extract');
@@ -563,6 +640,9 @@ begin
   if not found then
     raise exception 'run not found' using errcode = 'P0002';
   end if;
+  if r.status <> 'running' then
+    raise exception 'run % is %; only a running run writes a claim', p_run, r.status using errcode = '55000';
+  end if;
   select fill_method into v_fill from public.predicate where id = r.predicate_id;
   if v_fill is distinct from 'formula' then
     raise exception 'run % is not a formula run', p_run using errcode = '22023';
@@ -685,6 +765,7 @@ end $$;
 
 -- ── 8. Grants ────────────────────────────────────────────────────────────────
 revoke execute on function
+  app.formula_order(jsonb), app.formula_cycle(jsonb),
   app.predicate_config_hash(text, jsonb, text[], text, jsonb), app.predicate_config_stamp(),
   app.derived_source_record(uuid, text), app.write_formula_claim(uuid, jsonb),
   app.run_inputs_hash(uuid, uuid), app.cell_state(uuid, uuid)
