@@ -1213,7 +1213,10 @@ async def test_queue_backfill_scope_and_cap(
     record = _fake_source_record() | {
         "scope_rows": [(str(newest), str(ORG_ID)), (str(older), str(ORG_ID))]
     }
-    pool = FakePool(record)
+    pool = FakePool(
+        record,
+        [*_workspace_predicates(), (str(uuid4()), "a_key", "A", "boolean", None, "", "extract")],
+    )
 
     queued = await queue_predicate_backfill(pool, brief_id, WORKSPACE_ID, ["site_count", "a_key"])
 
@@ -1236,3 +1239,27 @@ async def test_queue_backfill_scope_and_cap(
     assert [d["source_record_id"] for d in backfill_job.deferred] == [str(newest)]
     (capped,) = [e for e in logs if e["event"] == "extraction.backfill_capped"]
     assert capped["cap"] == 1
+
+
+async def test_queue_backfill_queues_only_extract_keys(backfill_job: _LockedJob) -> None:
+    """Fix round 1 (R4): formula keys are never backfilled; formula-only adds queue nothing."""
+    brief_id = uuid4()
+    rec = uuid4()
+    record = _fake_source_record() | {"scope_rows": [(str(rec), str(ORG_ID))]}
+    pool = FakePool(record, _predicates_with_formula())
+
+    assert (
+        await queue_predicate_backfill(
+            pool, brief_id, WORKSPACE_ID, ["sites_doubled", "site_count"]
+        )
+        == 1
+    )
+    (job,) = backfill_job.deferred
+    assert job["predicate_keys"] == ["site_count"]
+    assert job["queueing_lock"] == f"backfill:{rec}:site_count"
+
+    backfill_job.deferred.clear()
+    pool = FakePool(record, _predicates_with_formula())
+    assert await queue_predicate_backfill(pool, brief_id, WORKSPACE_ID, ["sites_doubled"]) == 0
+    assert backfill_job.deferred == []
+    assert not any(sql == BACKFILL_SCOPE_SQL for sql, _ in pool.calls)  # no scope query

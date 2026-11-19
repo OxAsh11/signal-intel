@@ -431,7 +431,12 @@ def _type_name(v: object) -> str:
 def _number(x: int | float) -> int | float | None:
     """A JS-compatible number: big ints become floats, a non-finite float becomes null."""
     if isinstance(x, int):
-        return x if -MAX_SAFE_INT <= x <= MAX_SAFE_INT else float(x)
+        if -MAX_SAFE_INT <= x <= MAX_SAFE_INT:
+            return x
+        try:
+            x = float(x)
+        except OverflowError:  # beyond any double (e.g. 10**400): not finite, so null
+            return None
     return x if math.isfinite(x) else None
 
 
@@ -526,10 +531,13 @@ class _Evaluator:
             case SysRef(name):
                 return self.system.get(name)
             case Ref(key):
-                v = self.values.get(key)
-                if isinstance(v, (int, float)) and not isinstance(v, bool):
+                v: object = self.values.get(key)
+                if v is None or isinstance(v, (bool, str)):
+                    return v
+                if isinstance(v, (int, float)):
                     return _number(v)  # a column number behaves like a JS number too
-                return v
+                # A JSONB claim value may be a list or an object: not a formula value.
+                raise FormulaTypeError(f'column "{key}" holds a list or object, not a value')
             case Unary(op, operand):
                 return self.unary(op, self.run(operand))
             case Binary(op, left, right):
@@ -670,14 +678,17 @@ def check_result(
 ) -> str | None:
     """Why *value* cannot fill a column of *value_type*, or None when it can (or is null).
 
-    A null result is the caller's no_data, not an error."""
+    A null result is the caller's no_data, not an error. The message is always
+    `formula returned <type>, column is <value_type>` (R5). evaluate never returns a non-finite
+    number (it is null by then); one passed in anyway is still refused, as a number."""
     if value is None:
         return None
-    non_finite = isinstance(value, float) and not math.isfinite(value)
     if value_type == "boolean":
         ok = isinstance(value, bool)
     elif value_type == "number":
-        ok = _is_num(value) and not non_finite
+        ok = (
+            isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value)
+        )
     elif value_type == "text":
         ok = isinstance(value, str)
     elif value_type == "enum":
@@ -688,10 +699,4 @@ def check_result(
         raise ValueError(f"unknown value_type {value_type!r}")
     if ok:
         return None
-    if non_finite:
-        got = "non-finite number"
-    elif value_type == "enum" and isinstance(value, str):
-        got = "text outside the allowed values"
-    else:
-        got = _type_name(value)
-    return f"formula returned {got}, column is {value_type}"
+    return f"formula returned {_type_name(value)}, column is {value_type}"

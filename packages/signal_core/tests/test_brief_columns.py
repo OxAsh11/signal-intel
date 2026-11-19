@@ -396,6 +396,43 @@ def test_rule_on_formula_column_dropped() -> None:
     assert len(evidence_rules({"predicates": preds, "evidence_rules": [*rules, rule]})) == 2
 
 
+def test_unhashable_keys_drop_without_crashing() -> None:
+    """Fix round 1 (I1): AI output with a list or dict as a key drops with a reason."""
+    preds, rules = _fx()
+    bad = [
+        {"key": ["a", "b"], "label": "L", "value_type": "boolean", "role": "info"},
+        {"key": {"k": 1}, "label": "D", "value_type": "boolean", "role": "info"},
+    ]
+    specs, kept, dropped = clean_columns([*preds, *bad], rules)
+    assert len(specs) == 3
+    assert len(kept) == 2
+    assert len(dropped) == 2
+    assert all("key must be" in d for d in dropped)
+
+
+def test_clean_drops_a_column_whose_key_exists_with_another_fill_method() -> None:
+    """Fix round 1 (I2): mirrors the 23514 'filled by' check; its rules and readers drop too."""
+    preds, rules = _fx()
+    preds.append(_formula("sites_doubled", "site_count * 2", ["site_count"]))
+    specs, kept, dropped = clean_columns(
+        preds,
+        rules,
+        existing_types={"site_count": "number"},
+        existing_fills={"site_count": "formula", "drone_programme": "extract", "other": "manual"},
+    )
+    assert _keys(specs) == ["drone_programme", "industry"]
+    assert len(kept) == 2
+    assert dropped == [
+        'column "site_count" already exists in this workspace filled by formula;'
+        " give it another key",
+        'column "sites_doubled": input "site_count" was dropped',
+    ]
+    # The same key held with the same fill method is fine.
+    specs, _, dropped = clean_columns(preds, rules, existing_fills={"sites_doubled": "formula"})
+    assert dropped == []
+    assert "sites_doubled" in _keys(specs)
+
+
 def test_extract_keys_skips_formula_columns() -> None:
     preds, _ = _fx()
     preds.append(_formula("sites_doubled", "site_count * 2", ["site_count"]))

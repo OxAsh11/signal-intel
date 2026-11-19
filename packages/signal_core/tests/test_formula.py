@@ -101,6 +101,29 @@ def test_syntax_error_position(expr: str, position: int) -> None:
     assert str(info.value)
 
 
+TODAY = date(2026, 11, 19)
+
+
+def test_huge_integer_input_is_null_not_overflow() -> None:
+    """Fix round 1: a column int beyond any double (10**400) is non-finite, so null."""
+    node = parse("big_num + 1")
+    assert evaluate(node, {"big_num": 10**400}, {}, TODAY) is None
+    assert evaluate(parse("big_num"), {"big_num": 10**400}, {}, TODAY) is None
+    assert evaluate(parse("concat(big_num)"), {"big_num": 10**400}, {}, TODAY) == ""
+    v = evaluate(parse("big_num"), {"big_num": 2**60}, {}, TODAY)
+    assert isinstance(v, float) and v == float(2**60)  # beyond 2**53: a double, as in JS
+
+
+@pytest.mark.parametrize("bad", [[1, 2], {"a": 1}, []])
+@pytest.mark.parametrize(
+    "expr", ["xs", "xs + 1", "concat(xs)", "is_empty(xs)", "coalesce(xs)", "xs = 1"]
+)
+def test_non_scalar_input_is_a_type_error(expr: str, bad: object) -> None:
+    """Fix round 1: a JSONB list or object as a column value raises FormulaTypeError."""
+    with pytest.raises(FormulaTypeError, match='column "xs"'):
+        evaluate(parse(expr), {"xs": bad}, {}, TODAY)  # type: ignore[dict-item]
+
+
 def test_errors_are_value_errors() -> None:
     assert issubclass(FormulaSyntaxError, ValueError)
     assert issubclass(FormulaTypeError, ValueError)
@@ -113,8 +136,8 @@ def test_errors_are_value_errors() -> None:
         (1, "boolean", None, "formula returned number, column is boolean"),
         (3, "number", None, None),
         (2.5, "number", None, None),
-        (math.inf, "number", None, "formula returned non-finite number, column is number"),
-        (math.nan, "number", None, "formula returned non-finite number, column is number"),
+        (math.inf, "number", None, "formula returned number, column is number"),
+        (math.nan, "number", None, "formula returned number, column is number"),
         (True, "number", None, "formula returned boolean, column is number"),
         ("x", "text", None, None),
         (4, "text", None, "formula returned number, column is text"),
@@ -123,7 +146,7 @@ def test_errors_are_value_errors() -> None:
             "farming",
             "enum",
             ["energy", "mining"],
-            "formula returned text outside the allowed values, column is enum",
+            "formula returned text, column is enum",
         ),
         (False, "enum", ["energy", "mining"], "formula returned boolean, column is enum"),
         ("2026-11-19", "date", None, None),

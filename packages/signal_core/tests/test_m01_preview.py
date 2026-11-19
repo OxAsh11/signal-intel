@@ -166,3 +166,24 @@ async def test_reextract_not_counted_when_no_key_added() -> None:
 
     assert counts["reextract_records"] == 0
     assert pool.calls == []
+
+
+async def test_reextract_not_counted_when_only_formula_columns_added() -> None:
+    """Fix round 1 (R4): a formula column is filled by its own runs, never by re-extraction."""
+    pool = _CountPool()
+    old = {"predicates": [_spec("site_count")]}
+    formula = _spec("sites_doubled") | {
+        "fill_method": "formula",
+        "formula": "site_count * 2",
+        "inputs": ["site_count"],
+    }
+    new = {"predicates": [_spec("site_count"), formula]}
+
+    counts = await _counts(pool, uuid4(), uuid4(), uuid4(), old, new, False, ["predicates"])  # type: ignore[arg-type]
+
+    assert counts["reextract_records"] == 0
+    assert pool.calls == []
+
+    new["predicates"].append(_spec("fleet_size"))  # an extract column added too: counted
+    counts = await _counts(pool, uuid4(), uuid4(), uuid4(), old, new, False, ["predicates"])  # type: ignore[arg-type]
+    assert counts["reextract_records"] == 7

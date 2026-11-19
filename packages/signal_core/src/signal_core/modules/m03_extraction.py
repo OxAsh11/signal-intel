@@ -690,12 +690,21 @@ async def queue_predicate_backfill(
     Newest first, at most BACKFILL_CAP per call; one queued job per record and key set however
     often the event is delivered. Returns the number of records queued.
     """
-    sorted_keys = sorted(set(keys))
-    if not sorted_keys:
+    if not keys:
         return 0
     job = extract_backfill_record_job
     if job is None:
         log.warning("extraction.backfill_not_wired", brief_id=str(brief_id))
+        return 0
+    # Only extract columns are backfilled; a version adding only formula columns queues nothing
+    # (they are filled by their own runs, never by extraction).
+    sorted_keys = sorted((await _load_predicates(pool, workspace_id, set(keys))).ids)
+    if not sorted_keys:
+        log.info(
+            "extraction.backfill_no_extract_keys",
+            brief_id=str(brief_id),
+            predicate_keys=sorted(set(keys)),
+        )
         return 0
     cap = BACKFILL_CAP
     async with pool.connection() as conn, conn.cursor() as cur:

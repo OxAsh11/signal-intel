@@ -946,7 +946,15 @@ async def test_dispatch_backfill_event() -> None:
 
         async def execute(self, sql: str, args: Any = None) -> None:
             seen.append((sql, args))
-            self._rows = [(record_id, org_id)] if "r.brief_id = %s" in sql.lower() else []
+            if "r.brief_id = %s" in sql.lower():
+                self._rows = [(record_id, org_id)]
+            elif "public.predicate" in sql.lower():  # both keys are extract columns
+                self._rows = [
+                    (str(uuid4()), "site_count", "Sites", "number", None, ""),
+                    (str(uuid4()), "industry", "Industry", "text", None, ""),
+                ]
+            else:
+                self._rows = []
 
         async def fetchall(self) -> list[tuple[Any, ...]]:
             return self._rows

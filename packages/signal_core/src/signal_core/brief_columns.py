@@ -222,12 +222,16 @@ def clean_columns(
     raw_predicates: list[Any],
     raw_rules: list[Any],
     existing_types: dict[str, str] | None = None,
+    existing_fills: dict[str, str] | None = None,
 ) -> tuple[list[ColumnSpec], list[EvidenceRule], list[str]]:
     """Valid specs, valid rules, and the reasons anything was dropped. First duplicate wins.
 
-    *existing_types* maps the workspace's predicate keys to their value_type: a column whose key
-    exists there with another type drops (publishing it would fail), and so do its rules."""
+    *existing_types* maps the workspace's predicate keys to their value_type, and
+    *existing_fills* to their fill_method: a column whose key exists there with another type or
+    another fill method drops (saving or publishing it would fail with 23514), and so do its
+    rules and any formula reading it."""
     existing_types = existing_types or {}
+    existing_fills = existing_fills or {}
     specs: list[ColumnSpec] = []
     rules: list[EvidenceRule] = []
     dropped: list[str] = []
@@ -242,9 +246,15 @@ def clean_columns(
             dropped.append(f'column "{raw.get("key", "")}": {_first_error(exc)}')
             continue
         held = existing_types.get(spec.key)
+        held_fill = existing_fills.get(spec.key)
         if held is not None and held != spec.value_type:
             dropped.append(
                 f'column "{spec.key}" already exists in this workspace as {held};'
+                " give it another key"
+            )
+        elif held_fill is not None and held_fill != spec.fill_method:
+            dropped.append(
+                f'column "{spec.key}" already exists in this workspace filled by {held_fill};'
                 " give it another key"
             )
         elif spec.key in seen:
@@ -254,7 +264,10 @@ def clean_columns(
         else:
             seen.add(spec.key)
             specs.append(spec)
-    raw_keys = {r.get("key") for r in raw_predicates if isinstance(r, dict)}
+    # Only string keys: AI output may hold a list or dict there, which must drop, not crash.
+    raw_keys = {
+        r["key"] for r in raw_predicates if isinstance(r, dict) and isinstance(r.get("key"), str)
+    }
     legacy = {r for r in raw_predicates if isinstance(r, str)}
     specs = _drop_bad_formulas(specs, raw_keys, legacy, dropped)
     by_key = {s.key: s for s in specs}
