@@ -292,6 +292,10 @@ begin
     else
       raise exception 'column "%": fill_method must be extract or formula', v_key using errcode = '22023';
     end if;
+    -- SQL never parses a formula: that it parses, and that its inputs are exactly the columns
+    -- it reads, is checked by the Brief editor (@signal/formula) and by the worker
+    -- (signal_core.formula; column_specs logs a spec it drops). A formula that slips past them
+    -- still fails visibly: its run ends in error with the parse message.
     v_val := s -> 'formula';
     if v_fill = 'formula' then
       if jsonb_typeof(v_val) is distinct from 'string'
@@ -451,6 +455,9 @@ end $$;
 -- input key order. A key held with another fill_method aborts the publish with 23514.
 -- A formula column is created with auto_run true. A change of formula or inputs is audited as
 -- predicate.fill_changed; the predicate's version moves with its config_hash (trigger).
+-- A formula column this version adds, or whose config_hash this publish changed, is queued for the
+-- workspace's accounts whose cell is empty, no_data or stale (app.queue_formula_backfill, 0041),
+-- in this transaction: an existing account gets the value without waiting for new evidence.
 create or replace function app.sync_brief_predicates() returns trigger
   language plpgsql security definer set search_path = ''
 as $$
@@ -470,6 +477,7 @@ declare
   v_fcfg   jsonb;
   v_ins    uuid[];
   v_ver    int;
+  v_fill_q uuid[] := '{}';   -- formula columns to fill for the existing accounts
 begin
   perform app.validate_brief_columns(new.config);
 
@@ -510,6 +518,9 @@ begin
         perform app.audit(new.org_id, new.workspace_id, 'predicate.created', 'predicate', v_id, null,
                           jsonb_build_object('key', s ->> 'key', 'value_type', s ->> 'value_type',
                                              'brief_version_id', new.id));
+        if v_fill = 'formula' then
+          v_fill_q := v_fill_q || v_id;
+        end if;
         continue;
       end if;
       -- Another transaction created it first: compare against that row.
@@ -568,6 +579,12 @@ begin
                         jsonb_build_object('fill_config', v_fcfg, 'input_predicate_ids', v_ins,
                                            'version', v_ver, 'brief_version_id', new.id));
     end if;
+
+    -- A formula whose config_hash moved (formula, inputs or allowed values) makes its cells stale.
+    if v_fill = 'formula'
+       and (select x.config_hash from public.predicate x where x.id = p.id) is distinct from p.config_hash then
+      v_fill_q := v_fill_q || p.id;
+    end if;
   end loop;
 
   select config -> 'predicates' into v_prev from public.brief_version
@@ -584,9 +601,22 @@ begin
                      jsonb_build_object('brief_id', new.brief_id, 'brief_version_id', new.id,
                                         'org_id', new.org_id, 'workspace_id', new.workspace_id,
                                         'predicate_keys', to_jsonb(v_added)));
+    -- A formula column this version adds (new to the workspace or not) is filled too.
+    select v_fill_q || coalesce(array_agg(x.id), '{}') into v_fill_q
+      from public.predicate x
+     where x.workspace_id = new.workspace_id and x.fill_method = 'formula' and x.key = any(v_added);
+  end if;
+  if cardinality(v_fill_q) > 0 then
+    perform app.queue_formula_backfill(array(select distinct unnest(v_fill_q)), new.id);
   end if;
   return null;
 end $$;
+
+-- Replaced in 0041, which adds the runs' queueing; until then a publish queues nothing.
+create function app.queue_formula_backfill(p_predicates uuid[], p_brief_version uuid, p_cap int default 5000)
+returns int
+  language sql stable set search_path = ''
+as $$ select 0 $$;
 
 -- ── 6. Derived claims ────────────────────────────────────────────────────────
 -- One source_record per workspace and kind. Its extraction_status is 'irrelevant' (status_detail
@@ -624,9 +654,16 @@ begin
 end $$;
 
 -- Writes a formula run's value as a derived claim. An active formula claim with the same value
--- is reused (no event), so a re-run with unchanged inputs cannot loop. Otherwise a new claim
--- (confidence 100, no quote) supersedes the cell's other active formula claims.
-create function app.write_formula_claim(p_run uuid, p_value jsonb) returns uuid
+-- is reused (no event), so a re-run with unchanged inputs cannot loop. Otherwise a new claim (no
+-- quote) is written. Either way the claim then supersedes every other active formula claim of the
+-- cell (after a merge the winner can hold two), so one stays active.
+-- A derived claim is no fresher and no surer than its evidence: observed_at is the newest
+-- observed_at, and confidence the lowest confidence, of the input claims the run used (p_inputs,
+-- their ids; when null, the inputs' current values, as app.run_input_values reads them). A formula
+-- that read no input claim (only @name / @domain) is observed now, with confidence 100.
+-- Readers that count evidence (corroboration, the verdict, the account card) leave derived claims
+-- out by their source record (connector_id 'derived:%').
+create function app.write_formula_claim(p_run uuid, p_value jsonb, p_inputs jsonb default null) returns uuid
   language plpgsql security definer set search_path = ''
 as $$
 declare
@@ -635,6 +672,8 @@ declare
   v_sr   uuid;
   v_ev   uuid;
   v_id   uuid;
+  v_obs  timestamptz;
+  v_conf smallint;
 begin
   select * into r from public.predicate_run where id = p_run for update;
   if not found then
@@ -657,17 +696,33 @@ begin
   select id into v_ev from public.extractor_version
    where capability = 'formula' and prompt_version = 'formula-v1' and model = 'none' and parser_version = '1';
 
+  if p_inputs is not null then
+    select max(c.observed_at), min(c.confidence) into v_obs, v_conf
+      from public.claim c
+     where c.entity_id = r.entity_id
+       and c.id in (select x::uuid from jsonb_array_elements_text(
+                      case when jsonb_typeof(p_inputs) = 'array' then p_inputs else '[]'::jsonb end) x);
+  else
+    select max(c.observed_at), min(c.confidence) into v_obs, v_conf
+      from public.predicate p
+      join public.predicate x on x.id = any(p.input_predicate_ids)
+      cross join lateral (select cl.observed_at, cl.confidence from public.claim cl
+                           where cl.entity_id = r.entity_id and cl.predicate_id = x.id and cl.status = 'active'
+                           order by cl.observed_at desc, cl.id desc limit 1) c
+     where p.id = r.predicate_id;
+  end if;
+
   select id into v_id from public.claim
    where entity_id = r.entity_id and predicate_id = r.predicate_id and source_record_id = v_sr
      and status = 'active' and value = p_value
    order by created_at, id limit 1;
   if v_id is null then
     v_id := app.create_claim(r.org_id, r.entity_id, r.predicate_id, p_value, null, null, null,
-                             v_sr, now(), v_ev, 100::smallint);
-    update public.claim set status = 'superseded', superseded_by = v_id
-     where entity_id = r.entity_id and predicate_id = r.predicate_id and source_record_id = v_sr
-       and status = 'active' and id <> v_id;
+                             v_sr, coalesce(v_obs, now()), v_ev, coalesce(v_conf, 100::smallint));
   end if;
+  update public.claim set status = 'superseded', superseded_by = v_id
+   where entity_id = r.entity_id and predicate_id = r.predicate_id and source_record_id = v_sr
+     and status = 'active' and id <> v_id;
   update public.predicate_run set claim_id = v_id where id = p_run;
   return v_id;
 end $$;
@@ -689,6 +744,9 @@ $$;
 -- Nine states, checked in order: queued / running, error, skipped, stale, derived, value,
 -- no_data, empty. "Latest" is by queued_at desc, then id. The run that stale compares against is
 -- the latest finished run that recorded an inputs_hash (a cancelled run never counts).
+-- An abandoned run (running for more than 15 minutes, or queued for more than 1 hour, with no
+-- worker on it) still shows 'running' / 'queued' here: it is closed (error 'abandoned') only when a
+-- request, an auto-run or the job's retry reaches its cell (0041).
 create function app.cell_state(p_entity uuid, p_predicate uuid) returns text
   language plpgsql stable security definer set search_path = ''
 as $$
@@ -767,12 +825,12 @@ end $$;
 revoke execute on function
   app.formula_order(jsonb), app.formula_cycle(jsonb),
   app.predicate_config_hash(text, jsonb, text[], text, jsonb), app.predicate_config_stamp(),
-  app.derived_source_record(uuid, text), app.write_formula_claim(uuid, jsonb),
-  app.run_inputs_hash(uuid, uuid), app.cell_state(uuid, uuid)
+  app.derived_source_record(uuid, text), app.write_formula_claim(uuid, jsonb, jsonb),
+  app.run_inputs_hash(uuid, uuid), app.cell_state(uuid, uuid), app.queue_formula_backfill(uuid[], uuid, int)
   from public, anon, authenticated;
 grant execute on function
   app.predicate_config_hash(text, jsonb, text[], text, jsonb),
-  app.derived_source_record(uuid, text), app.write_formula_claim(uuid, jsonb),
+  app.derived_source_record(uuid, text), app.write_formula_claim(uuid, jsonb, jsonb),
   app.run_inputs_hash(uuid, uuid), app.cell_state(uuid, uuid)
   to postgres, service_role;
 

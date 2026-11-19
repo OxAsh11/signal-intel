@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(87);
+select plan(112);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -71,9 +71,9 @@ values ((select v from ids where k = 'org'), (select v from ids where k = 's1'),
         (select v from ids where k = 'e01'), 'exact');
 
 -- ── Cost per entity ──────────────────────────────────────────────────────────
-select is(app.column_cost_per_entity((select v from ids where k = 'sc')), 0.01::numeric,
+select is(app.column_cost_per_entity((select v from ids where k = 'sc'), (select v from ids where k = 'ws')), 0.01::numeric,
   '1. an extract column costs one extract call per extracted record (workspace average 1)');
-select is(app.column_cost_per_entity((select v from ids where k = 'f')), 0::numeric, '2. a formula column costs 0');
+select is(app.column_cost_per_entity((select v from ids where k = 'f'), (select v from ids where k = 'ws')), 0::numeric, '2. a formula column costs 0');
 select is(app.remaining_budget_usd((select v from ids where k = 'ws'), null), null, '3. no cap: remaining is null');
 
 -- ── Seeded cell states for site_count ────────────────────────────────────────
@@ -377,7 +377,7 @@ select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), 
 insert into public.mention (org_id, source_record_id, entity_type, raw_name, entity_id, match_method)
 select (select v from ids where k = 'org'), id, 'company', 'CR E02', (select v from ids where k = 'e02'), 'exact'
   from public.source_record where content_hash like 'cr25-b%';
-select is(app.column_cost_per_entity((select v from ids where k = 'sc')), 0.2::numeric,
+select is(app.column_cost_per_entity((select v from ids where k = 'sc'), (select v from ids where k = 'ws')), 0.2::numeric,
   '59. an average of 30.5 records per entity is capped at 20');
 
 -- ── Across workspaces ──────────────────────────────────────────────────────────
@@ -461,6 +461,188 @@ select is(cardinality(app.queue_auto_runs((select v from ids where k = 'c_auto')
   '67. an auto-run on a cell with an abandoned run queues a new run');
 select is((select status || '|' || error from public.predicate_run where id = (select v from ids where k = 'r_auto')),
   'error|abandoned', '68. ... after closing the abandoned one');
+
+-- ── A queued run with no job (kill switch, attempts used up) is abandoned after 1 hour ──
+insert into ids select 'e_q' || n, app.create_entity((select v from ids where k = 'org'), 'company', 'CR Queued ' || n, 'tenant')
+  from generate_series(1, 3) n;
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v from ids where k in ('e_q1', 'e_q2', 'e_q3');
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = e),
+       (select v from ids where k = 'f'), 1, 'queued', now() - m * interval '1 minute'
+  from (values ('e_q1', 120), ('e_q2', 30), ('e_q3', 120)) x(e, m);
+insert into ids select 'r_q1', id from public.predicate_run where entity_id = (select v from ids where k = 'e_q1');
+insert into ids select 'r_q2', id from public.predicate_run where entity_id = (select v from ids where k = 'e_q2');
+insert into ids select 'r_q3', id from public.predicate_run where entity_id = (select v from ids where k = 'e_q3');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a2","role":"authenticated"}', true);
+select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
+            array[(select v from ids where k = 'e_q1'), (select v from ids where k = 'e_q2')]) ->> 'count', '1',
+  '69. a cell queued for 2 hours is counted; one queued for 30 minutes is not');
+select is(public.request_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
+            array[(select v from ids where k = 'e_q1'), (select v from ids where k = 'e_q2')]),
+  '{"queued": 1, "cost_usd": 0}'::jsonb, '70. the request queues the cell whose queued run was abandoned');
+reset role;
+select is((select status || '|' || error || '|' || (finished_at is not null)::text from public.predicate_run
+            where id = (select v from ids where k = 'r_q1')),
+  'error|abandoned|true', '71. the queued run older than 1 hour is closed as error, abandoned');
+select is((select string_agg(status, ',') from public.predicate_run where entity_id = (select v from ids where k = 'e_q2')),
+  'queued', '72. the run queued 30 minutes ago is untouched and gets no second run');
+insert into ids select 'c_q3', app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_q3'),
+  (select v from ids where k = 'dp'), 'true'::jsonb, 'drones', null, null, (select v from ids where k = 's1'), now(),
+  (select id from public.extractor_version where capability = 'extract.cr25'), 80::smallint);
+select is(cardinality(app.queue_auto_runs((select v from ids where k = 'c_q3'))), 1,
+  '73. an auto-run on a cell whose queued run was abandoned queues a new run');
+select is((select status || '|' || error from public.predicate_run where id = (select v from ids where k = 'r_q3')),
+  'error|abandoned', '74. ... after closing the abandoned queued run');
+
+-- ── I1: a derived claim is as old and as sure as the evidence it was computed from ──
+insert into ids select 'e_i' || n, app.create_entity((select v from ids where k = 'org'), 'company', 'CR Derived ' || n, 'tenant')
+  from generate_series(1, 3) n;
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v from ids where k in ('e_i1', 'e_i2', 'e_i3');
+insert into ids select 'ci_dp', app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_i1'),
+  (select v from ids where k = 'dp'), 'true'::jsonb, 'drones', null, null, (select v from ids where k = 's1'), now() - interval '10 days',
+  (select id from public.extractor_version where capability = 'extract.cr25'), 70::smallint);
+insert into ids select 'ci_sc', app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_i1'),
+  (select v from ids where k = 'sc'), '6'::jsonb, 'six sites', null, null, (select v from ids where k = 's1'), now() - interval '3 days',
+  (select id from public.extractor_version where capability = 'extract.cr25'), 90::smallint);
+select app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_i2'),
+  (select v from ids where k = 'dp'), 'true'::jsonb, 'drones', null, null, (select v from ids where k = 's1'), now() - interval '5 days',
+  (select id from public.extractor_version where capability = 'extract.cr25'), 60::smallint);
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, queued_at)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v, (select v from ids where k = 'f'), 1, now()
+  from ids where k in ('e_i1', 'e_i2', 'e_i3');
+insert into ids select 'r_' || i.k, r.id from ids i join public.predicate_run r on r.entity_id = i.v
+ where i.k in ('e_i1', 'e_i2', 'e_i3');
+select app.start_run(v) from ids where k in ('r_e_i1', 'r_e_i2', 'r_e_i3');
+select app.complete_formula_run((select v from ids where k = 'r_e_i1'), 'true',
+  jsonb_build_array((select v from ids where k = 'ci_dp'), (select v from ids where k = 'ci_sc')));
+select is((select jsonb_build_object('observed_at', c.observed_at = now() - interval '3 days', 'confidence', c.confidence)
+             from public.predicate_run r join public.claim c on c.id = r.claim_id where r.id = (select v from ids where k = 'r_e_i1')),
+  '{"observed_at": true, "confidence": 70}'::jsonb,
+  '75. a derived claim takes the newest observed_at and the lowest confidence of the inputs the run used');
+insert into ids select 'ci2', app.write_formula_claim((select v from ids where k = 'r_e_i2'), 'true');
+select app.finish_run((select v from ids where k = 'r_e_i2'), 'succeeded', (select v from ids where k = 'ci2'), '[]');
+select is((select jsonb_build_object('observed_at', observed_at = now() - interval '5 days', 'confidence', confidence)
+             from public.claim where id = (select v from ids where k = 'ci2')),
+  '{"observed_at": true, "confidence": 60}'::jsonb,
+  '76. without the run''s inputs, the claim reads the current input values');
+select app.complete_formula_run((select v from ids where k = 'r_e_i3'), 'true', '[]');
+select is((select jsonb_build_object('observed_at', c.observed_at = now(), 'confidence', c.confidence)
+             from public.predicate_run r join public.claim c on c.id = r.claim_id where r.id = (select v from ids where k = 'r_e_i3')),
+  '{"observed_at": true, "confidence": 100}'::jsonb,
+  '77. a formula that read no input claim (only @name/@domain) is observed now with confidence 100');
+select is((select count(*)::int from public.predicate_run where entity_id in (select v from ids where k in ('e_i1', 'e_i2', 'e_i3'))
+             and status = 'queued'), 0,
+  '78. a run whose inputs did not change while it ran queues no other run');
+
+-- ── M2: an input claim committed while a formula run was running queues one more run ──
+insert into ids select 'e_m2', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Late Input', 'tenant');
+insert into public.account (org_id, workspace_id, entity_id)
+values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e_m2'));
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, queued_at)
+values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e_m2'),
+        (select v from ids where k = 'f'), 1, now() - interval '1 minute');
+insert into ids select 'r_m2', id from public.predicate_run where entity_id = (select v from ids where k = 'e_m2');
+select app.start_run((select v from ids where k = 'r_m2'));
+select app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_m2'),
+  (select v from ids where k = 'dp'), 'true'::jsonb, 'drones', null, null, (select v from ids where k = 's1'), now(),
+  (select id from public.extractor_version where capability = 'extract.cr25'), 80::smallint);
+select is(app.complete_formula_run((select v from ids where k = 'r_m2'), 'false', '[]'), 'succeeded',
+  '79. the run finishes with the value it computed');
+insert into ids select 'r_m2b', id from public.predicate_run
+ where entity_id = (select v from ids where k = 'e_m2') and status = 'queued';
+select ok((select v from ids where k = 'r_m2b') is not null, '80. its inputs changed while it ran, so one more run is queued');
+select is((select payload from public.outbox where event = 'column.run_requested' and aggregate_id = (select v from ids where k = 'r_m2')),
+  jsonb_build_object('run_ids', jsonb_build_array((select v from ids where k = 'r_m2b'))),
+  '81. ... and announced as column.run_requested in the same transaction');
+
+-- ── I4: publishing a new or changed formula column fills the existing accounts ──
+insert into cfg select 'v2', jsonb_set(v, '{predicates}', (v -> 'predicates') || '[{"key": "programme_flag", "label": "Programme flag",
+  "value_type": "text", "fill_method": "formula", "formula": "if(drone_programme, \"yes\", \"no\")",
+  "inputs": ["drone_programme"], "role": "info"}]'::jsonb) from cfg where k = 'full';
+insert into cfg select 'v3', jsonb_set(v, '{predicates,4,formula}', '"if(drone_programme, \"y\", \"n\")"') from cfg where k = 'v2';
+with x as (
+  insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights)
+  values ((select v from ids where k = 'b'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+          2, (select v from cfg where k = 'v2'), '{}', '{}') returning id)
+insert into ids select 'bv2', id from x;
+insert into ids select 'pf', id from public.predicate where workspace_id = (select v from ids where k = 'ws') and key = 'programme_flag';
+select is((select count(*)::int from public.predicate_run where predicate_id = (select v from ids where k = 'pf')
+             and status = 'queued' and brief_version_id = (select v from ids where k = 'bv2')),
+  (select count(*)::int from public.account a join public.entity e on e.id = a.entity_id
+    where a.workspace_id = (select v from ids where k = 'ws') and e.entity_type = 'company' and e.status = 'active'),
+  '82. a version adding a formula column queues it for every account of the workspace');
+select is((select (select array_agg(x::uuid order by x) from jsonb_array_elements_text(payload -> 'run_ids') x)
+             from public.outbox where event = 'column.run_requested' and aggregate_id = (select v from ids where k = 'bv2')),
+  (select array_agg(id order by id) from public.predicate_run where predicate_id = (select v from ids where k = 'pf')),
+  '83. ... announced as column.run_requested in the publishing transaction');
+-- E01's run fills its cell; every other cell still has its run queued.
+insert into ids select 'r_pf1', id from public.predicate_run
+ where predicate_id = (select v from ids where k = 'pf') and entity_id = (select v from ids where k = 'e01');
+select app.start_run((select v from ids where k = 'r_pf1'));
+select app.complete_formula_run((select v from ids where k = 'r_pf1'), '"no"', '[]');
+with x as (
+  insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights)
+  values ((select v from ids where k = 'b'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+          3, (select v from cfg where k = 'v3'), '{}', '{}') returning id)
+insert into ids select 'bv3', id from x;
+select is((select payload from public.outbox where event = 'column.run_requested' and aggregate_id = (select v from ids where k = 'bv3')),
+  jsonb_build_object('run_ids', jsonb_build_array((select id from public.predicate_run where predicate_id = (select v from ids where k = 'pf')
+     and entity_id = (select v from ids where k = 'e01') and status = 'queued'))),
+  '84. a changed formula queues the cells it made stale (and none already queued)');
+with x as (
+  insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights)
+  values ((select v from ids where k = 'b'), (select v from ids where k = 'org'), (select v from ids where k = 'ws'),
+          4, (select v from cfg where k = 'v3'), '{}', '{}') returning id)
+insert into ids select 'bv4', id from x;
+select is((select count(*)::int from public.predicate_run where brief_version_id = (select v from ids where k = 'bv4')), 0,
+  '85. an unchanged republish queues nothing');
+select is((select count(*)::int from public.outbox where event = 'column.run_requested'
+             and aggregate_id = (select v from ids where k = 'bv4')), 0, '86. ... and announces nothing');
+select is(app.queue_formula_backfill(array[(select v from ids where k = 'f')], (select v from ids where k = 'bv4'), 2), 2,
+  '87. a publish queues at most the cap of runs per column');
+select is((select count(*)::int from public.predicate_run where predicate_id = (select v from ids where k = 'f')
+             and brief_version_id = (select v from ids where k = 'bv4')), 2, '88. ... and no more');
+
+-- ── M5: after a merge, a re-run leaves one active derived claim ──────────────
+insert into ids select 'e_win', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Merge Winner', 'tenant');
+insert into ids select 'e_lose', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Merge Loser', 'tenant');
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v from ids where k in ('e_win', 'e_lose');
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, queued_at)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v, (select v from ids where k = 'f'), 1, now()
+  from ids where k in ('e_win', 'e_lose');
+select app.start_run(r.id)
+  from ids i join public.predicate_run r on r.entity_id = i.v and r.predicate_id = (select v from ids where k = 'f')
+ where i.k in ('e_win', 'e_lose');
+select app.complete_formula_run(r.id, case when i.k = 'e_win' then 'true' else 'false' end::jsonb, '[]')
+  from ids i join public.predicate_run r on r.entity_id = i.v and r.predicate_id = (select v from ids where k = 'f')
+ where i.k in ('e_win', 'e_lose');
+select app.merge_entities((select v from ids where k = 'e_win'), (select v from ids where k = 'e_lose'), null);
+select is((select count(*)::int from public.claim where entity_id = (select v from ids where k = 'e_win')
+             and predicate_id = (select v from ids where k = 'f') and status = 'active'), 2,
+  '89. the merge leaves the winner with two active derived claims for the cell');
+insert into ids select 'r_win', unnest(app.queue_entity_formula_runs((select v from ids where k = 'e_win')));
+select is((select predicate_id || '|' || status from public.predicate_run where id = (select v from ids where k = 'r_win')),
+  (select v from ids where k = 'f') || '|queued', '90. the merge queues the winner''s formula cells');
+select ok(exists (select 1 from public.outbox where event = 'column.run_requested'
+                   and aggregate_id = (select v from ids where k = 'e_win')
+                   and payload -> 'run_ids' @> jsonb_build_array((select v from ids where k = 'r_win'))),
+  '91. ... announced as column.run_requested');
+select app.start_run((select v from ids where k = 'r_win'));
+select app.complete_formula_run((select v from ids where k = 'r_win'), 'true', '[]');
+select is((select count(*)::int from public.claim where entity_id = (select v from ids where k = 'e_win')
+             and predicate_id = (select v from ids where k = 'f') and status = 'active'), 1,
+  '92. the re-run leaves exactly one active derived claim, even when its value matches one of them');
+
+-- ── M3: the cost of a global column is priced over the requesting workspace ──
+with x as (insert into public.predicate (key, label, value_type)
+  values ('cr25_global', 'Global column', 'text') returning id)
+insert into ids select 'pg', id from x;
+select is(app.column_cost_per_entity((select v from ids where k = 'pg'), (select v from ids where k = 'ws')), 0.2::numeric,
+  '93. a global extract column costs the requesting workspace''s average records (capped at 20)');
 
 -- ── Grants ───────────────────────────────────────────────────────────────────
 select ok(not has_function_privilege('authenticated', 'app.queue_auto_runs(uuid)', 'execute')
