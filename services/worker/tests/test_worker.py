@@ -765,8 +765,8 @@ async def test_dispatch_claim_created_queues_verdict_per_account_workspace() -> 
     assert sorted(j["args"]["workspace_id"] for j in verdicts) == sorted([ws_a, ws_b])
     assert all(j["args"]["entity_id"] == entity_id for j in verdicts)
     assert all(j["args"]["org_id"] == org_id for j in verdicts)
-    sql, params = pool.queries[0]
-    assert "public.account" in sql and params == (entity_id,)
+    (params,) = [a for sql, a in pool.queries if "from public.account" in sql]
+    assert params == (entity_id,)
 
 
 async def test_dispatch_entity_merged_uses_winner() -> None:
@@ -1066,12 +1066,16 @@ async def test_backfill_record_job_charges_the_brief(monkeypatch: Any) -> None:
 
 
 class _RoutedPool(_RowsPool):
-    """Like _RowsPool, but app.queue_auto_runs answers with its own rows, and a cursor (the
-    webhook fan-out's) finds no subscription."""
+    """Like _RowsPool, but app.queue_auto_runs and app.queue_entity_formula_runs answer with their
+    own rows, the derived-source check answers `derived`, and a cursor (the webhook fan-out's)
+    finds no subscription."""
 
-    def __init__(self, rows: list[tuple[Any, ...]], auto_runs: list[str]) -> None:
+    def __init__(
+        self, rows: list[tuple[Any, ...]], auto_runs: list[str], derived: bool = False
+    ) -> None:
         super().__init__(rows)
         self.auto_runs = auto_runs
+        self.derived = derived
 
     def connection(self) -> "_RowsPool._Ctx":
         pool = self
@@ -1092,8 +1096,10 @@ class _RoutedPool(_RowsPool):
         class _Conn(_RowsPool._Conn):
             async def execute(self, sql: str, args: Any = None) -> "_RowsPool._Cur":
                 pool.queries.append((sql, args))
-                if "app.queue_auto_runs" in sql:
+                if "app.queue_auto_runs" in sql or "app.queue_entity_formula_runs" in sql:
                     return _RowsPool._Cur([(pool.auto_runs,)])
+                if "derived:" in sql:
+                    return _RowsPool._Cur([(pool.derived,)])
                 return _RowsPool._Cur(pool.rows)
 
             def cursor(self) -> _NoRows:
@@ -1179,6 +1185,82 @@ async def test_dispatch_claim_created_queues_auto_runs_through_the_outbox() -> N
     assert _jobs(connector, "column.run") == []
     (auto_args,) = [a for sql, a in pool.queries if "app.queue_auto_runs" in sql]
     assert auto_args == (UUID(claim_id),)
+
+
+async def test_dispatch_derived_claim_queues_auto_runs_but_no_verdict() -> None:
+    """A formula's own claim restates evidence already judged: it re-runs the formulas that read
+    its column, but never re-judges the verdict."""
+    org_id, entity_id, ws, claim_id, record = (str(uuid4()) for _ in range(5))
+    pool = _RoutedPool([(ws,)], [str(uuid4())], derived=True)
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": org_id,
+                "workspace_id": None,
+                "aggregate_type": "claim",
+                "aggregate_id": claim_id,
+                "payload": {
+                    "entity_id": entity_id,
+                    "predicate_id": str(uuid4()),
+                    "source_record_id": record,
+                },
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "verdict.compute") == []
+    (check_args,) = [a for sql, a in pool.queries if "derived:" in sql]
+    assert check_args == (record,)
+    (auto_args,) = [a for sql, a in pool.queries if "app.queue_auto_runs" in sql]
+    assert auto_args == (UUID(claim_id),)
+
+
+async def test_dispatch_sourced_claim_still_queues_its_verdict() -> None:
+    org_id, entity_id, ws = (str(uuid4()) for _ in range(3))
+    pool = _RoutedPool([(ws,)], [], derived=False)
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": org_id,
+                "workspace_id": None,
+                "aggregate_id": str(uuid4()),
+                "payload": {"entity_id": entity_id, "source_record_id": str(uuid4())},
+            }
+        ],
+    )
+    (verdict,) = _jobs(connector, "verdict.compute")
+    assert verdict["queueing_lock"] == f"verdict:{entity_id}:{ws}"
+
+
+async def test_dispatch_entity_merged_queues_the_winners_formula_runs() -> None:
+    """After a merge the winner may hold two derived claims for a formula cell: its formula
+    columns re-run (app.queue_entity_formula_runs commits the runs with their event)."""
+    org_id, winner, loser, ws = (str(uuid4()) for _ in range(4))
+    pool = _RoutedPool([(ws,)], [str(uuid4())])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "entity.merged",
+                "org_id": org_id,
+                "workspace_id": None,
+                "payload": {"winner": winner, "loser": loser},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    (verdict,) = _jobs(connector, "verdict.compute")
+    assert verdict["args"]["entity_id"] == winner
+    (merge_args,) = [a for sql, a in pool.queries if "app.queue_entity_formula_runs" in sql]
+    assert merge_args == (UUID(winner),)
+    assert _jobs(connector, "column.run") == []  # deferred by the event's own dispatch
 
 
 async def test_dispatch_claim_created_with_no_dependents_queues_no_run() -> None:

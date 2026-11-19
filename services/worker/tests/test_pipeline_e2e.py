@@ -39,7 +39,9 @@ from psycopg_pool import AsyncConnectionPool
 import api.mcp_server as mcp_server
 import signal_core.modules.m04_identity as m04
 import signal_core.modules.m05_verdict as m05
+import signal_core.modules.m08_scoring as m08
 import signal_core.modules.m13_integrations as m13
+import signal_core.modules.m15_account_card as m15
 from api.main import build_app as build_api
 from signal_core.ai_gateway.gateway import Result
 from signal_core.ai_gateway.prompts import render
@@ -1704,6 +1706,17 @@ async def _seed_p3(db: Db) -> tuple[UUID, dict[str, UUID]]:
     return UUID(str(radar)), {str(k): UUID(str(v)) for k, v in rows}
 
 
+class _Switch:
+    """The real kill switch, with job types that can be turned off for a step."""
+
+    def __init__(self, inner: DbKillSwitch) -> None:
+        self.inner = inner
+        self.off: set[str] = set()
+
+    async def is_enabled(self, job_type: str) -> bool:
+        return job_type not in self.off and await self.inner.is_enabled(job_type)
+
+
 async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
     db = Db(pool)
     radar, predicates = await _seed_p3(db)
@@ -1735,9 +1748,10 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
 
     gateway = P3Gateway()
     connector = InMemoryConnector()
+    switch = _Switch(DbKillSwitch(pool))
     app = build_app(
         connector,
-        DbKillSwitch(pool),
+        switch,
         HealthState(),
         PgHealthStore(pool),
         ai_configured=gateway.configured,
@@ -1821,6 +1835,31 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         assert await db.one(created_sql, (str(entity), str(formula))) == created_before
         assert await cell(formula) == ("derived", "true")
 
+        # I1 (R7): a derived claim is as old and as sure as its inputs, and it is not evidence:
+        # the verdict and the account card never read it; scoring reads it (fit, scale, timing).
+        inputs_sql = (
+            "select max(observed_at), min(confidence) from public.claim"
+            " where entity_id = %s and predicate_id = any(%s) and status = 'active'"
+        )
+        expected = (
+            await db.admin(
+                inputs_sql, (entity, [predicates["drone_programme"], predicates["site_count"]])
+            )
+        )[0]
+        derived = (
+            await db.admin(
+                "select observed_at, confidence from public.claim where id = %s", (active_before,)
+            )
+        )[0]
+        assert derived == expected
+        assert expected[1] < 100
+        live = [r[0] for r in await db.admin(m05.LIVE_CLAIMS_SQL, (entity,))]
+        assert live and active_before not in live
+        card = [r[0] for r in await db.admin(m15.TOP_CLAIMS_SQL, (entity,))]
+        assert card and active_before not in card
+        scored = [r[0] for r in await db.admin(m08.CLAIMS_SQL, (entity,))]
+        assert active_before in scored
+
         # A redelivered job for that finished run does nothing.
         last_run = await db.one(
             "select id from public.predicate_run where entity_id = %s and predicate_id = %s"
@@ -1855,3 +1894,92 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         assert _failed_jobs(connector) == []
         assert await cell(label) == ("no_data", None)
         assert await db.one(active_sql, (entity, label)) is None
+
+        # I4 (R8): a version adding a formula column fills it on the existing account, with no
+        # new evidence and no extraction.
+        sourced_sql = (
+            "select count(*) from public.claim c join public.source_record sr"
+            " on sr.id = c.source_record_id where c.entity_id = %s"
+            " and sr.connector_id not like 'derived:%%'"
+        )
+        sourced_before = await db.one(sourced_sql, (entity,))
+        calls_before = len(gateway.calls)
+        v2_config = {
+            "hypothesis": "Utilities that run drone programmes",
+            "predicates": [
+                *P3_COLUMNS,
+                {
+                    "key": "programme_text",
+                    "label": "Programme",
+                    "value_type": "text",
+                    "fill_method": "formula",
+                    "formula": 'if(drone_programme, "runs drones", "no drones")',
+                    "inputs": ["drone_programme"],
+                    "role": "info",
+                },
+            ],
+            "evidence_rules": FLYTBASE["evidence_rules"],
+        }
+        v2 = await db.one(
+            "insert into public.brief_version"
+            " (brief_id, org_id, workspace_id, version, config, rubric, weights)"
+            " values (%s, %s, %s, 2, %s::jsonb, '{}', '{}'::jsonb) returning id",
+            (BRIEF_P3, ORG_P3, WS_P3, json.dumps(v2_config)),
+        )
+        await db.admin(
+            "update public.brief set current_version_id = %s where id = %s", (v2, BRIEF_P3)
+        )
+        programme_text = UUID(
+            str(
+                await db.one(
+                    "select id from public.predicate where workspace_id = %s"
+                    " and key = 'programme_text'",
+                    (WS_P3,),
+                )
+            )
+        )
+        assert await cell(programme_text) == ("queued", None)
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await cell(programme_text) == ("derived", '"runs drones"')
+        assert await db.one(sourced_sql, (entity,)) == sourced_before
+        assert "extraction" not in gateway.calls[calls_before:]
+
+        # I3 (R9): a run whose job the kill switch skipped stays queued with no job. After an
+        # hour it is abandoned: the next request closes it and queues a run that fills the cell.
+        select_sql = "select public.request_column_run(%s, %s, 'selected', %s, null, %s)"
+        switch.off.add("column.run")
+        assert await _as_p3_user(db, select_sql, (WS_P3, formula, BRIEF_P3, [entity])) == {
+            "queued": 1,
+            "cost_usd": 0,
+        }
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        stuck = await db.one(
+            "select id from public.predicate_run where entity_id = %s and predicate_id = %s"
+            " and status = 'queued'",
+            (entity, formula),
+        )
+        assert stuck is not None
+        assert await _as_p3_user(db, select_sql, (WS_P3, formula, BRIEF_P3, [entity])) == {
+            "queued": 0,
+            "cost_usd": 0,
+        }
+        await db.admin(
+            "update public.predicate_run set queued_at = now() - interval '2 hours' where id = %s",
+            (stuck,),
+        )
+        switch.off.clear()
+        assert await _as_p3_user(db, select_sql, (WS_P3, formula, BRIEF_P3, [entity])) == {
+            "queued": 1,
+            "cost_usd": 0,
+        }
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        status = await db.admin(
+            "select status, error from public.predicate_run where id = %s", (stuck,)
+        )
+        assert status[0] == ("error", "abandoned")
+        runs = await db.admin(runs_sql, (entity, formula))
+        assert runs[-1][0] == "succeeded"
+        assert (await cell(formula))[0] == "derived"

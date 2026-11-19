@@ -9,9 +9,15 @@ is finished, or running elsewhere right now, does nothing.
 A formula's claim and its succeeded status are written in one statement (app.complete_formula_run).
 A finish that fails is tried again, then recorded as an error. If even that cannot be written, the
 job raises and the run stays running: the job's retry comes after 16 minutes (worker app), when
-app.start_run takes a run running for more than 15 minutes back and runs it again. A request or
-auto-run that targets such an abandoned cell closes the old run (error 'abandoned') and queues a
-new one, so a cell is never blocked for good, even when the worker died and no retry comes.
+app.start_run takes a run running for more than 15 minutes back and runs it again. A run is
+abandoned when it has been running for more than 15 minutes, or queued for more than 1 hour (its
+job was skipped by the kill switch, or gave up before starting it). A request, auto-run or publish
+that targets an abandoned cell closes the old run (error 'abandoned') and queues a new one, so a
+cell is never blocked for good, even when the worker died and no retry comes.
+
+A formula's claim is dated and weighted by its inputs (app.write_formula_claim: the newest
+observed_at and the lowest confidence of the input claims the run used), and it is not evidence:
+the verdict and the account card never read it, and scoring leaves it out of corroboration.
 
   * Run condition: when the column has one, the entity must match it (app.entity_matches, which
     compiles it with app.filter_where); otherwise the run ends condition_not_met.

@@ -28,8 +28,10 @@ from signal_core.scoring_core import ScoreInputs, score_account
 
 log = get_logger(__name__)
 
-# id, predicate key, value, confidence, observed_at, half-life (days), connector that found it
-_CLAIMS_SQL = """
+# id, predicate key, value, confidence, observed_at, half-life (days), connector that found it.
+# Derived (formula) claims are included: they count for fit, scale, timing and labels; scoring_core
+# leaves them out of corroboration by their connector (derived:...).
+CLAIMS_SQL = """
     SELECT c.id, p.key, c.value, c.confidence, c.observed_at, p.decay_half_life_days,
            sr.connector_id
       FROM public.claim c
@@ -68,7 +70,7 @@ async def compute_score(
             return None
         account_id = UUID(str(account_row[0]))
 
-        await cur.execute(_CLAIMS_SQL, (str(entity_id),))
+        await cur.execute(CLAIMS_SQL, (str(entity_id),))
         claims = await cur.fetchall()
 
         await cur.execute(

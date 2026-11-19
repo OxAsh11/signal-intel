@@ -14,6 +14,9 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, ValidationError, field_validator, model_validator
 
 from signal_core.formula import FormulaSyntaxError, parse, references
+from signal_core.logging import get_logger
+
+log = get_logger(__name__)
 
 ROLES: tuple[str, ...] = (
     "signal",
@@ -373,14 +376,21 @@ def _items(config: dict[str, Any], name: str) -> list[Any]:
 
 
 def column_specs(config: dict[str, Any]) -> list[ColumnSpec]:
-    """The config's valid column specs. Legacy key strings and invalid items are ignored."""
+    """The config's valid column specs. Legacy key strings are ignored; an invalid spec (one SQL
+    accepted but Python refuses, such as a formula that does not parse) is dropped and logged as
+    brief_columns.spec_dropped, so a column that silently stops counting can be traced."""
     out: list[ColumnSpec] = []
     for raw in _items(config, "predicates"):
         if isinstance(raw, dict):
             try:
                 out.append(ColumnSpec.model_validate(raw))
-            except ValidationError:
-                continue
+            except ValidationError as exc:
+                errors = exc.errors()
+                log.warning(
+                    "brief_columns.spec_dropped",
+                    key=str(raw.get("key")),
+                    reason=str(errors[0]["msg"]) if errors else str(exc),
+                )
     return out
 
 

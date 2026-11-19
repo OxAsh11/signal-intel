@@ -57,6 +57,8 @@ account_card_generate_job: Any | None = None
 
 # Claims that count towards a verdict: active and not past their expiry. Each row is
 # (id, key, value, quote, confidence, observed_at, record url, record id).
+# The evidence a verdict weighs. A formula's derived claim (source record derived:...) restates
+# other claims and carries no quote, so it never reaches the rubric or the judge.
 LIVE_CLAIMS_SQL = """
     SELECT c.id, p.key, c.value, c.quote, c.confidence, c.observed_at, sr.url, sr.id
       FROM public.claim c
@@ -65,6 +67,7 @@ LIVE_CLAIMS_SQL = """
      WHERE c.entity_id = %s
        AND c.status = 'active'
        AND (c.expires_at IS NULL OR c.expires_at > now())
+       AND sr.connector_id NOT LIKE 'derived:%%'
      ORDER BY c.observed_at DESC, c.id
 """
 

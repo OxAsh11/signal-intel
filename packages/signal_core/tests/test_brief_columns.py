@@ -155,6 +155,28 @@ def test_column_specs_ignores_legacy_and_invalid() -> None:
     assert [s.key for s in column_specs(cfg)] == ["drone_programme"]
 
 
+def test_column_specs_logs_each_dropped_spec() -> None:
+    import structlog.testing
+
+    preds, _ = _fx()
+    bad_formula = {
+        "key": "broken",
+        "label": "Broken",
+        "value_type": "boolean",
+        "fill_method": "formula",
+        "formula": "drone_programme and (",
+        "inputs": ["drone_programme"],
+        "role": "info",
+    }
+    cfg = {"predicates": ["vertical", preds[0], {"key": "X"}, bad_formula]}
+    with structlog.testing.capture_logs() as logs:
+        assert [s.key for s in column_specs(cfg)] == ["drone_programme"]
+    dropped = [e for e in logs if e["event"] == "brief_columns.spec_dropped"]
+    assert [e["key"] for e in dropped] == ["X", "broken"]
+    assert all(isinstance(e["reason"], str) and e["reason"] for e in dropped)
+    assert "formula" in dropped[1]["reason"].lower()
+
+
 def test_evidence_rules_reads_config() -> None:
     preds, rules = _fx()
     cfg = {"predicates": preds, "evidence_rules": [*rules, {"predicate": "ghost", "op": "present"}]}

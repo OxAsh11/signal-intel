@@ -1472,6 +1472,31 @@ def build_app(
         if row and row[0]:
             log.info("column_run.auto_queued", claim_id=str(claim_id), runs=len(row[0]))
 
+    async def _queue_merged_formula_runs(winner: str) -> None:
+        """A merge can leave the winner two derived claims for one formula cell: its formula
+        columns re-run, and the re-run keeps one (app.write_formula_claim). Like the auto-run,
+        app.queue_entity_formula_runs commits the runs with a column.run_requested event."""
+        try:
+            entity_id = UUID(winner)
+        except ValueError:
+            log.warning("dispatch.malformed_merge", winner=winner)
+            return
+        row = await _fetch_one("select app.queue_entity_formula_runs(%s)", (entity_id,))
+        if row and row[0]:
+            log.info("column_run.merge_queued", entity_id=winner, runs=len(row[0]))
+
+    async def _is_derived_claim(payload: dict[str, Any]) -> bool:
+        """Was the claim written by a formula (its source record is derived:…)?"""
+        record = payload.get("source_record_id")
+        if not isinstance(record, str) or not _is_uuid(record):
+            return False
+        row = await _fetch_one(
+            "select exists (select 1 from public.source_record"
+            " where id = %s and connector_id like 'derived:%%')",
+            (record,),
+        )
+        return row is not None and row[0] is True
+
     async def _advance_stage(
         account_id: str, kind: str, activity_id: str | None, org_id: str, workspace_id: str
     ) -> None:
@@ -1502,9 +1527,15 @@ def build_app(
                     "dispatch.missing_entity", event_type=evt, event_id=event.get("event_id")
                 )
                 return
-            await _recompute_verdicts(str(entity_id), org_id)
-            if evt == "claim.created":
-                await _queue_auto_runs(event)
+            if evt == "entity.merged":
+                await _recompute_verdicts(str(entity_id), org_id)
+                await _queue_merged_formula_runs(str(entity_id))
+                return
+            # A formula's derived claim restates evidence the verdict has already judged: it
+            # re-runs the formulas reading its column, but never re-judges (and never loops).
+            if not await _is_derived_claim(payload):
+                await _recompute_verdicts(str(entity_id), org_id)
+            await _queue_auto_runs(event)
             return
         if not workspace_id:
             return

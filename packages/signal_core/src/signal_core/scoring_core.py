@@ -87,6 +87,15 @@ def settings(
     return weights, thresholds, roles
 
 
+# The connector of the source record a formula's claims are written against (0039).
+DERIVED_CONNECTOR_PREFIX = "derived:"
+
+
+def is_derived(claim: tuple[Any, ...]) -> bool:
+    """Was this claim (a ScoreInputs row) computed by a formula rather than found in a source?"""
+    return len(claim) > 6 and str(claim[6] or "").startswith(DERIVED_CONNECTOR_PREFIX)
+
+
 def _band_from_priority(priority: float, thresholds: dict[str, float]) -> str:
     if priority >= thresholds.get("High", DEFAULT_THRESHOLDS["High"]):
         return "High"
@@ -225,9 +234,12 @@ def score_account(
             icp_miss = key
     fit_score = round(fit_total / fit_weight) if fit_weight > 0 else 50
 
-    # Evidence: the verdict, plus a small bonus for the weight of corroborating claims.
+    # Evidence: the verdict, plus a small bonus for the weight of corroborating claims. A formula's
+    # derived claim restates other claims, so it never corroborates (it still counts for fit,
+    # scale, timing and labels below).
     evidence_base = VERDICT_EVIDENCE_SCORE.get(inputs.verdict, 10)
-    corroboration = sum(w for _, w in decayed) if len(claims) > 1 else 0.0
+    sourced = [(c, w) for c, w in decayed if not is_derived(c)]
+    corroboration = sum(w for _, w in sourced) if len(sourced) > 1 else 0.0
     evidence_score = min(evidence_base + round(corroboration * 2), 100)
 
     # Scale: numeric values of scale-role predicates, log-scaled.
@@ -288,7 +300,7 @@ def score_account(
             "matched": matched,
             "missed": missed,
         },
-        "evidence": {"score": evidence_score, "verdict": inputs.verdict, "claims": len(claims)},
+        "evidence": {"score": evidence_score, "verdict": inputs.verdict, "claims": len(sourced)},
         "scale": {"score": scale_score, "claim_ids": [str(c[0]) for c in qty_claims]},
         "timing": {"score": timing_score, "claim_ids": [str(c[0]) for c in recent]},
         "reachability": {
