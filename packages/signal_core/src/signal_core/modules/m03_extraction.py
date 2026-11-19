@@ -715,6 +715,7 @@ async def queue_predicate_backfill(
                 predicate_keys=sorted_keys,
                 org_id=str(org_id),
                 workspace_id=str(workspace_id),
+                brief_id=str(brief_id),
             )
     log.info(
         "extraction.backfill_queued",

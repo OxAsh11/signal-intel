@@ -40,7 +40,8 @@ ICP_LIST_BY_ROLE: dict[str, str] = {
 MAX_COLUMNS = 12
 MAX_RULES = 10
 
-_KEY_RE = re.compile(r"^[a-z][a-z0-9_]{1,39}$")
+# Always fullmatch: with match, "^...$" lets a key with a trailing newline through.
+_KEY_RE = re.compile(r"[a-z][a-z0-9_]{1,39}")
 
 ValueType = Literal["boolean", "number", "enum", "text", "date"]
 Role = Literal[
@@ -78,7 +79,7 @@ class ColumnSpec(BaseModel):
     @field_validator("key", mode="before")
     @classmethod
     def _key(cls, v: object) -> str:
-        if not isinstance(v, str) or not _KEY_RE.match(v):
+        if not isinstance(v, str) or not _KEY_RE.fullmatch(v):
             raise ValueError(
                 "key must be 2-40 lowercase letters, digits or underscores, starting with a letter"
             )
@@ -173,9 +174,15 @@ def _rule_problem(rule: EvidenceRule, spec: ColumnSpec | None) -> str | None:
 
 
 def clean_columns(
-    raw_predicates: list[Any], raw_rules: list[Any]
+    raw_predicates: list[Any],
+    raw_rules: list[Any],
+    existing_types: dict[str, str] | None = None,
 ) -> tuple[list[ColumnSpec], list[EvidenceRule], list[str]]:
-    """Valid specs, valid rules, and the reasons anything was dropped. First duplicate wins."""
+    """Valid specs, valid rules, and the reasons anything was dropped. First duplicate wins.
+
+    *existing_types* maps the workspace's predicate keys to their value_type: a column whose key
+    exists there with another type drops (publishing it would fail), and so do its rules."""
+    existing_types = existing_types or {}
     specs: list[ColumnSpec] = []
     rules: list[EvidenceRule] = []
     dropped: list[str] = []
@@ -189,7 +196,13 @@ def clean_columns(
         except ValidationError as exc:
             dropped.append(f'column "{raw.get("key", "")}": {_first_error(exc)}')
             continue
-        if spec.key in seen:
+        held = existing_types.get(spec.key)
+        if held is not None and held != spec.value_type:
+            dropped.append(
+                f'column "{spec.key}" already exists in this workspace as {held};'
+                " give it another key"
+            )
+        elif spec.key in seen:
             dropped.append(f'column "{spec.key}": key is used twice')
         elif len(specs) >= MAX_COLUMNS:
             dropped.append(f'column "{spec.key}": a Brief has at most {MAX_COLUMNS} columns')

@@ -65,7 +65,7 @@ LIVE_CLAIMS_SQL = """
      WHERE c.entity_id = %s
        AND c.status = 'active'
        AND (c.expires_at IS NULL OR c.expires_at > now())
-     ORDER BY c.observed_at DESC
+     ORDER BY c.observed_at DESC, c.id
 """
 
 
@@ -77,9 +77,12 @@ class VerdictOutput(BaseModel):
 
 
 class OpenVerdictOutput(BaseModel):
-    """Verdict v3, for a case the rubric left open: only the rules can confirm."""
+    """Verdict v3, for a case the rubric left open: only the rules can confirm.
 
-    value: Literal["Likely", "Unverified", "Contradicted"]
+    "Confirmed" is parsed (a paid answer is not thrown away and retried) and demoted to Likely
+    in code."""
+
+    value: Literal["Confirmed", "Likely", "Unverified", "Contradicted"]
     reasoning: str
     supporting_claim_indices: list[int]
     conflicting_claim_indices: list[int] = []
@@ -336,12 +339,20 @@ async def _judge_open(
         ctx,
     )
     out: OpenVerdictOutput = result.value
+    value = out.value
+    if value == "Confirmed":
+        log.warning(
+            "verdict.open_confirmed_demoted",
+            entity_id=str(entity_id),
+            brief_version_id=str(brief.brief_version_id),
+        )
+        value = "Likely"
     return await _store(
         pool,
         brief,
         entity_id,
         claims,
-        out.value,
+        value,
         _pick(claims, out.supporting_claim_indices),
         {
             "method": "rubric_ai",

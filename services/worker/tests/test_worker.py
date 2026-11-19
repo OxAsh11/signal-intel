@@ -1007,6 +1007,46 @@ async def test_dispatch_backfill_event() -> None:
         "predicate_keys": ["industry", "site_count"],
         "org_id": org_id,
         "workspace_id": workspace_id,
+        "brief_id": brief_id,
     }
     (scope_args,) = [a for sql, a in seen if "r.brief_id = %s" in sql.lower()]
     assert scope_args[:2] == (workspace_id, brief_id)
+
+
+async def test_backfill_record_job_charges_the_brief(monkeypatch: Any) -> None:
+    """I5: the backfill's AI spend is metered against the Brief that asked for it."""
+    import signal_core.modules.m03_extraction as m03
+
+    seen: list[Any] = []
+
+    async def _fake_backfill(pool: Any, gateway: Any, record: Any, keys: Any, ctx: Any) -> int:
+        seen.append(ctx)
+        return 0
+
+    monkeypatch.setattr(m03, "backfill_record", _fake_backfill)
+    brief_id, workspace_id, org_id, record_id = (str(uuid4()) for _ in range(4))
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        gateway=object(),  # type: ignore[arg-type]
+        pool=_RowsPool([]),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await app.tasks["extract.backfill_record"].defer_async(
+            source_record_id=record_id,
+            predicate_keys=["site_count"],
+            org_id=org_id,
+            workspace_id=workspace_id,
+            brief_id=brief_id,
+        )
+        await app.run_worker_async(queues=["extract"], wait=False, install_signal_handlers=False)
+
+    assert [j["status"] for j in _jobs(connector, "extract.backfill_record")] == ["succeeded"]
+    (ctx,) = seen
+    assert str(ctx.brief_id) == brief_id
+    assert ctx.job_args["brief_id"] == brief_id

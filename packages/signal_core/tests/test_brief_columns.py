@@ -163,3 +163,27 @@ def test_constants() -> None:
     assert "signal" in ROLES
     assert len(ROLES) == 7
     assert OPS_BY_TYPE["date"] == ("present",)
+
+
+def test_key_with_trailing_newline_is_refused() -> None:
+    """M1: the key must match the whole string; "ab\n" is not a key."""
+    preds, _ = _fx()
+    preds[0]["key"] = "drone_programme\n"
+    specs, _, dropped = clean_columns(preds, [])
+    assert "drone_programme" not in [s.key for s in specs]
+    assert any("drone_programme" in d for d in dropped)
+
+
+def test_clean_drops_a_column_whose_key_exists_with_another_type() -> None:
+    """I1: a drafted column whose key the workspace holds as another type drops, with its rules."""
+    preds, rules = _fx()
+    specs, kept, dropped = clean_columns(
+        preds, rules, existing_types={"industry": "text", "site_count": "number"}
+    )
+    assert "industry" not in [s.key for s in specs]
+    assert "site_count" in [s.key for s in specs]
+    assert all(r.predicate != "industry" for r in kept)
+    assert any(
+        'column "industry" already exists in this workspace as text; give it another key' in d
+        for d in dropped
+    )

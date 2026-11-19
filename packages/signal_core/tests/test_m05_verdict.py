@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock
 from uuid import UUID, uuid4
 
 import pytest
+import structlog.testing
 from pydantic import BaseModel, ValidationError
 
 import signal_core.modules.m05_verdict as m05
@@ -204,18 +205,25 @@ async def test_open_case_calls_verdict_v3_with_the_rules(
 async def test_open_verdict_can_never_be_confirmed(
     monkeypatch: pytest.MonkeyPatch, upsert: AsyncMock
 ) -> None:
-    with pytest.raises(ValidationError):
-        m05.OpenVerdictOutput.model_validate(
-            {"value": "Confirmed", "reasoning": "r", "supporting_claim_indices": []}
-        )
+    """R4: verdict v3 answering Confirmed is demoted to Likely in code, never stored as Confirmed
+    and never a failed job (no paid retries, later Briefs still judged)."""
     _use(monkeypatch, _brief(RUBRIC_CONFIG))
     confirmed = {"value": "Confirmed", "reasoning": "r", "supporting_claim_indices": [0]}
     gateway = RecordingGateway({"verdict/v3": confirmed})
-    with pytest.raises(AiOutputInvalid):  # re-raised, so the job retries
-        await m05.compute_verdict(  # type: ignore[arg-type]
+    with structlog.testing.capture_logs() as logs:
+        value = await m05.compute_verdict(  # type: ignore[arg-type]
             _pool([_claim("drone_programme", False)]), gateway, uuid4(), uuid4(), _ctx()
         )
-    upsert.assert_not_called()
+    assert value == "Likely"
+    assert gateway.names == ["verdict/v3"]
+    assert upsert.call_args.args[3] == "Likely"
+    assert [e["event"] for e in logs].count("verdict.open_confirmed_demoted") == 1
+
+
+def test_live_claims_order_has_a_tiebreak() -> None:
+    """M5: claims observed at the same moment come back in a stable order."""
+    sql = " ".join(m05.LIVE_CLAIMS_SQL.split())
+    assert "ORDER BY c.observed_at DESC, c.id" in sql
 
 
 async def test_legacy_brief_keeps_verdict_v2_and_stores_the_reasoning(

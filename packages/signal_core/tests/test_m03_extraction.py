@@ -1149,6 +1149,7 @@ async def test_queue_backfill_scope_and_cap(
         "predicate_keys": ["a_key", "site_count"],
         "org_id": str(ORG_ID),
         "workspace_id": str(WORKSPACE_ID),
+        "brief_id": str(brief_id),
     }
 
     monkeypatch.setattr(_m03_extraction, "BACKFILL_CAP", 1)

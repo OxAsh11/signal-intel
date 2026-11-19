@@ -60,10 +60,12 @@ class BriefDraft(BaseModel):
     personas: BriefPersonas = Field(default_factory=BriefPersonas)
     # Lenient on purpose: one bad column or rule must not fail the whole draft. The intake run
     # cleans them with signal_core.brief_columns.clean_columns.
-    name: str = ""
+    # The name and assumptions are cleaned there too: a null name or a non-string assumption
+    # drops only itself.
+    name: str | None = ""
     predicates: list[JsonValue] = []
     evidence_rules: list[JsonValue] = []
-    assumptions: list[str] = []
+    assumptions: list[JsonValue] = []
 
 
 OUTPUT_MODELS: dict[str, type[BaseModel]] = {

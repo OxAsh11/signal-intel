@@ -48,6 +48,7 @@ class _MockConn:
         self.calls: list[str] = []
         self.args: list[tuple[str, tuple[str, ...]]] = []  # (fn_name, args)
         self.existing: list[tuple[str, str, str]] = []
+        self.sqls: list[str] = []
 
     async def execute(self, sql: str, args: tuple[str, ...] = ()) -> None:
         m = re.search(r"app\.\w+", sql)
@@ -69,6 +70,7 @@ class _MockCursor:
 
     async def execute(self, sql: str, args: object = None) -> None:
         self._conn.calls.append("cursor")
+        self._conn.sqls.append(sql)
 
     async def fetchall(self) -> list[tuple[str, str, str]]:
         return self._conn.existing
@@ -273,3 +275,50 @@ def test_brief_draft_columns_default_empty_and_stay_lenient() -> None:
     assert draft.assumptions == []
     lenient = BriefDraft.model_validate({**_VALID_RAW, "predicates": [3, "x", {"key": 1}]})
     assert len(lenient.predicates) == 3
+
+
+async def test_intake_drops_a_column_whose_key_exists_with_another_type() -> None:
+    """I1: the workspace holds "industry" as text; the drafted enum and its rules drop."""
+    pool = MockPool()
+    pool.conn.existing = [("industry", "Industry", "text")]
+    raw = {
+        **_COLUMNS_RAW,
+        "evidence_rules": [
+            *_COLUMNS_RAW["evidence_rules"],  # type: ignore[misc]
+            {"predicate": "industry", "kind": "disqualifies", "op": "one_of", "value": ["mining"]},
+        ],
+    }
+    with structlog.testing.capture_logs() as logs:
+        await run_brief_intake(_make_inp(), _RawGateway(raw), pool)  # type: ignore[arg-type]
+    ((_, saved),) = pool.args_for("app.save_brief_draft")
+    config = json.loads(saved)
+    assert [p["key"] for p in config["predicates"]] == ["drone_programme"]
+    assert [r["predicate"] for r in config["evidence_rules"]] == ["drone_programme"]
+    reasons = [e["reason"] for e in logs if e["event"] == "brief_intake.column_dropped"]
+    assert any(
+        'column "industry" already exists in this workspace as text; give it another key' in r
+        for r in reasons
+    )
+
+
+async def test_intake_tolerates_a_null_name_and_odd_assumptions() -> None:
+    """M2: a null name means no rename; only non-empty string assumptions are kept, at most 5."""
+    raw = {
+        **_COLUMNS_RAW,
+        "name": None,
+        "assumptions": ["a", 3, "", "  ", None, "b", "c", "d", "e", "f"],
+    }
+    pool = MockPool()
+    await run_brief_intake(_make_inp(), _RawGateway(raw), pool)  # type: ignore[arg-type]
+    ((_, saved),) = pool.args_for("app.save_brief_draft")
+    assert json.loads(saved)["assumptions"] == ["a", "b", "c", "d", "e"]
+    assert pool.args_for("app.apply_drafted_name") == []
+
+
+async def test_intake_shows_the_ai_only_workspace_predicates() -> None:
+    """M7: global predicates (workspace_id is null) are not offered to the intake AI."""
+    pool = MockPool()
+    await run_brief_intake(_make_inp(), _RawGateway(_COLUMNS_RAW), pool)  # type: ignore[arg-type]
+    (sql,) = [s for s in pool.conn.sqls if "public.predicate" in s]
+    assert "IS NULL" not in sql.upper()
+    assert "workspace_id = %s" in sql

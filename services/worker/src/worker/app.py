@@ -746,17 +746,24 @@ def build_app(
         predicate_keys: list[str],
         org_id: str,
         workspace_id: str,
+        brief_id: str | None = None,
         **_: Any,
     ) -> int:
-        """Fill a Brief's new columns over one already extracted record (P2)."""
+        """Fill a Brief's new columns over one already extracted record (P2).
+
+        The AI spend is metered against the Brief that asked for the backfill (its budget)."""
         assert pool is not None and gateway is not None, "pool and gateway required"
         ctx = CallContext(
             org_id=UUID(org_id),
             workspace_id=UUID(workspace_id),
-            brief_id=None,
+            brief_id=UUID(brief_id) if brief_id else None,
             job_id=None,
             job_type="extract.backfill",
-            job_args={"source_record_id": source_record_id, "predicate_keys": predicate_keys},
+            job_args={
+                "source_record_id": source_record_id,
+                "predicate_keys": predicate_keys,
+                "brief_id": brief_id,
+            },
         )
         return await _m03_extraction.backfill_record(
             pool, gateway, UUID(source_record_id), predicate_keys, ctx
