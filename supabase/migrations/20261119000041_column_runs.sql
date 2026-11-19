@@ -132,8 +132,10 @@ $$;
 
 -- ── 5. Which cells a request covers ──────────────────────────────────────────
 -- The company entities with an account in the workspace that pass the filter (app.filter_where)
--- and the mode, minus any with a queued or running run for the column, in view order (name,
--- then id). Modes: empty (state empty or no_data), stale, errored, selected (the given ids).
+-- and the mode, minus any with an open run for the column, in view order (name, then id). Open
+-- means queued, or running for at most 15 minutes: a run running longer was abandoned by its
+-- worker, and the request that targets its cell closes it (status error, 'abandoned') first.
+-- Modes: empty (state empty or no_data), stale, errored, selected (the given ids).
 create function app.column_run_targets(p_ws uuid, p_predicate uuid, p_mode text, p_brief uuid, p_filter jsonb,
                                        p_entity_ids uuid[])
 returns table (entity_id uuid)
@@ -169,7 +171,8 @@ begin
     ' where a.workspace_id = $1 and e.org_id = $2 and e.entity_type = ''company'' and e.status = ''active'''
     ' and %s and %s'
     ' and not exists (select 1 from public.predicate_run pr where pr.entity_id = e.id and pr.predicate_id = $3'
-    ' and pr.status in (''queued'', ''running''))'
+    ' and (pr.status = ''queued'' or (pr.status = ''running'''
+    ' and coalesce(pr.started_at, now()) >= now() - interval ''15 minutes'')))'
     ' order by lower(e.display_name), e.id', v_where, v_mode)
     using p_ws, v_org, p_predicate;
 end $$;
@@ -262,6 +265,12 @@ begin
       app.usd_text(v_cost), app.usd_text(v_left), v_n using errcode = '55000';
   end if;
 
+  -- Runs abandoned by their worker (running for more than 15 minutes) no longer block their cells.
+  update public.predicate_run
+     set status = 'error', finished_at = now(), error = 'abandoned'
+   where predicate_id = p.id and entity_id = any(v_ids)
+     and status = 'running' and started_at < now() - interval '15 minutes';
+
   if p_brief is not null then
     select current_version_id into v_bv from public.brief where id = p_brief and workspace_id = p_ws;
   end if;
@@ -285,7 +294,8 @@ end $$;
 -- ── 8. Auto-run (service role) ───────────────────────────────────────────────
 -- For an active claim: each formula column with auto_run that reads the claim's column queues one
 -- run on the claim's entity, when that entity has an account in the column's workspace and no run
--- is already queued or running. The new runs are announced as column.run_requested {run_ids} (one
+-- is already queued or running (a run running for more than 15 minutes was abandoned by its worker:
+-- it is closed as error 'abandoned' first). The new runs are announced as column.run_requested {run_ids} (one
 -- event per workspace) in the same transaction, so a job is deferred for every committed run even
 -- if the caller dies. Returns the new run ids.
 create function app.queue_auto_runs(p_claim uuid) returns uuid[]
@@ -296,6 +306,15 @@ declare
   v_new  jsonb;
   w      record;
 begin
+  -- Runs abandoned by their worker (running for more than 15 minutes) no longer block the cells.
+  update public.predicate_run r
+     set status = 'error', finished_at = now(), error = 'abandoned'
+    from public.claim c
+    join public.predicate f on f.fill_method = 'formula' and f.auto_run and c.predicate_id = any(f.input_predicate_ids)
+   where c.id = p_claim and c.status = 'active'
+     and r.entity_id = c.entity_id and r.predicate_id = f.id
+     and r.status = 'running' and r.started_at < now() - interval '15 minutes';
+
   with ins as (
     insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version)
     select f.org_id, f.workspace_id, c.entity_id, f.id, f.version

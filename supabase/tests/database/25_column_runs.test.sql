@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(79);
+select plan(87);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -420,6 +420,47 @@ select is(public.request_column_run((select v from ids where k = 'ws'), (select 
 reset role;
 select is((select count(*)::int from public.predicate_run where entity_id = (select v from ids where k = 'eb')), 0,
   '59h. no run exists for it');
+
+-- ── Abandoned runs (running for more than 15 minutes) never block a cell ─────
+insert into ids select 'e_old', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Abandoned', 'tenant');
+insert into ids select 'e_new', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Busy', 'tenant');
+insert into ids select 'e_auto', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Auto Abandoned', 'tenant');
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v from ids where k in ('e_old', 'e_new', 'e_auto');
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, started_at)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = e),
+       (select v from ids where k = 'f'), 1, 'running', now() - interval '1 hour', now() - m * interval '1 minute'
+  from (values ('e_old', 20), ('e_new', 5), ('e_auto', 20)) x(e, m);
+insert into ids select 'r_old', id from public.predicate_run where entity_id = (select v from ids where k = 'e_old');
+insert into ids select 'r_new', id from public.predicate_run where entity_id = (select v from ids where k = 'e_new');
+insert into ids select 'r_auto', id from public.predicate_run where entity_id = (select v from ids where k = 'e_auto');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a2","role":"authenticated"}', true);
+select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
+            array[(select v from ids where k = 'e_old'), (select v from ids where k = 'e_new')]) ->> 'count', '1',
+  '61. a cell whose run has been running for 20 minutes is counted; one running for 5 minutes is not');
+select is(public.request_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
+            array[(select v from ids where k = 'e_old'), (select v from ids where k = 'e_new')]),
+  '{"queued": 1, "cost_usd": 0}'::jsonb, '62. the request queues the abandoned cell');
+reset role;
+select is((select status || '|' || error || '|' || (finished_at is not null)::text from public.predicate_run
+            where id = (select v from ids where k = 'r_old')),
+  'error|abandoned|true', '63. the abandoned run is closed as error, abandoned');
+insert into ids select 'r_old2', id from public.predicate_run
+ where entity_id = (select v from ids where k = 'e_old') and status = 'queued';
+select ok((select v from ids where k = 'r_old2') is not null, '64. a new queued run exists for that cell');
+select ok(exists (select 1 from public.outbox where event = 'column.run_requested'
+                   and payload -> 'run_ids' @> jsonb_build_array((select v from ids where k = 'r_old2'))),
+  '65. a column.run_requested event carries the new run');
+select is((select string_agg(status, ',') from public.predicate_run where entity_id = (select v from ids where k = 'e_new')),
+  'running', '66. the run running for 5 minutes is untouched and gets no second run');
+insert into ids select 'c_auto', app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e_auto'),
+  (select v from ids where k = 'dp'), 'true'::jsonb, 'drones', null, null, (select v from ids where k = 's1'), now(),
+  (select id from public.extractor_version where capability = 'extract.cr25'), 80::smallint);
+select is(cardinality(app.queue_auto_runs((select v from ids where k = 'c_auto'))), 1,
+  '67. an auto-run on a cell with an abandoned run queues a new run');
+select is((select status || '|' || error from public.predicate_run where id = (select v from ids where k = 'r_auto')),
+  'error|abandoned', '68. ... after closing the abandoned one');
 
 -- ── Grants ───────────────────────────────────────────────────────────────────
 select ok(not has_function_privilege('authenticated', 'app.queue_auto_runs(uuid)', 'execute')

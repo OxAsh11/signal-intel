@@ -1288,3 +1288,13 @@ async def test_worker_start_survives_a_database_error() -> None:
             raise RuntimeError("no database")
 
     await record_ai_models(_Broken(), Settings())  # type: ignore[arg-type]
+
+
+def test_column_run_retries_late_enough_for_start_run_to_take_the_run_back(
+    app_fixture: Any,
+) -> None:
+    from worker.app import COLUMN_RUN_RETRY_SECONDS
+
+    strategy = app_fixture.tasks["column.run"].retry_strategy
+    assert strategy.max_attempts == 2
+    assert strategy.wait == COLUMN_RUN_RETRY_SECONDS > 15 * 60

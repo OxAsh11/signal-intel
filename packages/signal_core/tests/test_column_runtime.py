@@ -361,3 +361,21 @@ def test_statements_are_distinct() -> None:
         FINISH_SQL,
     ]
     assert len(set(names)) == len(names)
+
+
+async def test_a_run_finished_elsewhere_is_not_retried() -> None:
+    """SQLSTATE 55000 (the run is no longer running): no retries; finish_run reports its status."""
+    import psycopg.errors
+    import structlog.testing
+
+    pool = _pool(
+        _run(),
+        INPUTS_SQL=[("drone_programme", uuid4(), True), ("site_count", uuid4(), 3)],
+        COMPLETE_SQL=psycopg.errors.ObjectNotInPrerequisiteState("run is error"),
+        FINISH_SQL=[("error",)],
+    )
+    with structlog.testing.capture_logs() as logs:
+        assert await _execute(pool) == "error"
+    assert len(pool.sent(COMPLETE_SQL)) == 1
+    assert len(pool.sent(FINISH_SQL)) == 1
+    assert not [e for e in logs if e["event"] == "column_run.finish_failed"]

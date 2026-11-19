@@ -86,14 +86,18 @@ def job(
     kill_switch: KillSwitch,
     queue: str = "default",
     retry: int = 5,
+    retry_wait: int | None = None,
 ) -> Callable[[JobFn], Any]:
-    """Register a job type with Procrastinate behind its kill switch."""
+    """Register a job type with Procrastinate behind its kill switch.
+
+    Retries back off exponentially (2 s base), or wait a fixed *retry_wait* seconds when given."""
+    strategy = (
+        procrastinate.RetryStrategy(max_attempts=retry, wait=retry_wait)
+        if retry_wait is not None
+        else procrastinate.RetryStrategy(max_attempts=retry, exponential_wait=2)
+    )
 
     def decorator(fn: JobFn) -> Any:
-        return app.task(
-            name=type,
-            queue=queue,
-            retry=procrastinate.RetryStrategy(max_attempts=retry, exponential_wait=2),
-        )(guarded(type, kill_switch, fn))
+        return app.task(name=type, queue=queue, retry=strategy)(guarded(type, kill_switch, fn))
 
     return decorator

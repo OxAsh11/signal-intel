@@ -6,10 +6,12 @@ started_at, inputs_hash from app.run_inputs_hash), fills the cell and finishes i
 final status, finished_at and the run's cost from usage_ledger). A redelivered job for a run that
 is finished, or running elsewhere right now, does nothing.
 
-A run always reaches a final status: a formula's claim and its succeeded status are written in one
-statement (app.complete_formula_run); a finish that fails is tried again, then recorded as an
-error; if even that cannot be written, the job fails, Procrastinate retries it and the retry takes
-the run back once it has been running for 15 minutes.
+A formula's claim and its succeeded status are written in one statement (app.complete_formula_run).
+A finish that fails is tried again, then recorded as an error. If even that cannot be written, the
+job raises and the run stays running: the job's retry comes after 16 minutes (worker app), when
+app.start_run takes a run running for more than 15 minutes back and runs it again. A request or
+auto-run that targets such an abandoned cell closes the old run (error 'abandoned') and queues a
+new one, so a cell is never blocked for good, even when the worker died and no retry comes.
 
   * Run condition: when the column has one, the entity must match it (app.entity_matches, which
     compiles it with app.filter_where); otherwise the run ends condition_not_met.
@@ -123,12 +125,18 @@ async def execute_run(
 
 async def _finish(pool: AsyncConnectionPool, run_id: UUID, outcome: _Outcome) -> str:
     """Write the outcome; after FINISH_ATTEMPTS failures, record an error instead. If that fails
-    too the exception propagates: the job is retried and takes the run back after 15 minutes."""
+    too the exception propagates (the run stays running; see the module docstring).
+
+    SQLSTATE 55000 means the run is no longer running (finished, or closed as abandoned): no
+    retry; app.finish_run, a no-op on such a run, returns its status."""
     last: Exception | None = None
     for _ in range(FINISH_ATTEMPTS):
         try:
             return await _write_outcome(pool, run_id, outcome)
         except Exception as exc:
+            if getattr(exc, "sqlstate", None) == "55000":
+                log.info("column_run.already_finished", run_id=str(run_id))
+                return await _write_outcome(pool, run_id, _Outcome("error", error=str(exc)))
             last = exc
             log.warning("column_run.finish_failed", run_id=str(run_id), error=type(exc).__name__)
     fallback = _Outcome("error", error=f"the run's result could not be recorded: {last}")

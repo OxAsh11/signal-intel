@@ -92,6 +92,8 @@ DORMANCY_CRON = "30 4 * * *"  # daily, 04:30 UTC
 VERDICT_SAMPLE_CRON = "0 6 * * 1"  # weekly, Monday 06:00 UTC
 RADAR_REFETCH_HOURS = 24
 RESUME_BATCH = 50
+# column.run retries after 16 minutes: app.start_run takes back a run running for more than 15.
+COLUMN_RUN_RETRY_SECONDS = 16 * 60
 # Bands that earn a research document automatically (M6), when the verdict supports them.
 RESEARCH_BANDS = frozenset({"High"})
 # Stages in which an account should always have a next step (M12).
@@ -778,10 +780,20 @@ def build_app(
             pool, gateway, UUID(source_record_id), predicate_keys, ctx
         )
 
-    @job(app, type="column.run", kill_switch=kill_switch, queue="compute", retry=2)
+    @job(
+        app,
+        type="column.run",
+        kill_switch=kill_switch,
+        queue="compute",
+        retry=2,
+        retry_wait=COLUMN_RUN_RETRY_SECONDS,
+    )
     async def column_run_task(*, run_id: str, **_: Any) -> str:
-        """Fill one cell (P3). A run that is not queued any more is left alone, so a redelivered
-        job does nothing; a failure ends the run in error instead of raising (no retry)."""
+        """Fill one cell (P3). A finished run, or one another worker started less than 15 minutes
+        ago, is left alone, so a redelivered job does nothing. A failure while filling ends the run
+        in error and the job succeeds. Only when even the error cannot be recorded does the job
+        raise: its retry comes after COLUMN_RUN_RETRY_SECONDS, late enough for app.start_run to
+        take the abandoned run back."""
         assert pool is not None, "pool required for column.run"
         return await _column_runtime.execute_run(pool, gateway, UUID(run_id))
 
