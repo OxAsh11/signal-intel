@@ -10,7 +10,7 @@ loadEnvConfig(path.resolve(process.cwd(), '../..'), process.env.NODE_ENV !== 'pr
 const nextConfig: NextConfig = {
   cacheComponents: true,
   partialPrefetching: true,
-  transpilePackages: ['@signal/ui', '@signal/contracts'],
+  transpilePackages: ['@signal/ui', '@signal/contracts', '@signal/formula'],
   poweredByHeader: false,
   // CSV radar uploads go through a server action; the default 1 MB would refuse most lists.
   experimental: { serverActions: { bodySizeLimit: '11mb' } },

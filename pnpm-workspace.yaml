@@ -1,6 +1,7 @@
 packages:
   - "apps/*"
   - "packages/ui"
+  - "packages/formula"
   - "packages/contracts"
   - "packages/db-types"
   - "packages/config"
