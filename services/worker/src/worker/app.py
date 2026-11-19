@@ -1447,14 +1447,18 @@ def build_app(
             await _enqueue("column.run", f"run:{run_id}", run_id=run_id)
 
     async def _queue_auto_runs(event: dict[str, Any]) -> None:
-        """A new claim re-runs the formula columns that read its column (P3 auto-run)."""
+        """A new claim re-runs the formula columns that read its column (P3 auto-run).
+
+        app.queue_auto_runs commits the runs together with a column.run_requested event, whose
+        dispatch defers the jobs; nothing is deferred here, so a run is never left without one."""
         try:
             claim_id = UUID(str(event.get("aggregate_id")))
         except ValueError:
             log.warning("dispatch.malformed_claim", event_id=event.get("event_id"))
             return
         row = await _fetch_one("select app.queue_auto_runs(%s)", (claim_id,))
-        await _defer_runs([str(r) for r in (row[0] if row and row[0] else [])])
+        if row and row[0]:
+            log.info("column_run.auto_queued", claim_id=str(claim_id), runs=len(row[0]))
 
     async def _advance_stage(
         account_id: str, kind: str, activity_id: str | None, org_id: str, workspace_id: str

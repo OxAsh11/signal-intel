@@ -14,12 +14,12 @@ import pytest
 import signal_core.modules.m03_extraction as m03
 from signal_core.column_runtime import (
     ACTIVE_CLAIM_SQL,
+    COMPLETE_SQL,
     CONDITION_SQL,
     FINISH_SQL,
     INPUTS_SQL,
     RECORDS_SQL,
     START_SQL,
-    WRITE_SQL,
     execute_run,
 )
 from signal_core.metering import CallContext
@@ -96,7 +96,11 @@ def _finish(params: tuple[Any, ...]) -> list[tuple[Any, ...]]:
 
 
 def _pool(run: dict[str, Any] | None, **answers: Any) -> FakePool:
-    base: dict[str, Any] = {START_SQL: [(run,)], FINISH_SQL: _finish}
+    base: dict[str, Any] = {
+        START_SQL: [(run,)],
+        FINISH_SQL: _finish,
+        COMPLETE_SQL: [("succeeded",)],
+    }
     base.update({globals()[k]: v for k, v in answers.items()})
     return FakePool(base)
 
@@ -122,22 +126,16 @@ async def _execute(pool: FakePool, gateway: Any = None) -> str:
 
 
 async def test_formula_succeeds_and_writes_its_claim() -> None:
-    dp, sc, written = uuid4(), uuid4(), uuid4()
+    dp, sc = uuid4(), uuid4()
     pool = _pool(
         _run(),
         INPUTS_SQL=[("drone_programme", dp, True), ("site_count", sc, 40)],
-        WRITE_SQL=[(written,)],
     )
     assert await _execute(pool) == "succeeded"
     assert pool.sent(INPUTS_SQL) == [(RUN,)]
-    assert pool.sent(WRITE_SQL) == [(RUN, "true")]
-    assert _finished(pool) == {
-        "status": "succeeded",
-        "claim_id": written,
-        "inputs": sorted([str(dp), str(sc)]),
-        "not_run_reason": None,
-        "error": None,
-    }
+    # The claim and the succeeded status are written by one statement (one transaction).
+    assert pool.sent(COMPLETE_SQL) == [(RUN, "true", json.dumps(sorted([str(dp), str(sc)])))]
+    assert pool.sent(FINISH_SQL) == []
 
 
 async def test_formula_reads_system_values() -> None:
@@ -147,10 +145,9 @@ async def test_formula_reads_system_values() -> None:
             value_type="text",
             inputs=["drone_programme"],
         ),
-        WRITE_SQL=[(uuid4(),)],
     )
     assert await _execute(pool) == "succeeded"
-    assert pool.sent(WRITE_SQL) == [(RUN, json.dumps("Volt Grid / voltgrid.example"))]
+    assert [p[1] for p in pool.sent(COMPLETE_SQL)] == [json.dumps("Volt Grid / voltgrid.example")]
 
 
 async def test_formula_with_every_input_empty_is_no_data_and_writes_nothing() -> None:
@@ -164,7 +161,7 @@ async def test_formula_with_every_input_empty_is_no_data_and_writes_nothing() ->
         INPUTS_SQL=[],
     )
     assert await _execute(pool) == "no_data"
-    assert pool.sent(WRITE_SQL) == []
+    assert pool.sent(COMPLETE_SQL) == []
     assert _finished(pool) == {
         "status": "no_data",
         "claim_id": None,
@@ -180,7 +177,7 @@ async def test_formula_result_of_the_wrong_type_errors_with_the_exact_message() 
         INPUTS_SQL=[("site_count", uuid4(), 40)],
     )
     assert await _execute(pool) == "error"
-    assert pool.sent(WRITE_SQL) == []
+    assert pool.sent(COMPLETE_SQL) == []
     assert _finished(pool)["error"] == "formula returned number, column is boolean"
 
 
@@ -188,7 +185,7 @@ async def test_formula_reading_a_column_outside_its_inputs_errors() -> None:
     pool = _pool(_run(inputs=["drone_programme"]))
     assert await _execute(pool) == "error"
     assert pool.sent(INPUTS_SQL) == []
-    assert pool.sent(WRITE_SQL) == []
+    assert pool.sent(COMPLETE_SQL) == []
     assert _finished(pool)["error"] == 'formula reads "site_count", which is not one of its inputs'
 
 
@@ -207,10 +204,9 @@ async def test_condition_met_fills_the_cell() -> None:
         _run(run_condition=condition),
         CONDITION_SQL=[(True,)],
         INPUTS_SQL=[("drone_programme", uuid4(), True), ("site_count", uuid4(), 0)],
-        WRITE_SQL=[(uuid4(),)],
     )
     assert await _execute(pool) == "succeeded"
-    assert pool.sent(WRITE_SQL) == [(RUN, "false")]
+    assert [p[1] for p in pool.sent(COMPLETE_SQL)] == ["false"]
 
 
 # ── Extract ──────────────────────────────────────────────────────────────────
@@ -276,6 +272,53 @@ async def test_a_run_that_is_not_queued_is_left_alone(status: str) -> None:
     assert [s for s, _ in pool.calls] == [START_SQL]
 
 
+async def test_an_abandoned_running_run_taken_back_by_start_run_is_filled() -> None:
+    """start_run hands back a run left running for 15 minutes (reclaimed); the job fills it."""
+    pool = _pool(
+        _run(reclaimed=True),
+        INPUTS_SQL=[("drone_programme", uuid4(), True), ("site_count", uuid4(), 3)],
+    )
+    assert await _execute(pool) == "succeeded"
+    assert len(pool.sent(COMPLETE_SQL)) == 1
+
+
+# A formula that is null (no_data) while site_count has no value.
+_NO_DATA_RUN = _run(
+    fill_config={"formula": "site_count + 1"}, value_type="number", inputs=["site_count"]
+)
+
+
+async def test_a_finish_that_fails_once_is_tried_again() -> None:
+    attempts: list[int] = []
+
+    def flaky(params: tuple[Any, ...]) -> Any:
+        attempts.append(1)
+        return RuntimeError("connection reset") if len(attempts) == 1 else [(params[1],)]
+
+    pool = _pool(_NO_DATA_RUN, INPUTS_SQL=[], FINISH_SQL=flaky)
+    assert await _execute(pool) == "no_data"
+    assert [p[1] for p in pool.sent(FINISH_SQL)] == ["no_data", "no_data"]
+
+
+async def test_a_formula_result_that_cannot_be_written_ends_the_run_in_error() -> None:
+    pool = _pool(
+        _run(),
+        INPUTS_SQL=[("drone_programme", uuid4(), True), ("site_count", uuid4(), 3)],
+        COMPLETE_SQL=RuntimeError("deadlock detected"),
+    )
+    assert await _execute(pool) == "error"
+    assert len(pool.sent(COMPLETE_SQL)) == 3
+    assert _finished(pool)["error"] == "the run's result could not be recorded: deadlock detected"
+
+
+async def test_when_no_outcome_can_be_written_the_job_fails_for_a_retry() -> None:
+    """The run stays running; the retried job takes it back after 15 minutes (start_run)."""
+    pool = _pool(_NO_DATA_RUN, INPUTS_SQL=[], FINISH_SQL=RuntimeError("database gone"))
+    with pytest.raises(RuntimeError, match="database gone"):
+        await _execute(pool)
+    assert len(pool.sent(FINISH_SQL)) == 4  # three tries, then the error record
+
+
 async def test_a_missing_run_is_left_alone() -> None:
     pool = _pool({"started": False, "status": None})
     assert await _execute(pool) == "missing"
@@ -312,7 +355,7 @@ def test_statements_are_distinct() -> None:
         START_SQL,
         CONDITION_SQL,
         INPUTS_SQL,
-        WRITE_SQL,
+        COMPLETE_SQL,
         RECORDS_SQL,
         ACTIVE_CLAIM_SQL,
         FINISH_SQL,

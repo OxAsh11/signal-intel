@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(60);
+select plan(79);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -98,7 +98,7 @@ select is((select string_agg(app.cell_state(v, (select v from ids where k = 'sc'
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a3","role":"authenticated"}', true);
 select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'sc'), 'empty'),
-  '{"count": 8, "per_entity_usd": 0.01, "cost_usd": 0.08, "remaining_usd": null, "within_budget": 8}'::jsonb,
+  '{"count": 8, "per_entity_usd": 0.01, "cost_usd": 0.08, "remaining_usd": null, "within_budget": 8, "max_per_request": 1000}'::jsonb,
   '5. empty: empty and no_data cells, not the queued one');
 select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'sc'), 'stale') ->> 'count',
   '1', '6. stale: the stale cell');
@@ -158,7 +158,7 @@ insert into ids select 'r_sc', id from public.predicate_run
  where predicate_id = (select v from ids where k = 'sc') and entity_id = (select v from ids where k = 'e06');
 select is(app.start_run((select v from ids where k = 'r_sc')) - array['inputs', 'name', 'domain', 'brief_id', 'fill_config',
                                                                         'allowed_values', 'run_condition'],
-  jsonb_build_object('started', true, 'status', 'running', 'org_id', (select v from ids where k = 'org'),
+  jsonb_build_object('started', true, 'status', 'running', 'reclaimed', false, 'org_id', (select v from ids where k = 'org'),
                      'workspace_id', (select v from ids where k = 'ws'), 'entity_id', (select v from ids where k = 'e06'),
                      'predicate_id', (select v from ids where k = 'sc'), 'key', 'site_count', 'fill_method', 'extract',
                      'value_type', 'number'),
@@ -170,6 +170,23 @@ select is((select status || '|' || (started_at is not null)::text || '|' || inpu
 select is(app.start_run((select v from ids where k = 'r_sc')), '{"started": false, "status": "running"}'::jsonb,
   '23. starting it again does nothing');
 select is(app.start_run(gen_random_uuid()), '{"started": false, "status": null}'::jsonb, '24. a missing run does nothing');
+
+-- A run left running for more than 15 minutes (its worker died) is taken back; a fresh one is not.
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, started_at)
+values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e09'),
+        (select v from ids where k = 'dp'), 1, 'running', now() - interval '30 minutes', now() - interval '20 minutes'),
+       ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e10'),
+        (select v from ids where k = 'dp'), 1, 'running', now() - interval '30 minutes', now() - interval '5 minutes');
+insert into ids select 'r_stale', id from public.predicate_run where predicate_id = (select v from ids where k = 'dp') and entity_id = (select v from ids where k = 'e09');
+insert into ids select 'r_fresh', id from public.predicate_run where predicate_id = (select v from ids where k = 'dp') and entity_id = (select v from ids where k = 'e10');
+select is((select (x ->> 'started') || '|' || (x ->> 'reclaimed') from (select app.start_run((select v from ids where k = 'r_stale')) x) s),
+  'true|true', '24b. a run running for 20 minutes is taken back');
+select is((select started_at from public.predicate_run where id = (select v from ids where k = 'r_stale')), now(),
+  '24c. taking it back restarts its clock');
+select is(app.start_run((select v from ids where k = 'r_fresh')), '{"started": false, "status": "running"}'::jsonb,
+  '24d. a run running for 5 minutes is left to its worker');
+select app.finish_run((select v from ids where k = 'r_stale'), 'no_data');
+select app.finish_run((select v from ids where k = 'r_fresh'), 'no_data');
 
 -- Spend settled against the run is its cost.
 insert into ids select 'res', (app.reserve_budget((select v from ids where k = 'ws'), null, 0.02, 'column.run', '{}') ->> 'reservation_id')::uuid;
@@ -216,6 +233,22 @@ select throws_ok(format('select app.clear_formula_claims(%L::uuid)', (select v f
 select throws_ok(format('select app.clear_formula_claims(%L::uuid)', (select v from ids where k = 'r_sc')),
   '55000', null, '37. a finished extract run cannot clear anything either');
 
+-- A formula's claim and its succeeded status are written together.
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, queued_at)
+values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e09'),
+        (select v from ids where k = 'f'), 1, now() - interval '3 minutes');
+insert into ids select 'rf3', id from public.predicate_run where predicate_id = (select v from ids where k = 'f') and entity_id = (select v from ids where k = 'e09');
+select app.start_run((select v from ids where k = 'rf3'));
+select is(app.complete_formula_run((select v from ids where k = 'rf3'), 'true', '[]'), 'succeeded',
+  '37b. complete_formula_run finishes the run');
+select is((select r.status || '|' || c.status::text || '|' || (c.value = 'true'::jsonb)::text
+             from public.predicate_run r join public.claim c on c.id = r.claim_id where r.id = (select v from ids where k = 'rf3')),
+  'succeeded|active|true', '37c. ... with its active claim');
+select throws_ok(format('select app.complete_formula_run(%L::uuid, %L::jsonb, %L::jsonb)', (select v from ids where k = 'rf3'), 'false', '[]'),
+  '55000', null, '37d. a finished run cannot write another value');
+select is((select count(*)::int from public.claim where entity_id = (select v from ids where k = 'e09')
+             and predicate_id = (select v from ids where k = 'f')), 1, '37e. ... and no claim was written');
+
 -- ── Run conditions ───────────────────────────────────────────────────────────
 select ok(app.entity_matches((select v from ids where k = 'ws'), null, (select v from ids where k = 'e07'),
             '{"field": {"system": "name"}, "op": "contains", "value": "E07"}'), '38. an entity matching the condition');
@@ -234,6 +267,11 @@ select is((select predicate_id || '|' || entity_id || '|' || status || '|' || pr
             where id = (select v from ids where k = 'auto')),
   (select v from ids where k = 'f') || '|' || (select v from ids where k = 'e08') || '|queued|1',
   '41. a claim of an input queues the formula column on that entity');
+select is((select jsonb_build_object('ws', workspace_id, 'payload', payload) from public.outbox
+            where event = 'column.run_requested' and aggregate_id = (select v from ids where k = 'cdp')),
+  jsonb_build_object('ws', (select v from ids where k = 'ws'),
+                     'payload', jsonb_build_object('run_ids', jsonb_build_array((select v from ids where k = 'auto')))),
+  '41b. the auto-run is announced as column.run_requested in the same transaction');
 select is(app.queue_auto_runs((select v from ids where k = 'cdp')), '{}'::uuid[], '42. never twice while one is queued');
 select is((select count(*)::int from public.predicate_run where entity_id = (select v from ids where k = 'e08')
              and predicate_id <> (select v from ids where k = 'sc')), 1,
@@ -249,6 +287,19 @@ insert into ids select 'csc', app.create_claim((select v from ids where k = 'org
   (select id from public.extractor_version where capability = 'extract.cr25'), 80::smallint);
 select is(app.queue_auto_runs((select v from ids where k = 'csc')), '{}'::uuid[], '45. a formula with auto_run off is not queued');
 update public.predicate set auto_run = true where id = (select v from ids where k = 'f');
+insert into ids select 'cold', app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'e09'),
+  (select v from ids where k = 'dp'), 'false'::jsonb, 'no drones', null, null, (select v from ids where k = 's1'), now(),
+  (select id from public.extractor_version where capability = 'extract.cr25'), 80::smallint);
+update public.claim set status = 'retracted' where id = (select v from ids where k = 'cold');
+select is(app.queue_auto_runs((select v from ids where k = 'cold')), '{}'::uuid[], '45b. a claim that is no longer active queues nothing');
+insert into ids select 'cloose', app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'loose'),
+  (select v from ids where k = 'dp'), 'true'::jsonb, 'drones', null, null, (select v from ids where k = 's1'), now(),
+  (select id from public.extractor_version where capability = 'extract.cr25'), 80::smallint);
+select is(app.queue_auto_runs((select v from ids where k = 'cloose')), '{}'::uuid[],
+  '45c. an entity without an account in the column''s workspace is not queued');
+select is((select count(*)::int from public.outbox where event = 'column.run_requested'
+             and aggregate_id in ((select v from ids where k = 'cold'), (select v from ids where k = 'cloose'))), 0,
+  '45d. ... and nothing is announced');
 
 -- ── Review Focus 4: a request larger than the budget ─────────────────────────
 insert into public.budget (org_id, workspace_id, brief_id, period, cap_usd)
@@ -258,7 +309,7 @@ select is(app.remaining_budget_usd((select v from ids where k = 'ws'), null), 0.
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a2","role":"authenticated"}', true);
 select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'ind'), 'empty'),
-  '{"count": 12, "per_entity_usd": 0.01, "cost_usd": 0.12, "remaining_usd": 0.05, "within_budget": 5}'::jsonb,
+  '{"count": 12, "per_entity_usd": 0.01, "cost_usd": 0.12, "remaining_usd": 0.05, "within_budget": 5, "max_per_request": 1000}'::jsonb,
   '47. the estimate is count × cost per entity, and 5 fit');
 select throws_ok(format('select public.request_column_run(%L::uuid, %L::uuid, %L)', (select v from ids where k = 'ws'),
     (select v from ids where k = 'ind'), 'empty'),
@@ -286,7 +337,7 @@ set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a2","role":"authenticated"}', true);
 select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
             array[(select v from ids where k = 'e11'), (select v from ids where k = 'e12')]),
-  '{"count": 2, "per_entity_usd": 0, "cost_usd": 0, "remaining_usd": 0, "within_budget": 2}'::jsonb,
+  '{"count": 2, "per_entity_usd": 0, "cost_usd": 0, "remaining_usd": 0, "within_budget": 2, "max_per_request": 1000}'::jsonb,
   '53. a formula estimate costs 0 and all of it fits');
 select is(public.request_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
             array[(select v from ids where k = 'e11'), (select v from ids where k = 'e12')]),
@@ -311,6 +362,9 @@ select throws_like(format('select public.request_column_run(%L::uuid, %L::uuid, 
     (select v from ids where k = 'f'), 'empty'),
   'a run request has at most 1000 cells (this one has 10%); set a limit or narrow the filter',
   '57. more than 1000 runs are refused');
+select is((select (x ->> 'count')::int > 1000 and (x ->> 'within_budget')::int = 1000 and (x ->> 'max_per_request')::int = 1000
+             from (select public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'empty') x) s),
+  true, '57b. the estimate keeps the true count but never suggests more than 1000');
 reset role;
 select is((select count(*)::int from public.predicate_run where predicate_id = (select v from ids where k = 'f') and status = 'queued'),
   3, '58. the refused request queued nothing (the auto-run and two formula runs remain)');
@@ -325,6 +379,47 @@ select (select v from ids where k = 'org'), id, 'company', 'CR E02', (select v f
   from public.source_record where content_hash like 'cr25-b%';
 select is(app.column_cost_per_entity((select v from ids where k = 'sc')), 0.2::numeric,
   '59. an average of 30.5 records per entity is capped at 20');
+
+-- ── Across workspaces ──────────────────────────────────────────────────────────
+-- Workspace B in the same organisation; L is a Viewer of B only.
+insert into auth.users (id, email, aud, role) values
+  ('00000000-0000-4000-8000-0000000025a4', 'l@cr.test', 'authenticated', 'authenticated');
+with w as (insert into public.workspace (org_id, name) values ((select v from ids where k = 'org'), 'CR Beta') returning id)
+insert into ids select 'wsb', id from w;
+insert into public.member (id, org_id, user_id, email) values
+  ('00000000-0000-4000-8000-0000000025a4', (select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000025a4', 'l@cr.test');
+insert into public.role_assignment (org_id, member_id, workspace_id, role) values
+  ((select v from ids where k = 'org'), '00000000-0000-4000-8000-0000000025a4', (select v from ids where k = 'wsb'), 'Viewer');
+with p as (insert into public.predicate (key, org_id, workspace_id, label, value_type)
+           values ('beta_col', (select v from ids where k = 'org'), (select v from ids where k = 'wsb'), 'Beta', 'text') returning id)
+insert into ids select 'pb', id from p;
+insert into ids select 'eb', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Beta Co', 'tenant');
+insert into public.account (org_id, workspace_id, entity_id)
+values ((select v from ids where k = 'org'), (select v from ids where k = 'wsb'), (select v from ids where k = 'eb'));
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a4","role":"authenticated"}', true);
+select throws_ok(format('select public.estimate_column_run(%L::uuid, %L::uuid, %L)', (select v from ids where k = 'ws'),
+    (select v from ids where k = 'f'), 'empty'),
+  '42501', 'permission denied', '59b. a Viewer of workspace B cannot estimate on A');
+select throws_ok(format('select public.request_column_run(%L::uuid, %L::uuid, %L)', (select v from ids where k = 'ws'),
+    (select v from ids where k = 'f'), 'empty'),
+  '42501', 'permission denied', '59c. ... nor request on A');
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000025a2","role":"authenticated"}', true);
+select throws_ok(format('select public.estimate_column_run(%L::uuid, %L::uuid, %L)', (select v from ids where k = 'ws'),
+    (select v from ids where k = 'pb'), 'empty'),
+  '22023', 'column not found in this workspace', '59d. a column of workspace B cannot be estimated in A');
+select throws_ok(format('select public.request_column_run(%L::uuid, %L::uuid, %L)', (select v from ids where k = 'ws'),
+    (select v from ids where k = 'pb'), 'empty'),
+  '22023', 'column not found in this workspace', '59e. ... nor requested in A');
+select is(public.estimate_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
+            array[(select v from ids where k = 'eb')]) ->> 'count', '0',
+  '59f. a selected entity that is only an account of workspace B is dropped');
+select is(public.request_column_run((select v from ids where k = 'ws'), (select v from ids where k = 'f'), 'selected', null, null,
+            array[(select v from ids where k = 'eb')]), '{"queued": 0, "cost_usd": 0}'::jsonb,
+  '59g. ... and is not queued');
+reset role;
+select is((select count(*)::int from public.predicate_run where entity_id = (select v from ids where k = 'eb')), 0,
+  '59h. no run exists for it');
 
 -- ── Grants ───────────────────────────────────────────────────────────────────
 select ok(not has_function_privilege('authenticated', 'app.queue_auto_runs(uuid)', 'execute')

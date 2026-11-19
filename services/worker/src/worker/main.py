@@ -60,13 +60,31 @@ EXTRACT_MODEL_SQL = (
 )
 
 
+EXTRACT_PRICES_SQL = (
+    "select count(*) from public.model_price"
+    " where model = %s and unit in ('ai_input_tokens', 'ai_output_tokens')"
+)
+
+
 async def record_ai_models(pool: AsyncConnectionPool, settings: Settings) -> None:
-    """Column run estimates are priced in SQL: tell it which model extraction uses."""
+    """Column run estimates are priced in SQL: tell it which model extraction uses, and warn when
+    that model has no price (every extract estimate would then fail). Never stops the worker."""
+    model = settings.ai_model_extract
     try:
         async with pool.connection() as conn:
-            await conn.execute(EXTRACT_MODEL_SQL, (settings.ai_model_extract,))
+            await conn.execute(EXTRACT_MODEL_SQL, (model,))
+            cur = await conn.execute(EXTRACT_PRICES_SQL, (model,))
+            row = await cur.fetchone()
     except Exception:  # an estimate falls back to the seeded model; the worker still starts
         log.exception("worker.ai_models_not_recorded")
+        return
+    if not row or int(row[0]) < 2:
+        log.warning(
+            "worker.extract_model_unpriced",
+            model=model,
+            detail="add input and output token prices to public.model_price;"
+            " until then extract column estimates and requests fail",
+        )
 
 
 async def amain() -> None:

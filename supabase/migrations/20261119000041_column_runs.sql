@@ -175,8 +175,10 @@ begin
 end $$;
 
 -- ── 6. Estimate (Viewer+) ────────────────────────────────────────────────────
--- {count, per_entity_usd, cost_usd, remaining_usd, within_budget}. within_budget is the largest N
--- whose cost fits what is left, or count when there is no cap (or the column is free).
+-- {count, per_entity_usd, cost_usd, remaining_usd, within_budget, max_per_request}. count and
+-- cost_usd are the true totals; within_budget is the largest N whose cost fits what is left (count
+-- when there is no cap or the column is free), never more than max_per_request (1000), so it is
+-- always a limit a request accepts.
 create function public.estimate_column_run(p_ws uuid, p_predicate uuid, p_mode text, p_brief uuid default null,
                                            p_filter jsonb default null, p_entity_ids uuid[] default null)
 returns jsonb
@@ -199,8 +201,9 @@ begin
     'per_entity_usd', v_per,
     'cost_usd', v_count * v_per,
     'remaining_usd', v_left,
-    'within_budget', case when v_left is null or v_per = 0 then v_count
-                          else least(v_count, floor(v_left / v_per)::int) end);
+    'within_budget', least(1000, case when v_left is null or v_per = 0 then v_count
+                                      else least(v_count, floor(v_left / v_per)::int) end),
+    'max_per_request', 1000);
 end $$;
 
 -- ── 7. Request (Editor+) ─────────────────────────────────────────────────────
@@ -280,13 +283,18 @@ begin
 end $$;
 
 -- ── 8. Auto-run (service role) ───────────────────────────────────────────────
--- For each formula column with auto_run that reads the claim's column, queue one run on the claim's
--- entity unless one is already queued or running. Returns the new run ids.
+-- For an active claim: each formula column with auto_run that reads the claim's column queues one
+-- run on the claim's entity, when that entity has an account in the column's workspace and no run
+-- is already queued or running. The new runs are announced as column.run_requested {run_ids} (one
+-- event per workspace) in the same transaction, so a job is deferred for every committed run even
+-- if the caller dies. Returns the new run ids.
 create function app.queue_auto_runs(p_claim uuid) returns uuid[]
   language plpgsql security definer set search_path = ''
 as $$
 declare
-  v_runs uuid[];
+  v_runs uuid[] := '{}';
+  v_new  jsonb;
+  w      record;
 begin
   with ins as (
     insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version)
@@ -294,11 +302,20 @@ begin
       from public.claim c
       join public.predicate f on f.fill_method = 'formula' and f.auto_run and f.workspace_id is not null
                              and c.predicate_id = any(f.input_predicate_ids) and f.org_id = c.org_id
-     where c.id = p_claim
+     where c.id = p_claim and c.status = 'active'
+       and exists (select 1 from public.account a where a.entity_id = c.entity_id and a.workspace_id = f.workspace_id)
      order by f.key collate "C"
     on conflict (entity_id, predicate_id) where status in ('queued', 'running') do nothing
-    returning id)
-  select coalesce(array_agg(id), '{}') into v_runs from ins;
+    returning id, org_id, workspace_id)
+  select coalesce(jsonb_agg(jsonb_build_object('id', id, 'org_id', org_id, 'workspace_id', workspace_id)), '[]')
+    into v_new from ins;
+  for w in select (n ->> 'org_id')::uuid as org_id, (n ->> 'workspace_id')::uuid as workspace_id,
+                  array_agg((n ->> 'id')::uuid order by n ->> 'id') as ids
+             from jsonb_array_elements(v_new) n group by 1, 2 order by 2 loop
+    perform app.emit('column.run_requested'::public.event_type, w.org_id, w.workspace_id, 'claim', p_claim,
+                     jsonb_build_object('run_ids', to_jsonb(w.ids)));
+    v_runs := v_runs || w.ids;
+  end loop;
   return v_runs;
 end $$;
 
@@ -317,9 +334,10 @@ begin
   return v_ok;
 end $$;
 
--- Starts a queued run: running, started_at and inputs_hash (app.run_inputs_hash). Returns what the
--- executor needs, with started true. A run that is not queued is left alone:
--- {"started": false, "status": <its status>} (status null when there is no such run).
+-- Starts a queued run: running, started_at and inputs_hash (app.run_inputs_hash). A run left
+-- running for more than 15 minutes (its worker died before finishing it) is taken back the same
+-- way, with reclaimed true. Returns what the executor needs, with started true. Any other run is
+-- left alone: {"started": false, "status": <its status>} (status null when there is no such run).
 create function app.start_run(p_run uuid) returns jsonb
   language plpgsql security definer set search_path = ''
 as $$
@@ -328,7 +346,8 @@ declare
   p public.predicate%rowtype;
 begin
   select * into r from public.predicate_run where id = p_run for update;
-  if not found or r.status <> 'queued' then
+  if not found or not (r.status = 'queued'
+                       or (r.status = 'running' and r.started_at < now() - interval '15 minutes')) then
     return jsonb_build_object('started', false, 'status', r.status);
   end if;
   update public.predicate_run
@@ -336,7 +355,7 @@ begin
    where id = p_run;
   select * into p from public.predicate where id = r.predicate_id;
   return jsonb_build_object(
-    'started', true, 'status', 'running',
+    'started', true, 'status', 'running', 'reclaimed', r.status = 'running',
     'org_id', r.org_id, 'workspace_id', r.workspace_id, 'entity_id', r.entity_id, 'predicate_id', r.predicate_id,
     'brief_id', (select bv.brief_id from public.brief_version bv where bv.id = r.brief_version_id),
     'key', p.key, 'fill_method', p.fill_method, 'fill_config', p.fill_config, 'value_type', p.value_type,
@@ -430,17 +449,28 @@ begin
   return p_status;
 end $$;
 
+-- A formula run's value and its succeeded status in one transaction: the claim (app.write_formula_claim)
+-- never exists without the run that wrote it having finished.
+create function app.complete_formula_run(p_run uuid, p_value jsonb, p_inputs jsonb) returns text
+  language plpgsql security definer set search_path = ''
+as $$
+begin
+  return app.finish_run(p_run, 'succeeded', app.write_formula_claim(p_run, p_value), p_inputs, null, null);
+end $$;
+
 -- ── 10. Grants ───────────────────────────────────────────────────────────────
 revoke execute on function
   app.column_cost_per_entity(uuid), app.remaining_budget_usd(uuid, uuid), app.usd_text(numeric),
   app.column_run_targets(uuid, uuid, text, uuid, jsonb, uuid[]), app.queue_auto_runs(uuid),
   app.entity_matches(uuid, uuid, uuid, jsonb), app.start_run(uuid), app.run_input_values(uuid),
-  app.clear_formula_claims(uuid), app.finish_run(uuid, text, uuid, jsonb, jsonb, text)
+  app.clear_formula_claims(uuid), app.finish_run(uuid, text, uuid, jsonb, jsonb, text),
+  app.complete_formula_run(uuid, jsonb, jsonb)
   from public, anon, authenticated;
 grant execute on function
   app.column_cost_per_entity(uuid), app.remaining_budget_usd(uuid, uuid), app.queue_auto_runs(uuid),
   app.entity_matches(uuid, uuid, uuid, jsonb), app.start_run(uuid), app.run_input_values(uuid),
-  app.clear_formula_claims(uuid), app.finish_run(uuid, text, uuid, jsonb, jsonb, text)
+  app.clear_formula_claims(uuid), app.finish_run(uuid, text, uuid, jsonb, jsonb, text),
+  app.complete_formula_run(uuid, jsonb, jsonb)
   to postgres, service_role;
 
 revoke execute on function

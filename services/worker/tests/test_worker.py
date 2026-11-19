@@ -1153,7 +1153,9 @@ async def test_dispatch_malformed_run_request_is_skipped(payload: dict[str, Any]
     assert _jobs(connector, "column.run") == []
 
 
-async def test_dispatch_claim_created_queues_auto_runs_and_still_the_verdict() -> None:
+async def test_dispatch_claim_created_queues_auto_runs_through_the_outbox() -> None:
+    """app.queue_auto_runs commits the runs with a column.run_requested event; the dispatcher
+    defers nothing itself, so a failed defer can never leave a queued run without a job."""
     org_id, entity_id, ws, claim_id = (str(uuid4()) for _ in range(4))
     runs = [str(uuid4())]
     pool = _RoutedPool([(ws,)], runs)
@@ -1174,8 +1176,7 @@ async def test_dispatch_claim_created_queues_auto_runs_and_still_the_verdict() -
     assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
     (verdict,) = _jobs(connector, "verdict.compute")
     assert verdict["queueing_lock"] == f"verdict:{entity_id}:{ws}"
-    (run,) = _jobs(connector, "column.run")
-    assert (run["queueing_lock"], run["args"]) == (f"run:{runs[0]}", {"run_id": runs[0]})
+    assert _jobs(connector, "column.run") == []
     (auto_args,) = [a for sql, a in pool.queries if "app.queue_auto_runs" in sql]
     assert auto_args == (UUID(claim_id),)
 
@@ -1251,3 +1252,39 @@ async def test_column_run_job_runs_the_executor(monkeypatch: Any) -> None:
         await app.run_worker_async(queues=["compute"], wait=False, install_signal_handlers=False)
     assert [j["status"] for j in _jobs(connector, "column.run")] == ["succeeded"]
     assert seen == [(gateway, UUID(run_id))]
+
+
+async def test_worker_start_warns_when_the_extract_model_has_no_price() -> None:
+    import structlog.testing
+
+    from signal_core.config import Settings
+    from worker.main import record_ai_models
+
+    pool = _RowsPool([(0,)])
+    with structlog.testing.capture_logs() as logs:
+        await record_ai_models(pool, Settings(ai_model_extract="mystery-model"))  # type: ignore[arg-type]
+    (warning,) = [e for e in logs if e["event"] == "worker.extract_model_unpriced"]
+    assert warning["model"] == "mystery-model"
+    assert pool.queries[0][1] == ("mystery-model",)
+
+
+async def test_worker_start_is_quiet_when_the_extract_model_is_priced() -> None:
+    import structlog.testing
+
+    from signal_core.config import Settings
+    from worker.main import record_ai_models
+
+    with structlog.testing.capture_logs() as logs:
+        await record_ai_models(_RowsPool([(2,)]), Settings())  # type: ignore[arg-type]
+    assert not [e for e in logs if e["event"] == "worker.extract_model_unpriced"]
+
+
+async def test_worker_start_survives_a_database_error() -> None:
+    from signal_core.config import Settings
+    from worker.main import record_ai_models
+
+    class _Broken:
+        def connection(self) -> Any:
+            raise RuntimeError("no database")
+
+    await record_ai_models(_Broken(), Settings())  # type: ignore[arg-type]

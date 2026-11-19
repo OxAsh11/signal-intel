@@ -1,21 +1,28 @@
 """The column run executor (P3): fills one cell, for an extract or a formula column.
 
-A run is a row of public.predicate_run. The executor only ever acts on a queued run: it starts it
-(app.start_run: running, started_at, inputs_hash from app.run_inputs_hash), fills the cell and
-finishes it (app.finish_run: final status, finished_at and the run's cost from usage_ledger). A
-redelivered job for a run that is already running or finished does nothing.
+A run is a row of public.predicate_run. The executor acts on a queued run, or on a run left
+running for more than 15 minutes (its worker died): it starts it (app.start_run: running,
+started_at, inputs_hash from app.run_inputs_hash), fills the cell and finishes it (app.finish_run:
+final status, finished_at and the run's cost from usage_ledger). A redelivered job for a run that
+is finished, or running elsewhere right now, does nothing.
+
+A run always reaches a final status: a formula's claim and its succeeded status are written in one
+statement (app.complete_formula_run); a finish that fails is tried again, then recorded as an
+error; if even that cannot be written, the job fails, Procrastinate retries it and the retry takes
+the run back once it has been running for 15 minutes.
 
   * Run condition: when the column has one, the entity must match it (app.entity_matches, which
     compiles it with app.filter_where); otherwise the run ends condition_not_met.
   * Formula: parse, check the formula reads only its inputs, evaluate over the most recent active
     claim of each input and the system values, then check the result against the column type.
     Null is no_data (app.finish_run retracts the cell's older formula claim); a wrong type is an
-    error; any other value is written by app.write_formula_claim, which reuses an active claim with
-    the same value, so a re-run with unchanged inputs writes nothing and emits nothing.
+    error; any other value is written by app.complete_formula_run (app.write_formula_claim, which
+    reuses an active claim with the same value, so a re-run with unchanged inputs writes nothing
+    and emits nothing, then the finish, in one transaction).
   * Extract: the P2 backfill (one extract call per extracted record of the entity, at most 20),
     metered against the run; afterwards an active claim means succeeded, none means no_data.
 
-Any exception ends the run in error with its message; the job is not retried for it.
+Any exception while filling ends the run in error with its message; the job is not retried for it.
 """
 
 from __future__ import annotations
@@ -41,7 +48,6 @@ MAX_RECORDS_PER_RUN = 20
 START_SQL = "select app.start_run(%s)"
 CONDITION_SQL = "select app.entity_matches(%s, %s, %s, %s::jsonb)"
 INPUTS_SQL = "select key, claim_id, value from app.run_input_values(%s)"
-WRITE_SQL = "select app.write_formula_claim(%s, %s::jsonb)"
 RECORDS_SQL = (
     "select sr.id from public.source_record sr"
     " where sr.workspace_id = %s and sr.extraction_status = 'extracted'"
@@ -55,6 +61,9 @@ ACTIVE_CLAIM_SQL = (
     " order by c.observed_at desc, c.id desc limit 1"
 )
 FINISH_SQL = "select app.finish_run(%s, %s, %s, %s::jsonb, %s::jsonb, %s)"
+COMPLETE_SQL = "select app.complete_formula_run(%s, %s::jsonb, %s::jsonb)"
+# Tries at writing a run's outcome before it is recorded as an error instead.
+FINISH_ATTEMPTS = 3
 
 
 class _Outcome:
@@ -66,8 +75,10 @@ class _Outcome:
         inputs: list[str] | None = None,
         not_run_reason: dict[str, Any] | None = None,
         error: str | None = None,
+        value: JsonScalar = None,
     ) -> None:
         self.status = status
+        self.value = value  # a formula's result to write (status succeeded)
         self.claim_id = claim_id
         self.inputs = inputs
         self.not_run_reason = not_run_reason
@@ -87,8 +98,8 @@ async def execute_run(
 ) -> str:
     """Fill the cell of a queued run and return its final status.
 
-    A run that is not queued is left alone and its current status returned ("missing" when there
-    is no such run)."""
+    A run that is not queued (nor abandoned while running) is left alone and its current status
+    returned ("missing" when there is no such run)."""
     async with pool.connection() as conn:
         cur = await conn.execute(START_SQL, (run_id,))
         run: dict[str, Any] | None = _first(await cur.fetchone())
@@ -96,6 +107,8 @@ async def execute_run(
         status = str((run or {}).get("status") or "missing")
         log.info("column_run.skipped", run_id=str(run_id), status=status)
         return status
+    if run.get("reclaimed"):
+        log.warning("column_run.reclaimed", run_id=str(run_id))
 
     try:
         outcome = await _fill(pool, gateway, run_id, run, today or datetime.now(UTC).date())
@@ -103,21 +116,47 @@ async def execute_run(
         log.warning("column_run.error", run_id=str(run_id), error=type(exc).__name__)
         outcome = _Outcome("error", error=str(exc) or type(exc).__name__)
 
-    async with pool.connection() as conn:
-        cur = await conn.execute(
-            FINISH_SQL,
-            (
-                run_id,
-                outcome.status,
-                outcome.claim_id,
-                json.dumps(outcome.inputs) if outcome.inputs is not None else None,
-                json.dumps(outcome.not_run_reason) if outcome.not_run_reason is not None else None,
-                outcome.error,
-            ),
-        )
-        final = _first(await cur.fetchone())
+    final = await _finish(pool, run_id, outcome)
     log.info("column_run.finished", run_id=str(run_id), status=final)
-    return str(final)
+    return final
+
+
+async def _finish(pool: AsyncConnectionPool, run_id: UUID, outcome: _Outcome) -> str:
+    """Write the outcome; after FINISH_ATTEMPTS failures, record an error instead. If that fails
+    too the exception propagates: the job is retried and takes the run back after 15 minutes."""
+    last: Exception | None = None
+    for _ in range(FINISH_ATTEMPTS):
+        try:
+            return await _write_outcome(pool, run_id, outcome)
+        except Exception as exc:
+            last = exc
+            log.warning("column_run.finish_failed", run_id=str(run_id), error=type(exc).__name__)
+    fallback = _Outcome("error", error=f"the run's result could not be recorded: {last}")
+    return await _write_outcome(pool, run_id, fallback)
+
+
+async def _write_outcome(pool: AsyncConnectionPool, run_id: UUID, outcome: _Outcome) -> str:
+    inputs = json.dumps(outcome.inputs) if outcome.inputs is not None else None
+    async with pool.connection() as conn:
+        if outcome.status == "succeeded" and outcome.value is not None:
+            cur = await conn.execute(
+                COMPLETE_SQL, (run_id, json.dumps(outcome.value, allow_nan=False), inputs)
+            )
+        else:
+            cur = await conn.execute(
+                FINISH_SQL,
+                (
+                    run_id,
+                    outcome.status,
+                    outcome.claim_id,
+                    inputs,
+                    json.dumps(outcome.not_run_reason)
+                    if outcome.not_run_reason is not None
+                    else None,
+                    outcome.error,
+                ),
+            )
+        return str(_first(await cur.fetchone()))
 
 
 async def _fill(
@@ -169,10 +208,8 @@ async def _fill_formula(
     problem = check_result(result, str(run["value_type"]), run.get("allowed_values"))
     if problem is not None:
         return _Outcome("error", inputs=claim_ids, error=problem)
-    async with pool.connection() as conn:
-        cur = await conn.execute(WRITE_SQL, (run_id, json.dumps(result, allow_nan=False)))
-        written = _first(await cur.fetchone())
-    return _Outcome("succeeded", claim_id=written, inputs=claim_ids)
+    # Written together with the finish (one transaction), in _write_outcome.
+    return _Outcome("succeeded", inputs=claim_ids, value=result)
 
 
 async def _fill_extract(
