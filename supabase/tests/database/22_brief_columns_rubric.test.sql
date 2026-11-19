@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(47);
+select plan(53);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -177,18 +177,29 @@ select is((select count(*)::int from public.outbox where event = 'predicate.back
 select is((select count(*)::int from public.outbox where event = 'predicate.backfill_requested'
              and payload ->> 'brief_id' = (select v::text from ids where k = 'a')),
   2, '25. Brief A has two backfill events in all');
+select is((select count(*)::int from public.audit_log where action = 'predicate.updated'
+             and workspace_id = (select v from ids where k = 'ws')),
+  0, '25b. republishing unchanged column specs updates no predicate');
 
 -- ── A key that exists with another type ──────────────────────────────────────
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000cc02","role":"authenticated"}', true);
 insert into ids select 'size', public.create_workspace_predicate((select v from ids where k = 'ws'), 'size', 'Size', 'text');
 -- industry sorts before size, so its union would be written first and must roll back too.
-select public.save_brief_draft_ui((select v from ids where k = 'b'), (select v from cfg where k = 'base') || '{"predicates":[
+insert into cfg select 'clash', (select v from cfg where k = 'base') || '{"predicates":[
   {"key":"size","label":"Employees","value_type":"number","allowed_values":null,"extraction_hint":"",
    "decay_half_life_days":null,"role":"fit.size"},
   {"key":"industry","label":"Industry","value_type":"enum","allowed_values":["energy","aerospace"],
-   "extraction_hint":"","decay_half_life_days":null,"role":"fit.vertical"}]}'::jsonb);
+   "extraction_hint":"","decay_half_life_days":null,"role":"fit.vertical"}]}'::jsonb;
+select throws_ok(format('select public.save_brief_draft_ui(%L::uuid, %L::jsonb)', (select v from ids where k = 'b'),
+    (select v from cfg where k = 'clash')),
+  '23514', 'column "size" already exists in this workspace as text; give it another key',
+  '25c. save_brief_draft_ui refuses a key the workspace holds as another type');
 reset role;
+select ok((select draft_config is null from public.brief where id = (select v from ids where k = 'b')),
+  '25d. the refused save leaves the draft as it was (empty)');
+-- A draft written before the check (or by another path) is still refused at publish.
+select app.update_brief_draft((select v from ids where k = 'b'), (select v from cfg where k = 'clash'));
 
 create temp table snap (k text primary key, v text) on commit drop;
 grant all on snap to authenticated;
@@ -217,9 +228,12 @@ insert into ids select 'industry', id from public.predicate
  where workspace_id = (select v from ids where k = 'ws') and key = 'industry';
 set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000cc02","role":"authenticated"}', true);
+-- Its label, hint and decay differ (last publish wins); 365.0 and 730.0 are whole numbers too.
 select public.save_brief_draft_ui((select v from ids where k = 'c'), (select v from cfg where k = 'base') || '{"predicates":[
   {"key":"industry","label":"Sector","value_type":"enum","allowed_values":["energy","aerospace"],
-   "extraction_hint":"","decay_half_life_days":null,"role":"fit.vertical"}]}'::jsonb);
+   "extraction_hint":"Sector of the operator","decay_half_life_days":365.0,"role":"fit.vertical"},
+  {"key":"fleet_size","label":"Drones in the fleet","value_type":"number","allowed_values":null,
+   "extraction_hint":"","decay_half_life_days":730.0,"role":"scale"}]}'::jsonb);
 insert into ids select 'c1', public.start_pilot((select v from ids where k = 'c'));
 reset role;
 select is((select allowed_values from public.predicate where id = (select v from ids where k = 'industry')),
@@ -228,6 +242,21 @@ select is((select allowed_values from public.predicate where id = (select v from
 select is((select count(*)::int from public.predicate
             where workspace_id = (select v from ids where k = 'ws') and key = 'industry'),
   1, '32. the existing predicate row is reused');
+select is((select jsonb_build_object('label', label, 'hint', extraction_hint, 'decay', decay_half_life_days)
+             from public.predicate where id = (select v from ids where k = 'industry')),
+  '{"label":"Sector","hint":"Sector of the operator","decay":365}'::jsonb,
+  '32b. the existing predicate takes the newer label, hint and decay');
+select is((select jsonb_build_object('before', before, 'after', after - 'brief_version_id',
+                                     'version', after ->> 'brief_version_id')
+             from public.audit_log where action = 'predicate.updated'
+              and target_id = (select v from ids where k = 'industry')),
+  jsonb_build_object('before', '{"label":"Industry","extraction_hint":"","decay_half_life_days":null}'::jsonb,
+                     'after', '{"label":"Sector","extraction_hint":"Sector of the operator","decay_half_life_days":365}'::jsonb,
+                     'version', (select v::text from ids where k = 'c1')),
+  '32c. the change is audited as predicate.updated');
+select is((select decay_half_life_days from public.predicate
+            where workspace_id = (select v from ids where k = 'ws') and key = 'fleet_size'),
+  730, '32d. a new predicate takes a decay written as 730.0');
 
 -- ── AI-named Briefs ──────────────────────────────────────────────────────────
 set local role authenticated;

@@ -184,23 +184,41 @@ begin
   perform app.validate_brief_columns(p_cfg);
 end $$;
 
+-- A column whose key the workspace already holds as another value_type is refused here, while the
+-- person can still change it, not only at publish (section 5 refuses it there too).
 create or replace function public.save_brief_draft_ui(p_brief uuid, p_config jsonb) returns void
   language plpgsql security definer set search_path = ''
 as $$
-declare v_ws uuid;
+declare
+  v_ws   uuid;
+  v_key  text;
+  v_type text;
 begin
   select workspace_id into v_ws from public.brief where id = p_brief;
   if not app.has_workspace_role(v_ws, 'Editor') then
     raise exception 'permission denied' using errcode = '42501';
   end if;
   perform app.validate_brief_columns(p_config);
+  select p.key, p.value_type into v_key, v_type
+    from jsonb_array_elements(case when jsonb_typeof(p_config -> 'predicates') = 'array'
+                                   then p_config -> 'predicates' else '[]'::jsonb end) e
+    join public.predicate p on p.workspace_id = v_ws and p.key = e ->> 'key'
+   where jsonb_typeof(e) = 'object' and p.value_type <> e ->> 'value_type'
+   order by p.key
+   limit 1;
+  if v_key is not null then
+    raise exception 'column "%" already exists in this workspace as %; give it another key',
+      v_key, v_type using errcode = '23514';
+  end if;
   perform app.update_brief_draft(p_brief, p_config);
 end $$;
 
 -- ── 5. Predicate sync on publish ─────────────────────────────────────────────
 -- Every new version's column specs become workspace predicates, in key order. A key that
 -- already exists with another value_type aborts the publish (the whole transaction, so no
--- version, predicate or outbox row is left); an existing enum gains the new allowed values.
+-- version, predicate or outbox row is left); an existing enum gains the new allowed values, and
+-- an existing predicate takes the version's label, extraction_hint and decay (last publish wins).
+-- decay_half_life_days is cast through numeric: 365.0 is a whole number (validate allows it).
 -- The keys this version added over the Brief's previous version are queued for backfill.
 create function app.sync_brief_predicates() returns trigger
   language plpgsql security definer set search_path = ''
@@ -214,6 +232,8 @@ declare
   v_id     uuid;
   v_union  jsonb;
   v_added  text[];
+  v_hint   text;
+  v_decay  int;
 begin
   perform app.validate_brief_columns(new.config);
 
@@ -228,7 +248,7 @@ begin
       values
         (s ->> 'key', new.org_id, new.workspace_id, s ->> 'label', s ->> 'value_type',
          case when s ->> 'value_type' = 'enum' then s -> 'allowed_values' end,
-         (s ->> 'decay_half_life_days')::int, coalesce(s ->> 'extraction_hint', ''))
+         (s ->> 'decay_half_life_days')::numeric::int, coalesce(s ->> 'extraction_hint', ''))
       on conflict on constraint one_key_per_scope do nothing
       returning id into v_id;
       if v_id is not null then
@@ -257,6 +277,26 @@ begin
                           jsonb_build_object('allowed_values', p.allowed_values),
                           jsonb_build_object('allowed_values', v_union, 'brief_version_id', new.id));
       end if;
+    end if;
+
+    -- A missing hint and an empty one are the same ("no hint"): no update for that alone.
+    v_hint  := coalesce(s ->> 'extraction_hint', '');
+    v_decay := (s ->> 'decay_half_life_days')::numeric::int;
+    if p.label is distinct from s ->> 'label'
+       or coalesce(p.extraction_hint, '') <> v_hint
+       or p.decay_half_life_days is distinct from v_decay then
+      update public.predicate
+         set label = s ->> 'label',
+             extraction_hint = case when coalesce(extraction_hint, '') = v_hint
+                                    then extraction_hint else v_hint end,
+             decay_half_life_days = v_decay
+       where id = p.id;
+      perform app.audit(new.org_id, new.workspace_id, 'predicate.updated', 'predicate', p.id,
+                        jsonb_build_object('label', p.label, 'extraction_hint', p.extraction_hint,
+                                           'decay_half_life_days', p.decay_half_life_days),
+                        jsonb_build_object('label', s ->> 'label', 'extraction_hint', v_hint,
+                                           'decay_half_life_days', v_decay,
+                                           'brief_version_id', new.id));
     end if;
   end loop;
 
