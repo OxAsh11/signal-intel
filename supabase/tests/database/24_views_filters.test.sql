@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(115);
+select plan(134);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner (Admin), J = Editor, K = Viewer, L = a second Viewer, X = signed in but not a member.
@@ -379,6 +379,173 @@ select throws_ok($$insert into public.saved_view (org_id, workspace_id, name) va
 reset role;
 select is((select string_agg(name, ',' order by name) from public.saved_view), 'People',
   '113. the creator and an Admin deleted their views');
+
+-- ══ Fix round 1 ═══════════════════════════════════════════════════════════════
+-- ── Run states compile set-based and agree with app.cell_state for every state ──
+-- Workspace VF Two: one extract column (note2) and one formula column (f2), one account per case.
+insert into public.workspace (org_id, name) select v, n from ids, (values ('VF Two'), ('VF Three')) x(n) where k = 'org';
+insert into ids select 'ws2', id from public.workspace where name = 'VF Two' and org_id = (select v from ids where k = 'org');
+insert into ids select 'ws3', id from public.workspace where name = 'VF Three' and org_id = (select v from ids where k = 'org');
+insert into public.predicate (key, org_id, workspace_id, label, value_type)
+  values ('note2', (select v from ids where k = 'org'), (select v from ids where k = 'ws2'), 'note2', 'text');
+insert into ids select 'note2', id from public.predicate where key = 'note2';
+insert into public.predicate (key, org_id, workspace_id, label, value_type, fill_method, fill_config, input_predicate_ids)
+  values ('f2', (select v from ids where k = 'org'), (select v from ids where k = 'ws2'), 'f2', 'number', 'formula',
+          '{"formula": "len(note2)"}', array[(select v from ids where k = 'note2')]);
+insert into ids select 'f2', id from public.predicate where key = 'f2';
+
+insert into ids select 'x_' || s, app.create_entity((select v from ids where k = 'org'), 'company', 'VF2 ' || s, 'tenant')
+  from unnest(array['queued', 'running', 'error', 'skipped', 'stale', 'value', 'value_nd', 'cancel', 'nodata',
+                    'empty', 'empty_ok', 'derived', 'fstale']) s;
+insert into nm select v, substr(k, 3) from ids where k like 'x\_%';
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws2'), v from ids where k like 'x\_%';
+
+select app.create_claim((select v from ids where k = 'org'), (select v from ids where k = 'x_' || s),
+                        (select v from ids where k = p), val::jsonb, null, null, null, (select v from ids where k = 'src'), now(),
+                        (select id from public.extractor_version where capability = 'extract.vf24'), 80::smallint)
+  from (values ('error', 'note2', '"x"'), ('stale', 'note2', '"x"'), ('value', 'note2', '"x"'), ('value_nd', 'note2', '"x"'),
+               ('cancel', 'note2', '"x"'), ('derived', 'f2', '5'), ('fstale', 'f2', '6')) v(s, p, val);
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, finished_at, inputs_hash)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws2'), (select v from ids where k = 'x_' || s),
+       (select v from ids where k = p), 1, st, now() - make_interval(hours => h),
+       case when st not in ('queued', 'running') then now() - make_interval(hours => h) end,
+       case hash when 'current' then app.run_inputs_hash((select v from ids where k = 'x_' || s), (select v from ids where k = p))
+                 else hash end
+  from (values ('queued', 'note2', 'succeeded', 3, 'current'), ('queued', 'note2', 'queued', 1, null),
+               ('running', 'note2', 'running', 1, null), ('error', 'note2', 'error', 1, null),
+               ('skipped', 'note2', 'condition_not_met', 1, null), ('stale', 'note2', 'succeeded', 1, 'old-hash'),
+               ('value_nd', 'note2', 'no_data', 1, null),
+               ('cancel', 'note2', 'succeeded', 3, 'current'), ('cancel', 'note2', 'cancelled', 1, 'old-hash'),
+               ('nodata', 'note2', 'no_data', 1, null), ('empty_ok', 'note2', 'succeeded', 1, null),
+               ('derived', 'f2', 'succeeded', 1, 'current'), ('fstale', 'f2', 'succeeded', 1, 'old-hash')) v(s, p, st, h, hash);
+
+-- Workspace VF Three: 51 columns plus a global one; X1 errored on the 51st, X2 on the global one.
+insert into public.predicate (key, org_id, workspace_id, label, value_type)
+select 'col_' || lpad(n::text, 2, '0'), (select v from ids where k = 'org'), (select v from ids where k = 'ws3'), 'c' || n, 'text'
+  from generate_series(1, 51) n;
+insert into public.predicate (key, label, value_type) values ('vf.glob', 'Global', 'text');
+insert into ids select 'y_' || s, app.create_entity((select v from ids where k = 'org'), 'company', 'VF3 ' || s, 'tenant')
+  from unnest(array['X1', 'X2', 'X3']) s;
+insert into nm select v, substr(k, 3) from ids where k like 'y\_%';
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws3'), v from ids where k like 'y\_%';
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, finished_at)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws3'), (select v from ids where k = 'y_' || s),
+       (select id from public.predicate where key = p and (workspace_id = (select v from ids where k = 'ws3') or workspace_id is null)),
+       1, 'error', now(), now()
+  from (values ('X1', 'col_51'), ('X2', 'vf.glob')) v(s, p);
+-- Briefs whose columns are col_51, and col_02 + the global one (legacy keys).
+insert into ids values ('b51', gen_random_uuid()), ('bg', gen_random_uuid()), ('bv51', gen_random_uuid()), ('bvg', gen_random_uuid());
+insert into public.brief (id, org_id, workspace_id, name, state, intake_status)
+select (select v from ids where k = b), (select v from ids where k = 'org'), (select v from ids where k = 'ws3'), n, 'Draft', 'done'
+  from (values ('b51', 'VF 51'), ('bg', 'VF G')) v(b, n);
+insert into public.brief_version (id, brief_id, org_id, workspace_id, version, config, rubric, weights)
+select (select v from ids where k = bv), (select v from ids where k = b), (select v from ids where k = 'org'),
+       (select v from ids where k = 'ws3'), 1, jsonb_build_object('offer', 'x', 'predicates', c::jsonb), '{}', '{}'
+  from (values ('bv51', 'b51', '["col_51"]'), ('bvg', 'bg', '["col_02", "vf.glob"]')) v(bv, b, c);
+update public.brief b set state = 'Active', current_version_id = (select v from ids where k = x.bv)
+  from (values ('b51', 'bv51'), ('bg', 'bvg')) x(bk, bv) where b.id = (select v from ids where k = x.bk);
+
+create function pg_temp.mw(w uuid, f jsonb, b uuid default null) returns text language sql as $$
+  select coalesce(string_agg(n.name, ',' order by n.name), '')
+    from public.view_entities(w, b, f, null, 500, 0) v join nm n on n.id = v.entity_id $$;
+create function pg_temp.states_view(w uuid, key text) returns text language sql as $$
+  select string_agg(st || '=' || pg_temp.mw($1, jsonb_build_object('field', jsonb_build_object('run', $2), 'op', 'one_of',
+                                                                  'value', jsonb_build_array(st))), ';' order by st)
+    from unnest(array['empty', 'queued', 'running', 'value', 'derived', 'no_data', 'skipped', 'error', 'stale']) st $$;
+-- The same, straight from app.cell_state ('*': any workspace predicate or unshadowed global one).
+create function pg_temp.states_cell(w uuid, key text) returns text language sql as $$
+  select string_agg(st || '=' || coalesce((
+           select string_agg(n.name, ',' order by n.name) from public.account a join nm n on n.id = a.entity_id
+            where a.workspace_id = $1
+              and exists (select 1 from public.predicate p
+                           where (case when $2 = '*'
+                                       then p.workspace_id = $1 or (p.workspace_id is null and not exists
+                                              (select 1 from public.predicate q where q.workspace_id = $1 and q.key = p.key))
+                                       else p.workspace_id = $1 and p.key = $2 end)
+                             and app.cell_state(a.entity_id, p.id) = st)), ''), ';' order by st)
+    from unnest(array['empty', 'queued', 'running', 'value', 'derived', 'no_data', 'skipped', 'error', 'stale']) st $$;
+create temp table want (k text primary key, v text) on commit drop;
+grant all on want to authenticated;
+insert into want values ('note2', pg_temp.states_cell((select v from ids where k = 'ws2'), 'note2')),
+                        ('f2', pg_temp.states_cell((select v from ids where k = 'ws2'), 'f2')),
+                        ('*', pg_temp.states_cell((select v from ids where k = 'ws2'), '*'));
+insert into want select 'mixed', string_agg(n.name, ',' order by n.name)
+  from public.account a join nm n on n.id = a.entity_id
+ where a.workspace_id = (select v from ids where k = 'ws2')
+   and app.cell_state(a.entity_id, (select v from ids where k = 'note2')) in ('error', 'value', 'empty');
+select is((select count(distinct app.cell_state(a.entity_id, p.v))::int
+             from public.account a cross join ids p
+            where a.workspace_id = (select v from ids where k = 'ws2') and p.k in ('note2', 'f2')),
+  9, '114. the VF Two cells cover all nine states');
+
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000ce01","role":"authenticated"}', true);
+select is(pg_temp.states_view((select v from ids where k = 'ws2'), 'note2'), (select v from want where k = 'note2'),
+  '115. {"run": key} matches app.cell_state for every state (extract column)');
+select is(pg_temp.states_view((select v from ids where k = 'ws2'), 'f2'), (select v from want where k = 'f2'),
+  '116. {"run": key} matches app.cell_state for every state (formula column)');
+select is(pg_temp.states_view((select v from ids where k = 'ws2'), '*'), (select v from want where k = '*'),
+  '117. {"run": "*"} matches "any column in app.cell_state" for every state');
+select is(pg_temp.mw((select v from ids where k = 'ws2'), '{"field":{"run":"note2"},"op":"one_of","value":["error","value","empty"]}'),
+  (select v from want where k = 'mixed'), '118. a mixed state list matches app.cell_state');
+select ok((select count(*) from public.predicate where workspace_id = (select v from ids where k = 'ws3')) >= 51,
+  '119. VF Three has more than 50 columns');
+select is(pg_temp.mw((select v from ids where k = 'ws3'),
+                     (select filter from public.list_views((select v from ids where k = 'ws3')) where preset = 'errored')),
+  'X1,X2', '120. errored with no Brief sees the 51st column and a global column');
+select is(pg_temp.mw((select v from ids where k = 'ws3'),
+                     (select filter from public.list_views((select v from ids where k = 'ws3')) where preset = 'errored'),
+                     (select v from ids where k = 'b51')),
+  'X1', '121. errored under a Brief checks that Brief''s columns');
+select is(pg_temp.mw((select v from ids where k = 'ws3'),
+                     (select filter from public.list_views((select v from ids where k = 'ws3')) where preset = 'errored'),
+                     (select v from ids where k = 'bg')),
+  'X2', '122. a Brief''s legacy global column counts');
+
+-- ── Node cap and created_at with a decimal ──
+select throws_ok(format('select pg_temp.m(%L::jsonb)', jsonb_build_object('all', (select jsonb_agg('{}'::jsonb) from generate_series(1, 200)))),
+  '22023', 'filter.all[199]: a filter has at most 200 nodes', '123. 201 nodes are refused');
+select is(pg_temp.m(jsonb_build_object('all', (select jsonb_agg('{}'::jsonb) from generate_series(1, 199)))), 'A,B,C,D',
+  '124. 200 nodes are allowed');
+select is(pg_temp.m(pg_temp.s('created_at', 'within_days', '30.0')), 'A,B', '125. within_days 30.0 is 30 days');
+
+-- ── save_view updates keep what is not passed; workspace views need an Editor ──
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000ce02","role":"authenticated"}', true);
+insert into ids select 'v_keep', public.save_view(p_ws => (select v from ids where k = 'ws'), p_name => 'Keep me',
+  p_brief => (select v from ids where k = 'b1'), p_columns => '[{"kind":"predicate","ref":"sites"}]',
+  p_filter => pg_temp.c('drone', 'is_true'), p_sort => '[{"column":"sites","dir":"desc"}]',
+  p_layout => 'board', p_visibility => 'workspace');
+select public.save_view(p_ws => (select v from ids where k = 'ws'), p_id => (select v from ids where k = 'v_keep'), p_name => 'Kept');
+select is((select jsonb_build_object('name', name, 'brief', brief_id, 'columns', columns, 'filter', filter, 'sort', sort,
+                                     'layout', layout, 'visibility', visibility)
+             from public.saved_view where id = (select v from ids where k = 'v_keep')),
+  jsonb_build_object('name', 'Kept', 'brief', (select v from ids where k = 'b1'),
+                     'columns', '[{"kind":"predicate","ref":"sites"}]'::jsonb, 'filter', pg_temp.c('drone', 'is_true'),
+                     'sort', '[{"column":"sites","dir":"desc"}]'::jsonb, 'layout', 'board', 'visibility', 'workspace'),
+  '126. a rename-only update keeps the brief, columns, filter, sort, layout and visibility');
+select public.save_view(p_ws => (select v from ids where k = 'ws'), p_id => (select v from ids where k = 'v_keep'), p_clear_brief => true);
+select is((select brief_id from public.saved_view where id = (select v from ids where k = 'v_keep')), null::uuid,
+  '127. p_clear_brief moves a view to all Briefs');
+reset role;
+update public.role_assignment set role = 'Viewer'
+ where member_id = '00000000-0000-4000-8000-00000000ce02' and workspace_id = (select v from ids where k = 'ws');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000ce02","role":"authenticated"}', true);
+select throws_ok(format($$select public.save_view(p_ws => %L::uuid, p_id => %L::uuid, p_visibility => 'personal')$$,
+    (select v from ids where k = 'ws'), (select v from ids where k = 'v_keep')),
+  '42501', 'only an Editor can change a workspace view', '128. a demoted creator cannot hide a workspace view');
+select is((select visibility from public.saved_view where id = (select v from ids where k = 'v_keep')), 'workspace',
+  '129. the workspace view stays shared');
+select throws_ok(format($$select public.save_view(p_ws => %L::uuid, p_id => %L::uuid, p_name => 'Ghost')$$,
+    (select v from ids where k = 'ws'), gen_random_uuid()),
+  '42501', null, '130. updating a missing view is refused like a forbidden one');
+select throws_ok(format('select public.delete_view(%L::uuid)', gen_random_uuid()),
+  '42501', null, '131. deleting a missing view is refused like a forbidden one');
+select throws_ok(format('select public.delete_view(%L::uuid)', (select v from ids where k = 'v_keep')),
+  '42501', null, '132. a demoted creator cannot delete a workspace view either');
+reset role;
 
 select * from finish();
 rollback;

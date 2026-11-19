@@ -2,6 +2,12 @@
 --   * app.filter_where is the only filter compiler. It turns the shared filter AST into a SQL
 --     boolean over the aliases e (entity) and a (account). Every value is quoted with %L; keys
 --     resolve to predicate ids, which are quoted too. Errors are 22023 and name the JSON path.
+--   * The AST is the Global Constraints one, plus one run leaf: {"field": {"run": "*"}, "op":
+--     "one_of", "value": [states]} holds when ANY column in scope is in one of the states. The
+--     scope is the given Brief's columns (its current version), else every workspace predicate
+--     plus the global ones a workspace key does not shadow (as app.view_predicate resolves keys).
+--     It compiles to one exists; the stale and errored presets use it.
+--   * Limits: at most 50 conditions, depth at most 8 and at most 200 nodes (groups and {} count).
 --   * public.view_entities lists the company accounts of a workspace through a filter and a sort.
 --   * public.saved_view holds named views; public.list_views returns the five presets, then the
 --     saved views the caller can see.
@@ -10,7 +16,7 @@
 -- A condition over alias b (public.brief): the given Brief, or any Pilot or Active Brief of the
 -- workspace when none is given. Verdict, band, priority and verdict sort join b on its current version.
 create function app.view_brief_ctx(p_ws uuid, p_brief uuid) returns text
-  language sql immutable set search_path = ''
+  language sql stable set search_path = ''
 as $$
   select case when p_brief is not null then format('b.id = %L::uuid', p_brief)
               else format('b.workspace_id = %L::uuid and b.state in (''Pilot'', ''Active'')', p_ws) end
@@ -27,11 +33,69 @@ as $$
    limit 1
 $$;
 
+-- The first key of p_obj (bytewise order) that is not in p_allowed, or null.
+create function app.filter_unknown_key(p_obj jsonb, p_allowed text[]) returns text
+  language sql immutable set search_path = ''
+as $$
+  select k from jsonb_object_keys(p_obj) k where not (k = any(p_allowed)) order by k collate "C" limit 1
+$$;
+
+-- The predicates a Brief's current version names as columns (spec objects or legacy keys),
+-- resolved as app.view_predicate does. Empty when the Brief has no published version.
+create function app.brief_column_ids(p_ws uuid, p_brief uuid) returns uuid[]
+  language sql stable security definer set search_path = ''
+as $$
+  select coalesce(array_agg(distinct v.id) filter (where v.id is not null), '{}')
+    from public.brief b
+    join public.brief_version bv on bv.id = b.current_version_id
+    cross join lateral jsonb_array_elements(case when jsonb_typeof(bv.config -> 'predicates') = 'array'
+                                                 then bv.config -> 'predicates' else '[]'::jsonb end) c
+    cross join lateral (select (app.view_predicate(p_ws, case jsonb_typeof(c) when 'string' then c
+                                                              else c -> 'key' end)).id) v(id)
+   where b.id = p_brief and b.workspace_id = p_ws
+$$;
+
+-- A run-state test, set-based: one exists over the predicates p_source yields (pid, fill), each
+-- joined to its latest run (queued_at desc, then id desc). The state follows app.cell_state
+-- exactly, in its order: queued / running, error, skipped (condition_not_met), then — only for
+-- a cell with an active claim — stale (its latest finished, non-cancelled run with an
+-- inputs_hash differs from app.run_inputs_hash now), derived (formula) or value; then no_data;
+-- else empty. app.run_inputs_hash is called only for those candidate cells, and only when the
+-- asked states include stale, derived or value. States that depend on the latest run alone
+-- compile to a test of its status.
+create function app.filter_run_sql(p_source text, p_states text[]) returns text
+  language sql immutable set search_path = ''
+as $$
+  select format(
+    'exists (select 1 from (%s) fp left join lateral (select pr.status from public.predicate_run pr'
+    ' where pr.entity_id = e.id and pr.predicate_id = fp.pid order by pr.queued_at desc, pr.id desc limit 1) lr on true'
+    ' where %s)',
+    p_source,
+    case when p_states <@ array['queued', 'running', 'error', 'skipped'] then
+      format('lr.status = any(%L::text[])', array_replace(p_states, 'skipped', 'condition_not_met'))
+    else format(
+      '(case when lr.status in (''queued'', ''running'') then lr.status'
+      ' when lr.status = ''error'' then ''error'''
+      ' when lr.status = ''condition_not_met'' then ''skipped'''
+      ' when exists (select 1 from public.claim fc where fc.entity_id = e.id and fc.predicate_id = fp.pid'
+      ' and fc.status = ''active'') then %s'
+      ' when lr.status = ''no_data'' then ''no_data'''
+      ' else ''empty'' end) = any(%L::text[])',
+      case when p_states && array['stale', 'derived', 'value'] then
+        '(case when (select fr.inputs_hash is distinct from app.run_inputs_hash(e.id, fp.pid)'
+        ' from public.predicate_run fr where fr.entity_id = e.id and fr.predicate_id = fp.pid'
+        ' and fr.finished_at is not null and fr.inputs_hash is not null and fr.status <> ''cancelled'''
+        ' order by fr.queued_at desc, fr.id desc limit 1) then ''stale'''
+        ' when fp.fill = ''formula'' then ''derived'' else ''value'' end)'
+      else '''value''' end,
+      p_states) end)
+$$;
+
 -- ── 2. The compiler ──────────────────────────────────────────────────────────
--- One node of the AST at p_path and depth p_depth (the root is depth 1). p_count is the number of
--- conditions compiled before this node; o_count is that number after it.
+-- One node of the AST at p_path and depth p_depth (the root is depth 1). p_count / p_nodes are the
+-- conditions / nodes compiled before this node; o_count / o_nodes are those numbers after it.
 create function app.filter_node(p_ws uuid, p_brief uuid, p_node jsonb, p_path text, p_depth int, p_count int,
-                                out o_sql text, out o_count int)
+                                p_nodes int, out o_sql text, out o_count int, out o_nodes int)
   language plpgsql stable security definer set search_path = ''
 as $$
 declare
@@ -56,7 +120,12 @@ declare
   v_want   text;
   v_test   text;
   v_ctx    text;
+  v_src    text;
 begin
+  o_nodes := p_nodes + 1;
+  if o_nodes > 200 then
+    raise exception '%: a filter has at most 200 nodes', p_path using errcode = '22023';
+  end if;
   if p_depth > 8 then
     raise exception '%: a filter nests at most 8 levels deep', p_path using errcode = '22023';
   end if;
@@ -72,8 +141,7 @@ begin
 
   -- ── Groups ──
   if not (p_node ? 'field') then
-    select k into v_key from jsonb_object_keys(p_node) k
-     where k not in ('all', 'any', 'not') order by k collate "C" limit 1;
+    v_key := app.filter_unknown_key(p_node, array['all', 'any', 'not']);
     if v_key is not null then
       raise exception '%: unknown key "%"', p_path, v_key using errcode = '22023';
     end if;
@@ -81,8 +149,10 @@ begin
       raise exception '%: a group has exactly one of all, any or not', p_path using errcode = '22023';
     end if;
     if p_node ? 'not' then
-      select * into v_child from app.filter_node(p_ws, p_brief, p_node -> 'not', p_path || '.not', p_depth + 1, o_count);
+      select * into v_child from app.filter_node(p_ws, p_brief, p_node -> 'not', p_path || '.not', p_depth + 1,
+                                                 o_count, o_nodes);
       o_count := v_child.o_count;
+      o_nodes := v_child.o_nodes;
       o_sql := format('(not %s)', v_child.o_sql);
       return;
     end if;
@@ -93,8 +163,10 @@ begin
     end if;
     for v_i in 0 .. jsonb_array_length(v_kids) - 1 loop
       select * into v_child from app.filter_node(p_ws, p_brief, v_kids -> v_i,
-                                                 format('%s.%s[%s]', p_path, v_key, v_i), p_depth + 1, o_count);
+                                                 format('%s.%s[%s]', p_path, v_key, v_i), p_depth + 1,
+                                                 o_count, o_nodes);
       o_count := v_child.o_count;
+      o_nodes := v_child.o_nodes;
       v_parts := v_parts || v_child.o_sql;
     end loop;
     if cardinality(v_parts) = 0 then
@@ -110,8 +182,7 @@ begin
   if o_count > 50 then
     raise exception '%: a filter has at most 50 conditions', p_path using errcode = '22023';
   end if;
-  select k into v_key from jsonb_object_keys(p_node) k
-   where k not in ('field', 'op', 'value') order by k collate "C" limit 1;
+  v_key := app.filter_unknown_key(p_node, array['field', 'op', 'value']);
   if v_key is not null then
     raise exception '%: unknown key "%"', p_path, v_key using errcode = '22023';
   end if;
@@ -139,7 +210,7 @@ begin
 
   -- ── {"column": key} ──
   if v_field ? 'column' then
-    select k into v_key from jsonb_object_keys(v_field) k where k <> 'column' order by k collate "C" limit 1;
+    v_key := app.filter_unknown_key(v_field, array['column']);
     if v_key is not null then
       raise exception '%.field: unknown key "%"', p_path, v_key using errcode = '22023';
     end if;
@@ -209,15 +280,25 @@ begin
     return;
   end if;
 
-  -- ── {"run": key} ──
+  -- ── {"run": key} and {"run": "*"} (any column in scope) ──
   if v_field ? 'run' then
-    select k into v_key from jsonb_object_keys(v_field) k where k <> 'run' order by k collate "C" limit 1;
+    v_key := app.filter_unknown_key(v_field, array['run']);
     if v_key is not null then
       raise exception '%.field: unknown key "%"', p_path, v_key using errcode = '22023';
     end if;
-    v_pred := app.view_predicate(p_ws, v_field -> 'run');
-    if v_pred.id is null then
-      raise exception '%.field: unknown column "%"', p_path, coalesce(v_field ->> 'run', '') using errcode = '22023';
+    if v_field -> 'run' = '"*"'::jsonb then
+      v_src := case when p_brief is not null
+        then format('select p.id as pid, p.fill_method as fill from public.predicate p where p.id = any(%L::uuid[])',
+                    app.brief_column_ids(p_ws, p_brief))
+        else format('select p.id as pid, p.fill_method as fill from public.predicate p where p.workspace_id = %L::uuid'
+                    ' or (p.workspace_id is null and not exists (select 1 from public.predicate w'
+                    ' where w.workspace_id = %L::uuid and w.key = p.key))', p_ws, p_ws) end;
+    else
+      v_pred := app.view_predicate(p_ws, v_field -> 'run');
+      if v_pred.id is null then
+        raise exception '%.field: unknown column "%"', p_path, coalesce(v_field ->> 'run', '') using errcode = '22023';
+      end if;
+      v_src := format('select p.id as pid, p.fill_method as fill from public.predicate p where p.id = %L::uuid', v_pred.id);
     end if;
     if v_op <> 'one_of' then
       raise exception '%.op: % does not apply to a run state', p_path, v_op using errcode = '22023';
@@ -228,7 +309,7 @@ begin
         raise exception '%.value[%]: "%" is not a cell state', p_path, v_i, v_el #>> '{}' using errcode = '22023';
       end if;
     end loop;
-    o_sql := format('(%L::jsonb @> to_jsonb(app.cell_state(e.id, %L::uuid)))', v_val, v_pred.id);
+    o_sql := app.filter_run_sql(v_src, array(select distinct jsonb_array_elements_text(v_val) order by 1));
     return;
   end if;
 
@@ -240,8 +321,7 @@ begin
   if v_sys is null or v_sys not in ('verdict', 'band', 'stage', 'label', 'name', 'domain', 'created_at') then
     raise exception '%.field: unknown system field "%"', p_path, coalesce(v_field ->> 'system', '') using errcode = '22023';
   end if;
-  select k into v_key from jsonb_object_keys(v_field) k
-   where k <> 'system' and not (v_sys = 'label' and k = 'kind') order by k collate "C" limit 1;
+  v_key := app.filter_unknown_key(v_field, case when v_sys = 'label' then array['system', 'kind'] else array['system'] end);
   if v_key is not null then
     raise exception '%.field: unknown key "%"', p_path, v_key using errcode = '22023';
   end if;
@@ -315,7 +395,7 @@ begin
     raise exception '%.value: % needs a whole number of days (0–36500)', p_path, v_op using errcode = '22023';
   end if;
   o_sql := format('(a.created_at %s now() - make_interval(days => %L::int))',
-                  case when v_op = 'within_days' then '>=' else '<' end, v_val #>> '{}');
+                  case when v_op = 'within_days' then '>=' else '<' end, v_val::numeric::int);
 end $$;
 
 create function app.view_is_date(p_text text) returns boolean
@@ -342,7 +422,7 @@ begin
   if p_filter is null or p_filter = 'null'::jsonb then
     return 'true';
   end if;
-  select * into r from app.filter_node(p_ws, p_brief, p_filter, v_path, 1, 0);
+  select * into r from app.filter_node(p_ws, p_brief, p_filter, v_path, 1, 0, 0);
   return r.o_sql;
 end $$;
 
@@ -377,8 +457,7 @@ begin
       raise exception 'sort[%]: must be {"system": name, "dir": ...} or {"column": key, "dir": ...}', v_i
         using errcode = '22023';
     end if;
-    select k into v_key from jsonb_object_keys(v_item) k
-     where k not in ('system', 'column', 'dir') order by k collate "C" limit 1;
+    v_key := app.filter_unknown_key(v_item, array['system', 'column', 'dir']);
     if v_key is not null then
       raise exception 'sort[%]: unknown key "%"', v_i, v_key using errcode = '22023';
     end if;
@@ -426,8 +505,10 @@ declare
   v_offset int := coalesce(p_offset, 0);
   v_where  text;
   v_order  text;
+  v_org    uuid;
 begin
-  if not app.has_workspace_role(p_ws, 'Viewer') then
+  select w.org_id into v_org from public.workspace w where w.id = p_ws;
+  if v_org is null or not app.has_workspace_role(p_ws, 'Viewer') then
     raise exception 'permission denied' using errcode = '42501';
   end if;
   if p_entity_type = 'person' then
@@ -446,9 +527,9 @@ begin
   v_order := app.view_order(p_ws, p_brief, p_sort);
   return query execute format(
     'select e.id, count(*) over () from public.account a join public.entity e on e.id = a.entity_id'
-    ' where a.workspace_id = $1 and e.entity_type = ''company'' and e.status = ''active'' and %s'
+    ' where a.workspace_id = $1 and e.org_id = $4 and e.entity_type = ''company'' and e.status = ''active'' and %s'
     ' order by %s limit $2 offset $3', v_where, v_order)
-    using p_ws, v_limit, v_offset;
+    using p_ws, v_limit, v_offset, v_org;
 end $$;
 
 -- ── 5. Saved views ───────────────────────────────────────────────────────────
@@ -498,8 +579,7 @@ begin
     if jsonb_typeof(v_c) <> 'object' then
       raise exception 'columns[%]: must be an object', v_i using errcode = '22023';
     end if;
-    select k into v_key from jsonb_object_keys(v_c) k
-     where k not in ('kind', 'ref', 'width', 'pinned') order by k collate "C" limit 1;
+    v_key := app.filter_unknown_key(v_c, array['kind', 'ref', 'width', 'pinned']);
     if v_key is not null then
       raise exception 'columns[%]: unknown key "%"', v_i, v_key using errcode = '22023';
     end if;
@@ -525,48 +605,72 @@ begin
 end $$;
 
 -- Creates (p_id null) or updates a view. Any member saves a personal view; a workspace view needs
--- an Editor. An update is for the creator or an Admin. The filter is checked by compiling it.
+-- an Editor, and so does any change to a view that is a workspace view now (even by its creator).
+-- An update is for the creator or an Admin; a parameter left null keeps the stored value (pass
+-- p_clear_brief to move a view to all Briefs). The filter and sort are checked by compiling them.
 create function public.save_view(p_ws uuid, p_id uuid default null, p_name text default null, p_brief uuid default null,
-                                 p_columns jsonb default '[]', p_filter jsonb default '{}', p_sort jsonb default '[]',
-                                 p_layout text default 'table', p_visibility text default 'workspace',
-                                 p_entity_type public.entity_type default 'company') returns uuid
+                                 p_columns jsonb default null, p_filter jsonb default null, p_sort jsonb default null,
+                                 p_layout text default null, p_visibility text default null,
+                                 p_entity_type public.entity_type default null,
+                                 p_clear_brief boolean default false) returns uuid
   language plpgsql security definer set search_path = ''
 as $$
 declare
   v_org     uuid;
   v_me      uuid;
-  v_filter  jsonb := coalesce(nullif(p_filter, 'null'::jsonb), '{}'::jsonb);
-  v_sort    jsonb := coalesce(nullif(p_sort, 'null'::jsonb), '[]'::jsonb);
-  v_columns jsonb := coalesce(nullif(p_columns, 'null'::jsonb), '[]'::jsonb);
   r         public.saved_view%rowtype;
-  v_id      uuid;
+  v_name    text;
+  v_brief   uuid;
+  v_columns jsonb;
+  v_filter  jsonb;
+  v_sort    jsonb;
+  v_layout  text;
+  v_vis     text;
+  v_type    public.entity_type;
 begin
   select org_id into v_org from public.workspace where id = p_ws;
   if v_org is null or not app.has_workspace_role(p_ws, 'Viewer') then
     raise exception 'permission denied' using errcode = '42501';
   end if;
   v_me := app.current_member_id(v_org);
-  if p_visibility is null or p_visibility not in ('personal', 'workspace') then
+
+  if p_id is not null then
+    select * into r from public.saved_view where id = p_id and workspace_id = p_ws for update;
+    -- A missing view and a forbidden one look the same.
+    if not found or (r.created_by is distinct from v_me and not app.has_workspace_role(p_ws, 'Admin')) then
+      raise exception 'only the creator or an Admin can change this view' using errcode = '42501';
+    end if;
+    if r.visibility = 'workspace' and not app.has_workspace_role(p_ws, 'Editor') then
+      raise exception 'only an Editor can change a workspace view' using errcode = '42501';
+    end if;
+  end if;
+  v_name    := coalesce(p_name, r.name);
+  v_brief   := case when p_clear_brief then null else coalesce(p_brief, r.brief_id) end;
+  v_columns := coalesce(nullif(p_columns, 'null'::jsonb), r.columns, '[]'::jsonb);
+  v_filter  := coalesce(nullif(p_filter, 'null'::jsonb), r.filter, '{}'::jsonb);
+  v_sort    := coalesce(nullif(p_sort, 'null'::jsonb), r.sort, '[]'::jsonb);
+  v_layout  := coalesce(p_layout, r.layout, 'table');
+  v_vis     := coalesce(p_visibility, r.visibility, 'workspace');
+  v_type    := coalesce(p_entity_type, r.entity_type, 'company');
+
+  if v_vis not in ('personal', 'workspace') then
     raise exception 'visibility must be personal or workspace' using errcode = '22023';
   end if;
-  if p_visibility = 'workspace' and not app.has_workspace_role(p_ws, 'Editor') then
+  if v_vis = 'workspace' and not app.has_workspace_role(p_ws, 'Editor') then
     raise exception 'only an Editor can save a workspace view' using errcode = '42501';
   end if;
-  if p_name is null or length(btrim(p_name)) not between 1 and 120 then
+  if v_name is null or length(btrim(v_name)) not between 1 and 120 then
     raise exception 'a view needs a name of 1–120 characters' using errcode = '22023';
   end if;
-  if p_layout is null or p_layout not in ('table', 'board', 'map') then
+  if v_layout not in ('table', 'board', 'map') then
     raise exception 'layout must be table, board or map' using errcode = '22023';
   end if;
-  if p_entity_type is null then
-    raise exception 'a view needs an entity type' using errcode = '22023';
-  end if;
-  if p_brief is not null and not exists (select 1 from public.brief where id = p_brief and workspace_id = p_ws) then
+  if v_brief is not null and not exists (select 1 from public.brief where id = v_brief and workspace_id = p_ws) then
     raise exception 'the Brief is not in this workspace' using errcode = '22023';
   end if;
   perform app.validate_view_columns(p_ws, v_columns);
-  perform app.filter_where(p_ws, p_brief, v_filter, 'filter');
-  perform app.view_order(p_ws, p_brief, v_sort);
+  perform app.filter_where(p_ws, v_brief, v_filter, 'filter');
+  perform app.view_order(p_ws, v_brief, v_sort);
   if jsonb_typeof(v_filter) <> 'object' then
     raise exception 'filter: a filter must be an object' using errcode = '22023';
   end if;
@@ -574,31 +678,23 @@ begin
   if p_id is null then
     insert into public.saved_view (org_id, workspace_id, brief_id, entity_type, name, columns, filter, sort, layout,
                                    visibility, created_by)
-    values (v_org, p_ws, p_brief, p_entity_type, btrim(p_name), v_columns, v_filter, v_sort, p_layout,
-            p_visibility, v_me)
+    values (v_org, p_ws, v_brief, v_type, btrim(v_name), v_columns, v_filter, v_sort, v_layout, v_vis, v_me)
     returning * into r;
     perform app.audit(v_org, p_ws, 'saved_view.created', 'saved_view', r.id, null, to_jsonb(r));
     return r.id;
   end if;
 
-  select * into r from public.saved_view where id = p_id and workspace_id = p_ws for update;
-  if not found then
-    raise exception 'view not found' using errcode = 'P0002';
-  end if;
-  if r.created_by is distinct from v_me and not app.has_workspace_role(p_ws, 'Admin') then
-    raise exception 'only the creator or an Admin can change this view' using errcode = '42501';
-  end if;
   update public.saved_view
-     set brief_id = p_brief, entity_type = p_entity_type, name = btrim(p_name), columns = v_columns,
-         filter = v_filter, sort = v_sort, layout = p_layout, visibility = p_visibility, updated_at = now()
-   where id = p_id
-  returning id into v_id;
+     set brief_id = v_brief, entity_type = v_type, name = btrim(v_name), columns = v_columns,
+         filter = v_filter, sort = v_sort, layout = v_layout, visibility = v_vis, updated_at = now()
+   where id = p_id;
   perform app.audit(v_org, p_ws, 'saved_view.updated', 'saved_view', p_id, to_jsonb(r),
                     (select to_jsonb(x) from public.saved_view x where x.id = p_id));
-  return v_id;
+  return p_id;
 end $$;
 
--- For the creator or an Admin.
+-- For the creator (an Editor or above for a workspace view) or an Admin. A missing view and a
+-- forbidden one both raise 42501.
 create function public.delete_view(p_id uuid) returns void
   language plpgsql security definer set search_path = ''
 as $$
@@ -606,11 +702,10 @@ declare
   r public.saved_view%rowtype;
 begin
   select * into r from public.saved_view where id = p_id for update;
-  if not found then
-    raise exception 'view not found' using errcode = 'P0002';
-  end if;
-  if not ((app.has_workspace_role(r.workspace_id, 'Viewer') and r.created_by = app.current_member_id(r.org_id))
-          or app.has_workspace_role(r.workspace_id, 'Admin')) then
+  if not found
+     or not ((app.has_workspace_role(r.workspace_id, case when r.visibility = 'workspace' then 'Editor' else 'Viewer' end::public.member_role)
+              and r.created_by = app.current_member_id(r.org_id))
+             or app.has_workspace_role(r.workspace_id, 'Admin')) then
     raise exception 'only the creator or an Admin can delete this view' using errcode = '42501';
   end if;
   delete from public.saved_view where id = p_id;
@@ -619,8 +714,8 @@ end $$;
 
 -- The five presets (in the Global Constraints order), then the saved views the caller can see:
 -- workspace views and their own personal views, for the given Brief or for all Briefs.
--- "Any column" for stale and errored is any column of the Brief's current version, or of the
--- workspace when no Brief is given (at most 50, by key: the filter's condition limit).
+-- stale and errored use the {"run": "*"} leaf, so "any column" is resolved when the view runs
+-- (the Brief's columns, else every workspace and global column), with no cap.
 create function public.list_views(p_ws uuid, p_brief uuid default null)
 returns table (id uuid, preset text, name text, brief_id uuid, entity_type public.entity_type, columns jsonb,
                filter jsonb, sort jsonb, layout text, visibility text, created_by uuid,
@@ -629,9 +724,8 @@ returns table (id uuid, preset text, name text, brief_id uuid, entity_type publi
 as $$
 #variable_conflict use_column
 declare
-  v_org  uuid;
-  v_me   uuid;
-  v_keys text[];
+  v_org uuid;
+  v_me  uuid;
 begin
   select w.org_id into v_org from public.workspace w where w.id = p_ws;
   if v_org is null or not app.has_workspace_role(p_ws, 'Viewer') then
@@ -642,22 +736,6 @@ begin
   end if;
   v_me := app.current_member_id(v_org);
 
-  if p_brief is null then
-    select coalesce(array_agg(k order by k collate "C"), '{}') into v_keys
-      from (select p.key as k from public.predicate p where p.workspace_id = p_ws order by p.key collate "C" limit 50) x;
-  else
-    select coalesce(array_agg(k order by k collate "C"), '{}') into v_keys
-      from (select distinct case jsonb_typeof(c) when 'string' then c #>> '{}' else c ->> 'key' end as k
-              from public.brief b
-              join public.brief_version bv on bv.id = b.current_version_id
-              cross join lateral jsonb_array_elements(case when jsonb_typeof(bv.config -> 'predicates') = 'array'
-                                                           then bv.config -> 'predicates' else '[]'::jsonb end) c
-             where b.id = p_brief) x
-     where k is not null
-       and exists (select 1 from public.predicate p where p.key = x.k and (p.workspace_id = p_ws or p.workspace_id is null));
-    v_keys := v_keys[1:50];
-  end if;
-
   return query
   select null::uuid, x.preset, x.name, p_brief, 'company'::public.entity_type, '[]'::jsonb, x.filter, x.sort,
          'table'::text, 'workspace'::text, null::uuid, null::timestamptz, null::timestamptz
@@ -667,16 +745,8 @@ begin
                  {"field": {"system": "band"}, "op": "one_of", "value": ["High", "Medium"]}]}'::jsonb, '[]'::jsonb),
       (2, 'needs_evidence', 'Needs evidence',
        '{"field": {"system": "verdict"}, "op": "one_of", "value": ["Unverified"]}'::jsonb, '[]'::jsonb),
-      (3, 'stale', 'Stale',
-       jsonb_build_object('any', coalesce((select jsonb_agg(jsonb_build_object('field', jsonb_build_object('run', k),
-                                                                                'op', 'one_of', 'value', '["stale"]'::jsonb)
-                                                            order by o)
-                                             from unnest(v_keys) with ordinality u(k, o)), '[]'::jsonb)), '[]'::jsonb),
-      (4, 'errored', 'Errored',
-       jsonb_build_object('any', coalesce((select jsonb_agg(jsonb_build_object('field', jsonb_build_object('run', k),
-                                                                                'op', 'one_of', 'value', '["error"]'::jsonb)
-                                                            order by o)
-                                             from unnest(v_keys) with ordinality u(k, o)), '[]'::jsonb)), '[]'::jsonb),
+      (3, 'stale', 'Stale', '{"field": {"run": "*"}, "op": "one_of", "value": ["stale"]}'::jsonb, '[]'::jsonb),
+      (4, 'errored', 'Errored', '{"field": {"run": "*"}, "op": "one_of", "value": ["error"]}'::jsonb, '[]'::jsonb),
       (5, 'by_verdict', 'By verdict', '{}'::jsonb, '[{"system": "verdict", "dir": "asc"}]'::jsonb)
     ) x(n, preset, name, filter, sort)
    order by x.n;
@@ -693,8 +763,9 @@ end $$;
 
 -- ── 6. Grants ────────────────────────────────────────────────────────────────
 revoke execute on function
-  app.view_brief_ctx(uuid, uuid), app.view_predicate(uuid, jsonb),
-  app.filter_node(uuid, uuid, jsonb, text, int, int), app.view_is_date(text),
+  app.view_brief_ctx(uuid, uuid), app.view_predicate(uuid, jsonb), app.filter_unknown_key(jsonb, text[]),
+  app.brief_column_ids(uuid, uuid), app.filter_run_sql(text, text[]),
+  app.filter_node(uuid, uuid, jsonb, text, int, int, int), app.view_is_date(text),
   app.filter_where(uuid, uuid, jsonb, text), app.view_order(uuid, uuid, jsonb),
   app.validate_view_columns(uuid, jsonb)
   from public, anon, authenticated;
@@ -704,11 +775,11 @@ grant execute on function
 
 revoke execute on function
   public.view_entities(uuid, uuid, jsonb, jsonb, int, int, public.entity_type),
-  public.save_view(uuid, uuid, text, uuid, jsonb, jsonb, jsonb, text, text, public.entity_type),
+  public.save_view(uuid, uuid, text, uuid, jsonb, jsonb, jsonb, text, text, public.entity_type, boolean),
   public.delete_view(uuid), public.list_views(uuid, uuid)
   from public, anon;
 grant execute on function
   public.view_entities(uuid, uuid, jsonb, jsonb, int, int, public.entity_type),
-  public.save_view(uuid, uuid, text, uuid, jsonb, jsonb, jsonb, text, text, public.entity_type),
+  public.save_view(uuid, uuid, text, uuid, jsonb, jsonb, jsonb, text, text, public.entity_type, boolean),
   public.delete_view(uuid), public.list_views(uuid, uuid)
   to authenticated;
