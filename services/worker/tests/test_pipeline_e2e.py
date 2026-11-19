@@ -133,6 +133,8 @@ class FakeGateway:
 
     def __init__(self) -> None:
         self.calls: list[str] = []
+        # (version, Brief hypothesis) of every verdict call.
+        self.verdicts: list[tuple[int, str]] = []
 
     def configured(self) -> dict[str, bool]:
         return {"chat": True, "embed": True}
@@ -152,6 +154,8 @@ class FakeGateway:
     ) -> Any:
         render(prompt, variables)
         self.calls.append(prompt.name)
+        if prompt.name == "verdict":
+            self.verdicts.append((prompt.version, variables.get("hypothesis", "")))
         return Result(
             value=output.model_validate(self._answer(prompt.name, variables)),
             extractor_version_id=CANARY_EXTRACTOR_VERSION,
@@ -319,8 +323,6 @@ class FakeGateway:
                 ],
                 "source_date": "2026-10-01",
             }
-        if name == "verdict":
-            return {"value": "Likely", "reasoning": "quoted", "supporting_claim_indices": [0]}
         if name == "account_card":
             return {"bullets": ["Runs drones"], "next_step": "Send the case study"}
         if name == "identity_tiebreak":
@@ -1456,6 +1458,35 @@ async def _brief_columns_scenario(pool: AsyncConnectionPool) -> None:
             "industry",
         ]
 
+        # The Brief's rules decide: a quoted drone programme claim Confirms without a verdict call.
+        verdict_sql = (
+            "select v.value::text, v.claim_ids, v.inputs from public.verdict v"
+            " join public.brief b on b.current_version_id = v.brief_version_id"
+            " where v.entity_id = %s and b.id = %s"
+        )
+        value, claim_ids, inputs = (await db.admin(verdict_sql, (entity, BRIEF_P2)))[0]
+        drone_claim = await db.one(
+            "select c.id from public.claim c join public.predicate p on p.id = c.predicate_id"
+            " where c.entity_id = %s and p.key = 'drone_programme'",
+            (entity,),
+        )
+        assert (value, [str(c) for c in claim_ids]) == ("Confirmed", [str(drone_claim)])
+        assert inputs["method"] == "rubric"
+        assert [(r["predicate"], r["met"]) for r in inputs["rubric"]] == [
+            ("drone_programme", True),
+            ("industry", False),
+        ]
+        # Only the other, rule-less Brief in the workspace asked the AI, through verdict v2.
+        assert gateway.verdicts, "the legacy Brief still judges through verdict v2"
+        assert set(gateway.verdicts) == {(2, "Something else")}, gateway.verdicts
+        other_method = await db.one(
+            "select v.inputs ->> 'method' from public.verdict v"
+            " join public.brief b on b.current_version_id = v.brief_version_id"
+            " where v.entity_id = %s and b.id = %s",
+            (entity, OTHER_BRIEF_P2),
+        )
+        assert other_method == "ai"
+
         # Out of scope: another Brief's extracted record, and this Brief's pending record.
         other = await _raw_record(db, radars[OTHER_BRIEF_P2], "extracted", "other-brief")
         pending = await _raw_record(db, radars[BRIEF_P2], "pending", "pending-record")
@@ -1517,3 +1548,5 @@ async def _brief_columns_scenario(pool: AsyncConnectionPool) -> None:
         ctx = CallContext(ORG_P2, WS_P2, None, None, "extract.backfill", {})
         assert await backfill_record(pool, gateway, UUID(str(record)), ["site_count"], ctx) == 1  # type: ignore[arg-type]
         assert await db.one(claims_sql, (entity,)) == claims_before
+        # Version 2 is judged under the same rules: still no verdict call for this Brief.
+        assert set(gateway.verdicts) == {(2, "Something else")}, gateway.verdicts
