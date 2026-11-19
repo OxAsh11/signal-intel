@@ -739,8 +739,39 @@ def build_app(
 
         await extract_backfill(pool, UUID(brief_id), UUID(workspace_id))
 
-    # Wire the deferrable handle so extract_backfill can call defer_async via the module attr.
+    @job(app, type="extract.backfill_record", kill_switch=kill_switch, queue="extract", retry=2)
+    async def extract_backfill_record_job(
+        *,
+        source_record_id: str,
+        predicate_keys: list[str],
+        org_id: str,
+        workspace_id: str,
+        brief_id: str | None = None,
+        **_: Any,
+    ) -> int:
+        """Fill a Brief's new columns over one already extracted record (P2).
+
+        The AI spend is metered against the Brief that asked for the backfill (its budget)."""
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        ctx = CallContext(
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
+            brief_id=UUID(brief_id) if brief_id else None,
+            job_id=None,
+            job_type="extract.backfill",
+            job_args={
+                "source_record_id": source_record_id,
+                "predicate_keys": predicate_keys,
+                "brief_id": brief_id,
+            },
+        )
+        return await _m03_extraction.backfill_record(
+            pool, gateway, UUID(source_record_id), predicate_keys, ctx
+        )
+
+    # Wire the deferrable handles so m03 can call defer_async via the module attrs.
     _m03_extraction.extract_relevance_judge_job = extract_relevance_judge_job
+    _m03_extraction.extract_backfill_record_job = extract_backfill_record_job
 
     # ------------------------------------------------------------------
     # Identity resolution jobs (Phase 1d)
@@ -1565,6 +1596,26 @@ def build_app(
                     app.tasks["brief.preview"]
                     .configure(queueing_lock=f"preview:{payload['preview_id']}")
                     .defer_async(preview_id=payload["preview_id"])
+                )
+        elif evt == "predicate.backfill_requested" and pool is not None:
+            # A version added columns: fill them over the records already extracted (P2).
+            keys = payload.get("predicate_keys")
+            if (
+                not payload.get("brief_id")
+                or not payload.get("workspace_id")
+                or not isinstance(keys, list)
+                or not keys
+            ):
+                # Malformed payload: a retry would fail the same way, so drop it loudly.
+                log.warning(
+                    "dispatch.malformed_backfill", event_type=evt, event_id=event.get("event_id")
+                )
+            else:
+                await _m03_extraction.queue_predicate_backfill(
+                    pool,
+                    UUID(str(payload["brief_id"])),
+                    UUID(str(payload["workspace_id"])),
+                    [str(k) for k in keys],
                 )
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")

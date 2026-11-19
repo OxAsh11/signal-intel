@@ -9,17 +9,32 @@ fit/evidence/scale/timing; band from the Brief's thresholds. Reachability is rea
 from __future__ import annotations
 
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-FIT_PREDICATES = {"vertical", "size", "geography", "commercial_role"}
-QUANTITY_PREDICATES = {"sites", "seats", "units"}
-LABEL_PREDICATES = ("vertical", "geography", "commercial_role")
+from signal_core.brief_columns import ICP_LIST_BY_ROLE, ColumnSpec, column_specs
+
 TIMING_WINDOW_DAYS = 90
-# Claim predicate → the Brief's ICP list it must match (when that list is set). Size is left out:
-# size claims are free text and size bands are ranges, so exact matching would wrongly exclude.
-ICP_LISTS = {"vertical": "verticals", "geography": "geographies"}
+# A config with no column specs (legacy plain keys) reads these roles.
+LEGACY_ROLES: dict[str, str] = {
+    "vertical": "fit.vertical",
+    "size": "fit.size",
+    "geography": "fit.geography",
+    "commercial_role": "fit.commercial_role",
+    "sites": "scale",
+    "seats": "scale",
+    "units": "scale",
+}
+LABEL_KIND_BY_ROLE: dict[str, str] = {
+    "fit.vertical": "vertical",
+    "fit.geography": "geography",
+    "fit.commercial_role": "commercial_role",
+}
+GATED_ROLES = ("fit.vertical", "fit.geography")
+_BAND_RANGE = re.compile(r"^(\d+)\s*-\s*(\d+)$")
+_BAND_OPEN = re.compile(r"^(\d+)\+$")
 
 DEFAULT_WEIGHTS: dict[str, float] = {"fit": 0.25, "evidence": 0.25, "scale": 0.25, "timing": 0.25}
 DEFAULT_THRESHOLDS: dict[str, float] = {"High": 70.0, "Medium": 40.0}
@@ -92,20 +107,84 @@ def _text(value: Any) -> str:
     return value if isinstance(value, str) else str(value)
 
 
-def outside_icp(config: dict[str, Any], claims: list[tuple[Any, ...]]) -> str | None:
-    """The first predicate whose known values all fall outside the Brief's ICP list, if any.
+def predicate_roles(config: dict[str, Any]) -> dict[str, str]:
+    """Predicate key → scoring role: the Brief's column specs, or the legacy defaults."""
+    return _roles_of(column_specs(config))
 
-    Unknown values never exclude: a predicate with no claim, or an empty ICP list, passes.
-    """
+
+def _roles_of(specs: list[ColumnSpec]) -> dict[str, str]:
+    return {sp.key: sp.role for sp in specs} if specs else dict(LEGACY_ROLES)
+
+
+def _icp_entries(config: dict[str, Any], role: str) -> list[str]:
+    name = ICP_LIST_BY_ROLE.get(role)
+    if not name:
+        return []
     icp = config.get("icp") or {}
-    for key, list_name in ICP_LISTS.items():
-        allowed = {_text(v).strip().lower() for v in (icp.get(list_name) or [])}
-        if not allowed:
-            continue
-        values = {_text(c[2]).strip().lower() for c in claims if c[1] == key}
-        if values and not values & allowed:
-            return key
+    raw = icp.get(name.split(".", 1)[1])
+    if not isinstance(raw, list):
+        return []
+    return [str(e) for e in raw if str(e).strip()]
+
+
+def _word_in(needle: str, haystack: str) -> bool:
+    return re.search(rf"(?<!\w){re.escape(needle)}(?!\w)", haystack) is not None
+
+
+def _as_number(value: Any) -> float | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value) if math.isfinite(value) else None
+    if isinstance(value, str):
+        try:
+            n = float(value.strip())
+        except ValueError:
+            return None
+        return n if math.isfinite(n) else None
     return None
+
+
+def value_matches_icp(role: str, value: Any, entries: list[str]) -> bool | None:
+    """Does a claim value fall in the ICP list? None when it can't tell (never counts)."""
+    if value is None or not entries:
+        return None
+    text = _text(value).strip().casefold()
+    folded = [e.strip().casefold() for e in entries if e.strip()]
+    if role == "fit.size":
+        if text in folded:
+            return True
+        number = _as_number(value)
+        if number is None:
+            return None
+        parsable = False
+        for entry in folded:
+            if m := _BAND_RANGE.match(entry):
+                lo, hi = int(m.group(1)), int(m.group(2))
+                if lo > hi:
+                    continue
+                parsable = True
+                if lo <= number <= hi:
+                    return True
+            elif m := _BAND_OPEN.match(entry):
+                parsable = True
+                if number >= int(m.group(1)):
+                    return True
+        return False if parsable else None
+    if not text:
+        return None
+    return any(text == e or _word_in(e, text) or _word_in(text, e) for e in folded)
+
+
+def _decisive(
+    role: str, entries: list[str], claims: list[tuple[Any, ...]]
+) -> list[tuple[tuple[Any, ...], bool]]:
+    out: list[tuple[tuple[Any, ...], bool]] = []
+    for c in claims:
+        hit = value_matches_icp(role, c[2], entries)
+        if hit is not None:
+            out.append((c, hit))
+    return out
 
 
 def score_account(
@@ -115,36 +194,62 @@ def score_account(
     claims = inputs.claims
     decayed = [(c, _decay(c[4], c[5], now)) for c in claims]
 
-    # Fit: confidence of the ICP claims, weighted by how fresh each is.
-    fit_claims = [(c, w) for c, w in decayed if c[1] in FIT_PREDICATES]
-    fit_weight = sum(w for _, w in fit_claims)
-    fit_score = (
-        round(sum((c[3] if c[3] is not None else 50) * w for c, w in fit_claims) / fit_weight)
-        if fit_weight > 0
-        else 50
-    )
+    specs = column_specs(config)
+    roles = _roles_of(specs)
+    legacy = not specs
+
+    # Fit: per fit-role predicate, 100 if any decisive claim is in the Brief's ICP list, else 0,
+    # weighted by the freshest of its claims.
+    fit_total = 0.0
+    fit_weight = 0.0
+    fit_ids: list[str] = []
+    matched: list[str] = []
+    missed: list[str] = []
+    icp_miss: str | None = None
+    for key, role in roles.items():
+        if not role.startswith("fit."):
+            continue
+        entries = _icp_entries(config, role)
+        pred_claims = [(c, w) for c, w in decayed if c[1] == key]
+        decisive = _decisive(role, entries, [c for c, _ in pred_claims]) if entries else []
+        if not decisive:
+            continue
+        decay_by_id = {id(c): w for c, w in pred_claims}
+        hit = any(h for _, h in decisive)
+        weight = max(decay_by_id[id(c)] for c, _ in decisive)
+        fit_total += (100 if hit else 0) * weight
+        fit_weight += weight
+        fit_ids.extend(str(c[0]) for c, _ in decisive)
+        (matched if hit else missed).append(key)
+        if not hit and role in GATED_ROLES and icp_miss is None:
+            icp_miss = key
+    fit_score = round(fit_total / fit_weight) if fit_weight > 0 else 50
 
     # Evidence: the verdict, plus a small bonus for the weight of corroborating claims.
     evidence_base = VERDICT_EVIDENCE_SCORE.get(inputs.verdict, 10)
     corroboration = sum(w for _, w in decayed) if len(claims) > 1 else 0.0
     evidence_score = min(evidence_base + round(corroboration * 2), 100)
 
-    # Scale: quantity predicates (sites, seats, units), log-scaled.
+    # Scale: numeric values of scale-role predicates, log-scaled.
     total_qty = 0.0
-    qty_claims = [c for c in claims if c[1] in QUANTITY_PREDICATES]
-    for c in qty_claims:
-        try:
-            total_qty += float(c[2])
-        except (TypeError, ValueError):
+    qty_claims: list[tuple[Any, ...]] = []
+    for c in claims:
+        if roles.get(c[1]) != "scale":
             continue
+        n = _as_number(c[2])
+        if n is None:
+            continue
+        total_qty += n
+        qty_claims.append(c)
     scale_score = int(min(math.log1p(total_qty) * 10, 100)) if qty_claims else 0
 
-    # Timing: recent signals.
+    # Timing: recent claims; with column specs only the signal-role predicates count.
     cutoff = now - timedelta(days=TIMING_WINDOW_DAYS)
     recent = [
         c
         for c in claims
-        if isinstance(c[4], datetime)
+        if (legacy or roles.get(c[1]) == "signal")
+        and isinstance(c[4], datetime)
         and (c[4] if c[4].tzinfo else c[4].replace(tzinfo=UTC)) > cutoff
     ]
     timing_score = min(len(recent) * 10, 100)
@@ -161,7 +266,6 @@ def score_account(
     )
 
     gates: list[dict[str, str]] = []
-    icp_miss = outside_icp(config, claims)
     if inputs.verdict == "Contradicted":
         gates.append({"reason": "verdict_contradicted"})
         band = "Excluded"
@@ -178,7 +282,12 @@ def score_account(
             band = "Low"
 
     explanation = {
-        "fit": {"score": fit_score, "claim_ids": [str(c[0]) for c, _ in fit_claims]},
+        "fit": {
+            "score": fit_score,
+            "claim_ids": fit_ids,
+            "matched": matched,
+            "missed": missed,
+        },
         "evidence": {"score": evidence_score, "verdict": inputs.verdict, "claims": len(claims)},
         "scale": {"score": scale_score, "claim_ids": [str(c[0]) for c in qty_claims]},
         "timing": {"score": timing_score, "claim_ids": [str(c[0]) for c in recent]},
@@ -196,8 +305,9 @@ def score_account(
     for c in claims:
         if c[6] and str(c[6]).startswith("radar:"):
             labels.add(("radar", str(c[6])[len("radar:") :]))
-        if c[1] in LABEL_PREDICATES:
-            labels.add((str(c[1]), _text(c[2])))
+        kind = LABEL_KIND_BY_ROLE.get(roles.get(c[1], ""))
+        if kind:
+            labels.add((kind, _text(c[2])))
     for i, role in enumerate(persona_roles):
         labels.add(("persona_coverage", f"{role}:{'covered' if i < covered else 'uncovered'}"))
 

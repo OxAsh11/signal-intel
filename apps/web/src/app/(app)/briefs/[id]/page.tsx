@@ -8,8 +8,9 @@ import { BriefIntakeLoading } from './brief-intake-loading';
 import { BriefEditor, StartPilotCard } from './brief-editor';
 import { StateControls } from './state-controls';
 import { Exclusions } from './exclusions';
-import { Predicates } from './predicates';
+import { RenameForm } from './rename-form';
 import { PreviewPanel } from './preview-panel';
+import type { WorkspacePredicate } from '@/lib/briefs';
 
 export const metadata: Metadata = { title: 'Brief' };
 
@@ -33,6 +34,14 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
     if (ver?.config) seedConfig = ver.config as import('@/lib/briefs').BriefConfig;
   }
   const briefForEditor = { ...brief, draft_config: seedConfig };
+  // The workspace's own predicates (not global ones): the Columns editor fixes the type of a key the
+  // workspace already collects, and a Brief without column specs starts its editor from them.
+  const { data: preds } = await supabase
+    .from('predicate')
+    .select('key, label, value_type, allowed_values, extraction_hint, decay_half_life_days')
+    .eq('workspace_id', ctx.workspace.id)
+    .order('key');
+  const workspacePredicates = (preds ?? []) as WorkspacePredicate[];
   const showPreview = canEdit && hasDraftChanges && ['Pilot', 'Active', 'Paused'].includes(brief.state);
   let nextVersion = 1;
   if (showPreview) {
@@ -57,7 +66,7 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
         <div className="flex min-w-0 flex-col gap-2">
           <Link href="/briefs" className="text-[13px] text-ink-muted">‹ Briefs</Link>
           <span className="si-eyebrow">{brief.state === 'Draft' ? 'New Brief · step 2 of 2' : `Brief · ${brief.state}`}</span>
-          <h1 className="si-h1">{brief.name}</h1>
+          <RenameForm briefId={id} name={brief.name} canEdit={canEdit} />
           <p className="si-lede">{stateNote}</p>
         </div>
         {canEdit && brief.state !== 'Draft' ? <StateControls brief={brief} /> : null}
@@ -73,19 +82,16 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
           {brief.intake_status === 'pending' ? (
             <BriefIntakeLoading briefId={id} />
           ) : (
-            <BriefEditor brief={briefForEditor} canEdit={canEdit} workspaceId={ctx.workspace.id} />
+            <BriefEditor brief={briefForEditor} canEdit={canEdit} workspacePredicates={workspacePredicates} />
           )}
           <details className="si-card">
             <summary className="cursor-pointer text-ink">
-              <span className="font-medium">Scoring and rules</span>{' '}
-              <span className="text-ink-muted">· exclusions and the facts the AI extracts. Set for you; open only to change them.</span>
+              <span className="font-medium">Exclusions</span>{' '}
+              <span className="text-ink-muted">· companies and domains the engine skips. Open only to change them.</span>
             </summary>
             <div className="mt-4 flex flex-col gap-6">
               <Suspense fallback={null}>
                 <Exclusions briefId={id} canEdit={canEdit} />
-              </Suspense>
-              <Suspense fallback={null}>
-                <Predicates briefId={id} workspaceId={ctx.workspace.id} canEdit={canEdit} />
               </Suspense>
             </div>
           </details>

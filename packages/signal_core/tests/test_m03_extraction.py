@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 from typing import Any
 from uuid import UUID, uuid4
 
@@ -19,13 +20,17 @@ from signal_core.config import Settings
 from signal_core.contracts.enums import UsageUnit
 from signal_core.metering import CallContext, MemoryBudgetGuard, MemoryPriceBook
 from signal_core.modules.m03_extraction import (
+    BACKFILL_SCOPE_SQL,
     NO_BRIEF_HYPOTHESIS,
     ExtractionResult,
+    backfill_record,
     extract_backfill,
     extract_structured,
     judge_relevance,
     parse_source_date,
     passes_lexicon,
+    queue_predicate_backfill,
+    scope_predicate_keys,
 )
 
 # ---------------------------------------------------------------------------
@@ -102,13 +107,19 @@ class FakeConn:
         if self.fail_on and self.fail_on in sql_lower:
             raise RuntimeError("simulated database error")
         if "brief_version" in sql_lower:
-            if "public.source_record" in sql_lower:  # the record's radar -> Brief hypothesis
+            if "public.source_record" in sql_lower:  # the record's radar -> Brief config
+                if "radar_config" in self._source_record:
+                    return [(self._source_record["radar_config"],)]
                 hyp = self._source_record.get("hypothesis")
                 return [({"hypothesis": hyp},)] if hyp is not None else []
-            return [  # briefs.active_brief_versions
-                (str(uuid4()), str(uuid4()), str(ORG_ID), {"hypothesis": h}, {}, "Active")
-                for h in self._source_record.get("active_hypotheses", [])
+            configs = self._source_record.get("active_configs") or [
+                {"hypothesis": h} for h in self._source_record.get("active_hypotheses", [])
             ]
+            return [  # briefs.active_brief_versions
+                (str(uuid4()), str(uuid4()), str(ORG_ID), c, {}, "Active") for c in configs
+            ]
+        if "r.brief_id = %s" in sql_lower:  # BACKFILL_SCOPE_SQL
+            return list(self._source_record.get("scope_rows", []))[: args[2]]
         if "lexicon" in sql_lower:
             lexicon = self._source_record.get("lexicon")
             return [(lexicon,)] if lexicon is not None else []
@@ -126,6 +137,8 @@ class FakeConn:
                     sr.get("fetched_at", FETCHED_AT),
                 )
             ]
+        if "public.mention" in sql_lower and "public.entity" in sql_lower:  # backfill mentions
+            return list(self._source_record.get("backfill_mentions", []))
         if "public.mention" in sql_lower:  # the record's still-provisional mentions
             return [(str(m),) for m in self._source_record.get("provisional_mentions", [])]
         if "public.predicate" in sql_lower:
@@ -905,3 +918,244 @@ async def test_extract_backfill_queues_pending_records() -> None:
     assert len(fake_job.deferred) == 3
     deferred_ids = {call["source_record_id"] for call in fake_job.deferred}
     assert deferred_ids == {str(id_) for id_ in pending_ids}
+
+
+# ---------------------------------------------------------------------------
+# Tests: Brief-scoped extraction (P2)
+# ---------------------------------------------------------------------------
+
+FIXTURES = Path(__file__).parent / "fixtures"
+
+
+def _flytbase_config() -> dict[str, Any]:
+    config: dict[str, Any] = json.loads(
+        (FIXTURES / "flytbase_columns.json").read_text(encoding="utf-8")
+    )
+    return config
+
+
+def _workspace_predicates() -> list[tuple]:
+    # id, key, label, value_type, allowed_values, extraction_hint
+    return [
+        (str(uuid4()), "drone_programme", "Drone programme", "boolean", None, "drones"),
+        (str(uuid4()), "industry", "Industry", "enum", ["energy", "mining"], ""),
+        (str(uuid4()), "site_count", "Sites", "number", None, "sites"),
+        (str(uuid4()), "canary.pipeline_ok", "Canary", "boolean", None, ""),
+        (str(uuid4()), "other_key", "Other", "text", None, ""),
+    ]
+
+
+def _sent_predicate_keys(seen: list[dict[str, str]]) -> set[str]:
+    (variables,) = [v for v in seen if "predicates" in v]
+    return {p["key"] for p in json.loads(variables["predicates"])}
+
+
+async def test_extraction_sends_only_brief_columns() -> None:
+    config = _flytbase_config()
+    config["predicates"] = config["predicates"][:2]  # drone_programme, industry
+    gw = _make_gateway(_resp([_claim("other_key", "x"), _claim("drone_programme", True)]))
+    seen = _capture_variables(gw)
+    record = _fake_source_record() | {"radar_config": config}
+    pool = FakePool(record, _workspace_predicates())
+
+    with structlog.testing.capture_logs() as logs:
+        await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert _sent_predicate_keys(seen) == {"drone_programme", "industry"}
+    # A key outside the Brief's columns is unknown to this extraction: dropped, not written.
+    claim_calls = [a for sql, a in pool.calls if "create_claim" in sql]
+    assert len(claim_calls) == 1
+    assert [e["predicate_key"] for e in logs if e["event"] == "extraction.unknown_predicate"] == [
+        "other_key"
+    ]
+
+
+async def test_extraction_legacy_sends_all() -> None:
+    gw = _make_gateway(_resp([]))
+    seen = _capture_variables(gw)
+    # Legacy Briefs: no column specs (plain key strings at most).
+    record = _fake_source_record() | {
+        "active_configs": [{"hypothesis": "A", "predicates": ["vertical"]}, {"hypothesis": "B"}]
+    }
+    pool = FakePool(record, _workspace_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert _sent_predicate_keys(seen) == {p[1] for p in _workspace_predicates()}
+
+
+async def test_scope_keys_union_of_active_briefs_without_radar() -> None:
+    """Every active Brief has column specs: the union of their keys."""
+    full = _flytbase_config()
+    record = _fake_source_record() | {
+        "active_configs": [
+            {"predicates": full["predicates"][:1]},
+            {"predicates": [full["predicates"][2], "vertical"]},
+        ]
+    }
+    keys = await scope_predicate_keys(FakePool(record), SOURCE_RECORD_ID, WORKSPACE_ID)
+    assert keys == {"drone_programme", "site_count", "vertical"}
+
+
+async def test_scope_keys_mixed_legacy_and_column_briefs_without_radar_sends_all() -> None:
+    """A legacy Brief in reach relies on every predicate, so a record without a radar sends all."""
+    full = _flytbase_config()
+    record = _fake_source_record() | {
+        "active_configs": [
+            {"predicates": full["predicates"]},
+            {"hypothesis": "legacy", "predicates": ["vertical"]},
+        ]
+    }
+    assert await scope_predicate_keys(FakePool(record), SOURCE_RECORD_ID, WORKSPACE_ID) is None
+
+
+async def test_extraction_mixed_briefs_without_radar_sends_all() -> None:
+    full = _flytbase_config()
+    gw = _make_gateway(_resp([]))
+    seen = _capture_variables(gw)
+    record = _fake_source_record() | {
+        "active_configs": [{"predicates": full["predicates"][:2]}, {"hypothesis": "legacy"}]
+    }
+    pool = FakePool(record, _workspace_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert _sent_predicate_keys(seen) == {p[1] for p in _workspace_predicates()}
+
+
+async def test_queue_backfill_not_wired_runs_no_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_m03_extraction, "extract_backfill_record_job", None)
+    pool = FakePool(_fake_source_record() | {"scope_rows": [(str(uuid4()), str(ORG_ID))]})
+
+    assert await queue_predicate_backfill(pool, uuid4(), WORKSPACE_ID, ["site_count"]) == 0
+    assert pool.calls == []
+
+
+async def test_scope_keys_radar_brief_without_specs_is_legacy() -> None:
+    record = _fake_source_record() | {"radar_config": {"predicates": ["vertical", "sites"]}}
+    assert await scope_predicate_keys(FakePool(record), SOURCE_RECORD_ID, WORKSPACE_ID) is None
+
+
+# ---------------------------------------------------------------------------
+# Tests: column backfill (P2)
+# ---------------------------------------------------------------------------
+
+ENTITY_A = uuid4()
+ENTITY_MERGED = uuid4()
+
+
+def _backfill_resp(claims: list[dict], source_date: str | None = None) -> str:
+    return json.dumps({"mentions": [], "claims": claims, "source_date": source_date})
+
+
+def _backfill_record(mentions: list[tuple]) -> dict:
+    # Mentions: entity_id, entity_type, name, entity status
+    return _fake_source_record() | {"extraction_status": "extracted", "backfill_mentions": mentions}
+
+
+def _backfill_ctx() -> CallContext:
+    return CallContext(ORG_ID, WORKSPACE_ID, None, None, "extract.backfill", {})
+
+
+async def test_backfill_writes_claims_on_existing_mentions() -> None:
+    claims = [
+        {"mention_index": 0, "predicate_key": "site_count", "value": 40, "confidence": 80},
+        {"mention_index": 1, "predicate_key": "site_count", "value": 7, "confidence": 80},
+    ]
+    gw = _make_gateway(_backfill_resp(claims, source_date="2026-10-01"))
+    seen = _capture_variables(gw)
+    record = _backfill_record(
+        [
+            (str(ENTITY_A), "company", "Volt Grid", "active"),
+            (str(ENTITY_MERGED), "company", "Volt Grid BV", "merged"),
+            (None, "person", "Jan", None),
+        ]
+    )
+    pool = FakePool(record, _workspace_predicates())
+
+    written = await backfill_record(pool, gw, SOURCE_RECORD_ID, ["site_count"], _backfill_ctx())
+
+    assert written == 1
+    (variables,) = seen
+    assert json.loads(variables["mentions"]) == [
+        {"index": 0, "entity_type": "company", "name": "Volt Grid"}
+    ]
+    assert {p["key"] for p in json.loads(variables["predicates"])} == {"site_count"}
+    (claim_args,) = [a for sql, a in pool.calls if "create_claim" in sql]
+    assert claim_args[1] == str(ENTITY_A)
+    assert claim_args[3] == "40"
+    assert claim_args[7] == str(SOURCE_RECORD_ID)
+    assert claim_args[8] == datetime(2026, 10, 1, tzinfo=UTC)  # observed_at from source_date
+    sqls = [sql for sql, _ in pool.calls]
+    assert not any(w in sql for sql in sqls for w in ("create_entity", "create_mention"))
+    assert not any("update_extraction_status" in sql for sql in sqls)  # no status change
+    assert [e[0] for e in pool.tx_events] == ["enter", "exit"]  # one transaction
+
+
+async def test_backfill_twice_no_duplicates() -> None:
+    """Both runs send the same claim to app.create_claim, which dedupes on (entity, predicate,
+    source record, value); the real-schema claim count is asserted in the pipeline e2e."""
+    claims = [{"mention_index": 0, "predicate_key": "site_count", "value": 40, "confidence": 80}]
+    gw = _make_gateway(_backfill_resp(claims))
+    record = _backfill_record([(str(ENTITY_A), "company", "Volt Grid", "active")])
+    pool = FakePool(record, _workspace_predicates())
+
+    await backfill_record(pool, gw, SOURCE_RECORD_ID, ["site_count"], _backfill_ctx())
+    await backfill_record(pool, gw, SOURCE_RECORD_ID, ["site_count"], _backfill_ctx())
+
+    first, second = [a for sql, a in pool.calls if "create_claim" in sql]
+    assert first == second  # identical dedupe key: no second claim row
+
+
+async def test_backfill_skips_record_without_resolved_mentions() -> None:
+    gw = _make_gateway(_backfill_resp([]))
+    record = _backfill_record(
+        [(None, "company", "Unresolved", None), (str(ENTITY_MERGED), "company", "Old", "merged")]
+    )
+    pool = FakePool(record, _workspace_predicates())
+
+    assert await backfill_record(pool, gw, SOURCE_RECORD_ID, ["site_count"], _backfill_ctx()) == 0
+    assert gw._budget.lines == []  # type: ignore[attr-defined]  # no AI call
+    assert not any("create_claim" in sql for sql, _ in pool.calls)
+
+
+@pytest.fixture
+def backfill_job(monkeypatch: pytest.MonkeyPatch) -> _LockedJob:
+    job = _LockedJob()
+    monkeypatch.setattr(_m03_extraction, "extract_backfill_record_job", job)
+    return job
+
+
+async def test_queue_backfill_scope_and_cap(
+    backfill_job: _LockedJob, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Scope semantics (radar Brief, other Brief, pending) run against the real schema in the
+    pipeline e2e; here: the scope query, the lock format and the cap."""
+    brief_id = uuid4()
+    newest, older = uuid4(), uuid4()
+    record = _fake_source_record() | {
+        "scope_rows": [(str(newest), str(ORG_ID)), (str(older), str(ORG_ID))]
+    }
+    pool = FakePool(record)
+
+    queued = await queue_predicate_backfill(pool, brief_id, WORKSPACE_ID, ["site_count", "a_key"])
+
+    assert queued == 2
+    (scope_args,) = [a for sql, a in pool.calls if sql == BACKFILL_SCOPE_SQL]
+    assert scope_args == (str(WORKSPACE_ID), str(brief_id), 501)
+    assert backfill_job.deferred[0] == {
+        "queueing_lock": f"backfill:{newest}:a_key,site_count",
+        "source_record_id": str(newest),
+        "predicate_keys": ["a_key", "site_count"],
+        "org_id": str(ORG_ID),
+        "workspace_id": str(WORKSPACE_ID),
+        "brief_id": str(brief_id),
+    }
+
+    monkeypatch.setattr(_m03_extraction, "BACKFILL_CAP", 1)
+    backfill_job.deferred.clear()
+    with structlog.testing.capture_logs() as logs:
+        assert await queue_predicate_backfill(pool, brief_id, WORKSPACE_ID, ["site_count"]) == 1
+    assert [d["source_record_id"] for d in backfill_job.deferred] == [str(newest)]
+    (capped,) = [e for e in logs if e["event"] == "extraction.backfill_capped"]
+    assert capped["cap"] == 1

@@ -1,9 +1,11 @@
 'use client';
 import { useActionState } from 'react';
 import { ChipField, fieldInput } from './chip-field';
+import { ColumnsField } from './columns-field';
+import { RulesField } from './rules-field';
 import { startPilot } from '@/app/actions/briefs';
 import { Button, Card, FamilyTag } from '@signal/ui';
-import type { BriefConfig } from '@/lib/briefs';
+import type { BriefConfig, WorkspacePredicate } from '@/lib/briefs';
 
 type Brief = { id: string; state: string; draft_config: BriefConfig | null };
 
@@ -51,7 +53,7 @@ function Pairs({ rows }: { rows: [string, string | null][] }) {
  * Brief Studio, step 2: the AI's draft as plain statements. Each part shows what the AI wrote;
  * "Change" opens an editor for that part only.
  */
-export function BriefEditor({ brief, canEdit }: { brief: Brief; canEdit: boolean; workspaceId: string }) {
+export function BriefEditor({ brief, canEdit, workspacePredicates }: { brief: Brief; canEdit: boolean; workspacePredicates: WorkspacePredicate[] }) {
   const cfg: BriefConfig = brief.draft_config ?? {};
   const disabled = !canEdit;
   const c0 = cfg as Record<string, unknown>;
@@ -176,6 +178,18 @@ export function BriefEditor({ brief, canEdit }: { brief: Brief; canEdit: boolean
             <input defaultValue={String(c.offer ?? '')} onChange={(e) => onChange({ ...c, offer: e.target.value })} className={fieldInput} />
           </label>
         )} />
+
+      <ColumnsField briefId={brief.id} config={cfg} disabled={disabled} workspacePredicates={workspacePredicates} />
+      <RulesField briefId={brief.id} config={cfg} disabled={disabled} />
+
+      {cfg.assumptions?.length ? (
+        <section className="si-card" aria-label="What I assumed">
+          <h2 className="si-label m-0">What I assumed</h2>
+          <ul className="m-0 flex flex-col gap-1.5 pl-5 text-[15px] leading-[1.6] text-ink">
+            {cfg.assumptions.map((a) => <li key={a}>{a}</li>)}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

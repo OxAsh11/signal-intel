@@ -28,8 +28,14 @@ export async function createBrief(_: ActionState, form: FormData): Promise<Actio
   const full = [description, website && `Our website: ${website}`, customer && `A customer we won: ${customer}`]
     .filter(Boolean)
     .join('\n');
+  // Without a name the AI intake names the Brief (name_auto) until a person renames it.
   const name = text(form, 'name') || nameFromDescription(description) || 'New Brief';
-  const { data, error } = await rpc('create_brief', { p_ws: workspace, p_name: name, p_description: full });
+  const { data, error } = await rpc('create_brief', {
+    p_ws: workspace,
+    p_name: name,
+    p_description: full,
+    p_name_auto: !text(form, 'name'),
+  });
   if (error) return { error };
   redirect(`/briefs/${data as string}`);
 }
@@ -45,6 +51,16 @@ export async function saveBriefDraft(_: ActionState, form: FormData): Promise<Ac
     return { error: 'Invalid config JSON.' };
   }
   const { error } = await rpc('save_brief_draft_ui', { p_brief: brief, p_config: parsed });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
+/** Renames the Brief; the AI no longer names it after this. */
+export async function renameBrief(_: ActionState, form: FormData): Promise<ActionState> {
+  const name = text(form, 'name');
+  if (!name) return { error: 'Give the Brief a name.' };
+  const { error } = await rpc('rename_brief', { p_brief: text(form, 'brief'), p_name: name });
   if (error) return { error };
   refresh();
   return { ok: true };
@@ -114,29 +130,6 @@ export async function updateBriefState(_: ActionState, form: FormData): Promise<
   const { error } = await rpc('update_brief_state', {
     p_brief: text(form, 'brief'),
     p_new_state: text(form, 'state'),
-  });
-  if (error) return { error };
-  refresh();
-  return { ok: true };
-}
-
-export async function createWorkspacePredicate(_: ActionState, form: FormData): Promise<ActionState> {
-  const allowedRaw = text(form, 'allowed_values');
-  let allowedValues: unknown = null;
-  if (allowedRaw) {
-    try {
-      allowedValues = JSON.parse(allowedRaw);
-    } catch {
-      return { error: 'Invalid allowed_values JSON.' };
-    }
-  }
-  const { error } = await rpc('create_workspace_predicate', {
-    p_ws: text(form, 'workspace'),
-    p_key: text(form, 'key'),
-    p_label: text(form, 'label'),
-    p_value_type: text(form, 'value_type'),
-    p_allowed_values: allowedValues,
-    p_extraction_hint: text(form, 'extraction_hint') || null,
   });
   if (error) return { error };
   refresh();

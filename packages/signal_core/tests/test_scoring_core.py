@@ -2,9 +2,23 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+import json
+import math
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from typing import Any
 
-from signal_core.scoring_core import ScoreInputs, score_account
+from signal_core.scoring_core import (
+    LEGACY_ROLES,
+    ScoreInputs,
+    predicate_roles,
+    score_account,
+    value_matches_icp,
+)
+
+FIXTURE = json.loads(
+    (Path(__file__).parent / "fixtures" / "flytbase_columns.json").read_text(encoding="utf8")
+)
 
 NOW = datetime(2026, 11, 12, tzinfo=UTC)
 
@@ -18,10 +32,10 @@ def test_confirmed_fit_claim_scores_medium() -> None:
     result = score_account(
         {}, {}, ScoreInputs([_claim("vertical", "Manufacturing")], "Confirmed", 0, False), NOW
     )
-    # fit 80, evidence 90, scale 0, timing 10 → 0.25 x 180 = 45 → Medium
-    assert (result.fit, result.evidence, result.scale, result.timing) == (80, 90, 0, 10)
-    assert result.priority == 45.0
-    assert result.band == "Medium"
+    # no ICP list: fit is unknown (50). evidence 90, scale 0, timing 10 → 0.25 x 150 = 37.5 → Low
+    assert (result.fit, result.evidence, result.scale, result.timing) == (50, 90, 0, 10)
+    assert result.priority == 37.5
+    assert result.band == "Low"
     assert result.gates == []
     assert ("radar", "r1") in result.labels
     assert ("vertical", "Manufacturing") in result.labels
@@ -76,3 +90,163 @@ def test_size_is_never_matched_as_text() -> None:
         config, {}, ScoreInputs([_claim("size", "120 employees")], "Confirmed", 0, False), NOW
     )
     assert all(g["reason"] != "outside_icp" for g in result.gates)
+
+
+def _cfg(**icp: list[str]) -> dict[str, Any]:
+    return {**FIXTURE, "icp": icp}
+
+
+def _score(config: dict[str, Any], claims: list[tuple[object, ...]]) -> Any:
+    return score_account(config, {}, ScoreInputs(claims, "Confirmed", 0, False), NOW)
+
+
+def test_fit_matches_icp_list() -> None:
+    config = _cfg(verticals=["energy"])
+    assert _score(config, [_claim("industry", "Energy")]).fit == 100
+    result = _score(config, [_claim("industry", "renewable energy")])
+    assert result.fit == 100
+    assert result.explanation["fit"]["matched"] == ["industry"]
+    assert result.explanation["fit"]["missed"] == []
+
+
+def test_fit_mismatch_scores_zero_and_gates() -> None:
+    result = _score(_cfg(verticals=["energy"]), [_claim("industry", "drone vendor")])
+    assert result.fit == 0
+    assert result.explanation["fit"]["missed"] == ["industry"]
+    assert result.gates == [{"reason": "outside_icp", "predicate": "industry"}]
+    config = {
+        "predicates": [
+            {
+                "key": "hq",
+                "label": "HQ",
+                "value_type": "text",
+                "allowed_values": None,
+                "extraction_hint": "",
+                "decay_half_life_days": None,
+                "role": "fit.geography",
+            }
+        ],
+        "icp": {"geographies": ["Germany"]},
+    }
+    geo = _score(config, [_claim("hq", "France")])
+    assert geo.band == "Excluded"
+    assert geo.gates == [{"reason": "outside_icp", "predicate": "hq"}]
+
+
+def test_size_band_numeric() -> None:
+    assert value_matches_icp("fit.size", 450, ["201-1000"]) is True
+    assert value_matches_icp("fit.size", 450, ["1000+"]) is False
+    assert value_matches_icp("fit.size", 1500, ["1000+"]) is True
+    assert value_matches_icp("fit.size", 450, ["mid-size"]) is None
+    assert value_matches_icp("fit.size", "120 employees", ["51-200"]) is None
+    assert value_matches_icp("fit.size", 150, ["200-100"]) is None
+    config = {
+        "predicates": [
+            {
+                "key": "headcount",
+                "label": "Headcount",
+                "value_type": "number",
+                "allowed_values": None,
+                "extraction_hint": "",
+                "decay_half_life_days": None,
+                "role": "fit.size",
+            }
+        ],
+        "icp": {"size_bands": ["mid-size"]},
+    }
+    result = _score(config, [_claim("headcount", 450)])
+    assert result.fit == 50
+    assert result.explanation["fit"]["matched"] == []
+    assert result.explanation["fit"]["missed"] == []
+
+
+def test_scale_reads_role() -> None:
+    result = _score(FIXTURE, [_claim("site_count", 30)])
+    assert result.scale == int(math.log1p(30) * 10)
+    assert _score(FIXTURE, [_claim("site_count", "many")]).scale == 0
+    assert _score(FIXTURE, [_claim("site_count", "30")]).scale == int(math.log1p(30) * 10)
+    assert _score(FIXTURE, [_claim("site_count", True)]).scale == 0
+    assert _score(FIXTURE, [_claim("site_count", "nan")]).scale == 0
+    legacy = {"predicates": ["sites"]}
+    assert _score(legacy, [_claim("sites", "4")]).scale == int(math.log1p(4) * 10)
+
+
+def test_timing_counts_signal_only() -> None:
+    old = NOW - timedelta(days=400)
+    claims = [
+        ("c-old", "industry", "energy", 80, NOW, None, "radar:r1"),
+        ("c-recent", "drone_programme", True, 80, NOW, None, "radar:r1"),
+        ("c-old2", "drone_programme", True, 80, old, None, "radar:r1"),
+    ]
+    assert _score(FIXTURE, claims).timing == 10
+
+
+def test_legacy_config_unchanged_keys() -> None:
+    assert predicate_roles({"predicates": ["vertical", "sites"]}) == LEGACY_ROLES
+    assert LEGACY_ROLES["sites"] == "scale"
+    config = {"predicates": ["vertical"], "icp": {"verticals": ["manufacturing"]}}
+    result = _score(config, [_claim("vertical", "Manufacturing"), _claim("sites", 4)])
+    assert result.fit == 100
+    assert result.scale == int(math.log1p(4) * 10)
+    assert result.timing == 20
+    assert ("vertical", "Manufacturing") in result.labels
+
+
+def test_text_matching_is_literal_on_word_boundaries() -> None:
+    assert value_matches_icp("fit.vertical", "C++ tooling", ["C++"]) is True
+    assert value_matches_icp("fit.vertical", "R&D services", ["r&d"]) is True
+    assert value_matches_icp("fit.vertical", "energyless", ["energy"]) is False
+    assert value_matches_icp("fit.vertical", "energy", ["energyless"]) is False
+
+
+def test_icp_list_given_as_string_is_ignored() -> None:
+    result = _score(_cfg(verticals="energy"), [_claim("industry", "mining")])  # type: ignore[arg-type]
+    assert result.fit == 50
+    assert result.gates == []
+
+
+def test_fit_mean_mixes_matched_and_missed() -> None:
+    config = {
+        "predicates": [
+            {**FIXTURE["predicates"][1]},
+            {
+                "key": "hq",
+                "label": "HQ",
+                "value_type": "text",
+                "allowed_values": None,
+                "extraction_hint": "",
+                "decay_half_life_days": None,
+                "role": "fit.commercial_role",
+            },
+        ],
+        "icp": {"verticals": ["energy"], "commercial_roles": ["operator"]},
+    }
+    result = _score(config, [_claim("industry", "energy"), _claim("hq", "reseller")])
+    assert result.fit == 50
+    assert result.explanation["fit"]["matched"] == ["industry"]
+    assert result.explanation["fit"]["missed"] == ["hq"]
+
+
+def test_stale_claim_lowers_predicate_weight() -> None:
+    config = {
+        "predicates": [
+            {**FIXTURE["predicates"][1], "decay_half_life_days": 30},
+            {
+                "key": "hq",
+                "label": "HQ",
+                "value_type": "text",
+                "allowed_values": None,
+                "extraction_hint": "",
+                "decay_half_life_days": None,
+                "role": "fit.commercial_role",
+            },
+        ],
+        "icp": {"verticals": ["energy"], "commercial_roles": ["operator"]},
+    }
+    old = NOW - timedelta(days=30)  # decay 0.5
+    claims = [
+        ("c1", "industry", "energy", 80, old, 30, "radar:r1"),
+        ("c2", "hq", "reseller", 80, NOW, None, "radar:r1"),
+    ]
+    # matched weight 0.5 x 100, missed weight 1 x 0 -> 50 / 1.5 = 33
+    assert _score(config, claims).fit == 33

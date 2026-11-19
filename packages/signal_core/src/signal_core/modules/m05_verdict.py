@@ -3,10 +3,16 @@
 Flow:
   1. Take the current version of every Pilot/Active Brief in the workspace (none → return None).
   2. Fetch the entity's claims that still count: active and not expired (F3 "claims age").
-  3. For each Brief version: no claims → Unverified without an AI call; otherwise judge the
-     claims against that Brief's hypothesis (Capability.JUDGE) and store the verdict with the
-     claim ids and quotes it rests on.
+  3. For each Brief version: no claims → Unverified without an AI call. A version with evidence
+     rules runs the deterministic rubric (signal_core.rubric): a decided outcome is stored
+     without the AI, an open one is judged by verdict v3, which can never return Confirmed.
+     A version without rules (legacy) is judged by verdict v2 against its hypothesis. Every
+     verdict is stored with the claim ids and quotes it rests on, how it was reached
+     (`inputs.method`: rubric · rubric_ai · ai) and, when the AI judged, its reasoning.
   4. Queue the account card.
+
+Every path keeps: a human mark holds until the claims change; Confirmed needs a quoted claim,
+otherwise it is only Likely; conflicting claims go to review.
 
 AI failures are re-raised so the job retries: a verdict is never downgraded because a call failed.
 """
@@ -15,20 +21,30 @@ from __future__ import annotations
 
 import contextlib
 from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import signal_core.modules.m15_account_card as _m15
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
+from signal_core.brief_columns import EvidenceRule, evidence_rules
 from signal_core.briefs import ActiveBrief, active_brief_versions, holds_pilot_slot
 from signal_core.derivation.writer import upsert_verdict
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
+from signal_core.rubric import (
+    RubricClaim,
+    RubricOutcome,
+    describe_result,
+    describe_rule,
+    evaluate_rubric,
+    source_of,
+)
 
 log = get_logger(__name__)
 
@@ -39,15 +55,17 @@ targeted_search_job: Any = None
 verdict_compute_job: Any | None = None
 account_card_generate_job: Any | None = None
 
-# Claims that count towards a verdict: active and not past their expiry.
+# Claims that count towards a verdict: active and not past their expiry. Each row is
+# (id, key, value, quote, confidence, observed_at, record url, record id).
 LIVE_CLAIMS_SQL = """
-    SELECT c.id, p.key, c.value, c.quote, c.confidence
+    SELECT c.id, p.key, c.value, c.quote, c.confidence, c.observed_at, sr.url, sr.id
       FROM public.claim c
       JOIN public.predicate p ON p.id = c.predicate_id
+      JOIN public.source_record sr ON sr.id = c.source_record_id
      WHERE c.entity_id = %s
        AND c.status = 'active'
        AND (c.expires_at IS NULL OR c.expires_at > now())
-     ORDER BY c.observed_at DESC
+     ORDER BY c.observed_at DESC, c.id
 """
 
 
@@ -56,6 +74,47 @@ class VerdictOutput(BaseModel):
     reasoning: str
     supporting_claim_indices: list[int]
     conflicting_claim_indices: list[int] = []
+
+
+class _OpenVerdictSchema(BaseModel):
+    """What verdict v3 is asked to answer: the strict schema sent to the model."""
+
+    model_config = ConfigDict(title="OpenVerdictOutput")
+
+    value: Literal["Likely", "Unverified", "Contradicted"]
+    reasoning: str
+    supporting_claim_indices: list[int]
+    conflicting_claim_indices: list[int] = []
+
+
+class OpenVerdictOutput(BaseModel):
+    """Verdict v3, for a case the rubric left open: only the rules can confirm.
+
+    The model is offered three values (the schema of _OpenVerdictSchema). A "Confirmed" it
+    returns anyway is still parsed, so a paid answer is not thrown away and retried, and
+    _open demotes it to Likely."""
+
+    value: Literal["Confirmed", "Likely", "Unverified", "Contradicted"]
+    reasoning: str
+    supporting_claim_indices: list[int]
+    conflicting_claim_indices: list[int] = []
+
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return _OpenVerdictSchema.model_json_schema(*args, **kwargs)
+
+
+def rubric_claim(c: tuple[Any, ...]) -> RubricClaim:
+    """A LIVE_CLAIMS_SQL row as the rubric sees it."""
+    return RubricClaim(
+        id=str(c[0]),
+        key=str(c[1]),
+        value=c[2],
+        quote=c[3],
+        confidence=c[4],
+        observed_at=c[5],
+        source=source_of(c[6], str(c[7])),
+    )
 
 
 def conflicting_claims(claims: list[tuple[Any, ...]], flagged: list[int]) -> list[UUID]:
@@ -191,60 +250,207 @@ async def _verdict_for_brief(
         }:
             return str(existing[0])
 
+    rules = evidence_rules(brief.config)
+    if not rules:
+        return await _judge_legacy(pool, gateway, brief, entity_id, display_name, claims, ctx)
+
+    outcome = evaluate_rubric(rules, [rubric_claim(c) for c in claims], datetime.now(UTC))
+    if outcome.value is None:
+        return await _judge_open(
+            pool, gateway, brief, entity_id, display_name, claims, rules, outcome, ctx
+        )
+    cited = set(outcome.claim_ids)
+    return await _store(
+        pool,
+        brief,
+        entity_id,
+        claims,
+        outcome.value,
+        [c for c in claims if str(c[0]) in cited],
+        {"method": "rubric", "rubric": [r.as_dict() for r in outcome.rules]},
+        [],
+    )
+
+
+async def _judge_legacy(
+    pool: AsyncConnectionPool,
+    gateway: AiGateway,
+    brief: ActiveBrief,
+    entity_id: UUID,
+    display_name: str,
+    claims: list[tuple[Any, ...]],
+    ctx: CallContext,
+) -> str:
+    """A Brief version without evidence rules: verdict v2 against the hypothesis."""
     claims_text = "\n".join(
         f"[{i}] {c[1]}: {c[2]} (confidence: {c[4]}) | quote: {c[3] or 'N/A'}"
         for i, c in enumerate(claims)
     )
+    result = await _run(
+        gateway,
+        brief,
+        entity_id,
+        2,
+        {"hypothesis": brief.hypothesis, "entity_name": display_name, "claims_text": claims_text},
+        VerdictOutput,
+        ctx,
+    )
+    out: VerdictOutput = result.value
+    return await _store(
+        pool,
+        brief,
+        entity_id,
+        claims,
+        out.value,
+        _pick(claims, out.supporting_claim_indices),
+        {
+            "method": "ai",
+            "reasoning": out.reasoning,
+            "prompt_name": "verdict",
+            "prompt_version": 2,
+            "extractor_version_id": str(result.extractor_version_id),
+        },
+        out.conflicting_claim_indices,
+    )
+
+
+async def _judge_open(
+    pool: AsyncConnectionPool,
+    gateway: AiGateway,
+    brief: ActiveBrief,
+    entity_id: UUID,
+    display_name: str,
+    claims: list[tuple[Any, ...]],
+    rules: list[EvidenceRule],
+    outcome: RubricOutcome,
+    ctx: CallContext,
+) -> str:
+    """A case the rubric left open: verdict v3, given the rules and what the evidence showed."""
+    examples = brief.config.get("examples")
+    if not isinstance(examples, dict):
+        examples = {}
+    claims_text = "\n".join(
+        f"[{i}] {c[1]}: {c[2]} | confidence: {c[4]}"
+        f" | observed: {c[5].date().isoformat() if isinstance(c[5], datetime) else 'unknown'}"
+        f" | source: {source_of(c[6], str(c[7]))} | quote: {c[3] or 'N/A'}"
+        for i, c in enumerate(claims)
+    )
+    result = await _run(
+        gateway,
+        brief,
+        entity_id,
+        3,
+        {
+            "hypothesis": brief.hypothesis,
+            "examples_positive": _bullets(examples.get("positive")),
+            "examples_negative": _bullets(examples.get("negative")),
+            "rules": "\n".join(f"- {describe_rule(r)}" for r in rules),
+            "rule_results": "\n".join(
+                f"- {describe_result(r, res)}" for r, res in zip(rules, outcome.rules, strict=True)
+            ),
+            "entity_name": display_name,
+            "claims_text": claims_text,
+        },
+        OpenVerdictOutput,
+        ctx,
+    )
+    out: OpenVerdictOutput = result.value
+    value = out.value
+    if value == "Confirmed":
+        log.warning(
+            "verdict.open_confirmed_demoted",
+            entity_id=str(entity_id),
+            brief_version_id=str(brief.brief_version_id),
+        )
+        value = "Likely"
+    return await _store(
+        pool,
+        brief,
+        entity_id,
+        claims,
+        value,
+        _pick(claims, out.supporting_claim_indices),
+        {
+            "method": "rubric_ai",
+            "reasoning": out.reasoning,
+            "rubric": [r.as_dict() for r in outcome.rules],
+            "prompt_name": "verdict",
+            "prompt_version": 3,
+            "extractor_version_id": str(result.extractor_version_id),
+        },
+        out.conflicting_claim_indices,
+    )
+
+
+async def _run(
+    gateway: AiGateway,
+    brief: ActiveBrief,
+    entity_id: UUID,
+    version: int,
+    variables: dict[str, str],
+    output: type[BaseModel],
+    ctx: CallContext,
+) -> Any:
+    """Call verdict v<version>. Failures are logged and re-raised so the job retries."""
     try:
-        result = await gateway.run(
-            Capability.JUDGE,
-            load_prompt("verdict", 2),
-            {
-                "hypothesis": brief.hypothesis,
-                "entity_name": display_name,
-                "claims_text": claims_text,
-            },
-            VerdictOutput,
-            ctx,
+        return await gateway.run(
+            Capability.JUDGE, load_prompt("verdict", version), variables, output, ctx
         )
     except (AiProviderError, AiOutputInvalid) as exc:
         log.warning(
             "verdict.ai_failed",
             entity_id=str(entity_id),
             brief_version_id=str(brief.brief_version_id),
+            prompt_version=version,
             error=str(exc),
         )
         raise
 
-    supporting = [claims[i] for i in result.value.supporting_claim_indices if 0 <= i < len(claims)]
+
+def _bullets(items: Any) -> str:
+    if not isinstance(items, list) or not items:
+        return "- none given"
+    return "\n".join(f"- {item}" for item in items)
+
+
+def _pick(claims: list[tuple[Any, ...]], indices: list[int]) -> list[tuple[Any, ...]]:
+    return [claims[i] for i in indices if 0 <= i < len(claims)]
+
+
+async def _store(
+    pool: AsyncConnectionPool,
+    brief: ActiveBrief,
+    entity_id: UUID,
+    claims: list[tuple[Any, ...]],
+    value: str,
+    supporting: list[tuple[Any, ...]],
+    inputs: dict[str, Any],
+    flagged: list[int],
+) -> str:
+    """Store the verdict with the claims it rests on, and queue any conflict for review."""
     # Confirmed needs at least one quoted claim behind it (M5); otherwise it is only Likely.
-    final_value: str = result.value.value
-    if final_value == "Confirmed" and not any(c[3] for c in supporting):
-        final_value = "Likely"
+    if value == "Confirmed" and not any(c[3] for c in supporting):
+        value = "Likely"
 
     verdict_id = await upsert_verdict(
         pool,
         brief.brief_version_id,
         entity_id,
-        final_value,
+        value,
         [UUID(str(c[0])) for c in supporting],
         [{"claim_id": str(c[0]), "quote": c[3]} for c in supporting if c[3]],
-        {
-            "prompt_name": "verdict",
-            "prompt_version": 2,
-            "extractor_version_id": str(result.extractor_version_id),
-        },
+        inputs,
     )
 
     # Conflicting claims never cancel silently: a person decides, with the claims shown.
-    conflict = conflicting_claims(claims, result.value.conflicting_claim_indices)
+    conflict = conflicting_claims(claims, flagged)
     if conflict:
         async with pool.connection() as conn, conn.cursor() as cur:
             await cur.execute(
                 "SELECT app.queue_verdict_review(%s, 'conflict', %s::uuid[])",
                 (str(verdict_id), [str(c) for c in conflict]),
             )
-    return final_value
+    return value
 
 
 async def _defer_account_card(

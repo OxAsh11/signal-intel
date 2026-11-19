@@ -1,6 +1,6 @@
 """Typed output models, looked up by prompt name (used by the eval CLI)."""
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, JsonValue, field_validator
 
 
 class CanaryExtract(BaseModel):
@@ -58,6 +58,14 @@ class BriefDraft(BaseModel):
     sources: BriefSources
     icp: BriefIcp = Field(default_factory=BriefIcp)
     personas: BriefPersonas = Field(default_factory=BriefPersonas)
+    # Lenient on purpose: one bad column or rule must not fail the whole draft. The intake run
+    # cleans them with signal_core.brief_columns.clean_columns.
+    # The name and assumptions are cleaned there too: a null name or a non-string assumption
+    # drops only itself.
+    name: str | None = ""
+    predicates: list[JsonValue] = []
+    evidence_rules: list[JsonValue] = []
+    assumptions: list[JsonValue] = []
 
 
 OUTPUT_MODELS: dict[str, type[BaseModel]] = {
