@@ -1,10 +1,11 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
+import { formulaProblem, formulaReads, renameFormulaRef } from '@signal/formula';
 import { Button } from '@signal/ui';
 import { ChipField, fieldInput } from './chip-field';
 import {
-  columnKeyProblem, columnsFromWorkspace, columnSpecs, FILL_LABELS, formulaProblem, formulaReads, isColumnSpec,
-  isFormulaColumn, keyFromLabel, LEGACY_SEED_NOTICE, MAX_COLUMNS, OPS_BY_TYPE, renameFormulaRef, ROLE_LABELS, TYPE_LABELS,
+  columnKeyProblem, columnsFromWorkspace, columnSpecs, FILL_LABELS, isColumnSpec,
+  isFormulaColumn, keyFromLabel, LEGACY_SEED_NOTICE, MAX_COLUMNS, OPS_BY_TYPE, ROLE_LABELS, TYPE_LABELS,
   type BriefConfig, type ColumnSpec, type EvidenceRule, type FillMethod, type Role, type ValueType, type WorkspacePredicate,
 } from '@/lib/briefs';
 
@@ -252,7 +253,7 @@ function ColumnsEditor({ start, saved, existing, seeded, onChange, block }: {
   const formulaProblems = new Map(rows.flatMap((r) => {
     const c = r.col;
     if (!isFormulaColumn(c)) return [];
-    const problem = staleProblem(r, rows) ?? formulaProblem(c, specs, legacyKeys);
+    const problem = staleProblem(r, rows) ?? formulaProblem(c.formula, c.key, specs.map((o) => o.key), legacyKeys);
     return problem ? [[r.id, problem] as const] : [];
   }));
   const firstProblem = problems.values().next().value ?? formulaProblems.values().next().value ?? null;

@@ -690,3 +690,101 @@ export function checkResult(
   else throw new Error(`unknown value_type ${JSON.stringify(valueType)}`);
   return ok ? null : `formula returned ${typeName(value)}, column is ${valueType}`;
 }
+
+// ── Editor helpers (pure; the Brief editor shows their messages as they are) ──
+
+/** At most this many columns are read by one formula (Global Constraints). */
+export const MAX_INPUTS = 10;
+
+/** The keys a formula reads (sorted, distinct), or null when it does not parse. */
+export function formulaReads(expr: string | null | undefined): string[] | null {
+  try {
+    return references(parse(expr ?? ''));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What is wrong with a formula column's expression, in plain words, or null. `ownKey` is the
+ * column's key; `columnKeys` the keys of the Brief's column specs (this one included); `legacyKeys`
+ * its plain keys, which have no spec.
+ */
+export function formulaProblem(
+  expr: string | null | undefined,
+  ownKey: string,
+  columnKeys: readonly string[],
+  legacyKeys: readonly string[],
+): string | null {
+  const text = expr ?? '';
+  if (!text.trim()) return 'Write the formula this column computes.';
+  let reads: string[];
+  try {
+    reads = references(parse(text));
+  } catch (e) {
+    if (e instanceof FormulaSyntaxError) return `Formula: ${e.reason} (at character ${e.position + 1})`;
+    throw e;
+  }
+  if (reads.includes(ownKey)) return 'A formula cannot read its own column.';
+  for (const key of reads) {
+    if (columnKeys.includes(key)) continue;
+    if (legacyKeys.includes(key)) return `Formula reads "${key}", which has no column spec yet; give it one first.`;
+    return `Formula reads "${key}", which is not a column of this Brief`;
+  }
+  if (!reads.length) return 'A formula reads at least one column of this Brief.';
+  if (reads.length > MAX_INPUTS) return `A formula reads at most ${MAX_INPUTS} columns.`;
+  return null;
+}
+
+const isBlank = (c: string | undefined) => c === ' ' || c === '\t' || c === '\r' || c === '\n';
+
+/**
+ * The formula with each reference to column `from` made a reference to `to`, read as the formula
+ * language reads it: whole identifiers only, never inside text, after "@", as a keyword or as a
+ * function name. Returns the formula unchanged when it does not mention `from`, and null when it
+ * does but the change cannot be confirmed: the result must parse and read exactly the old columns
+ * with `from` swapped for `to`.
+ */
+export function renameFormulaRef(expr: string, from: string, to: string): string | null {
+  const chars = Array.from(expr);
+  const n = chars.length;
+  let out = '';
+  let replaced = false;
+  let i = 0;
+  while (i < n) {
+    const c = chars[i] as string;
+    const start = i;
+    if (c === '"') {
+      // Text: skipped whole, escapes included.
+      i += 1;
+      while (i < n && chars[i] !== '"') i += chars[i] === '\\' ? 2 : 1;
+      i = Math.min(i + 1, n);
+      out += chars.slice(start, i).join('');
+    } else if (c === '@' || isDigit(c)) {
+      // A system value, or a number's digits (letters after them start a new identifier).
+      i += 1;
+      while (i < n && (c === '@' ? isWord(chars[i]) : isDigit(chars[i]))) i += 1;
+      out += chars.slice(start, i).join('');
+    } else if (isLower(c)) {
+      while (i < n && isWord(chars[i])) i += 1;
+      const word = chars.slice(start, i).join('');
+      let j = i;
+      while (j < n && isBlank(chars[j])) j += 1;
+      if (word === from && !KEYWORDS.has(word) && chars[j] !== '(') {
+        out += to;
+        replaced = true;
+      } else {
+        out += word;
+      }
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  if (!replaced) return expr;
+  const before = formulaReads(expr);
+  const after = formulaReads(out);
+  if (!before || !after || !before.includes(from) || before.includes(to)) return null;
+  const expected = [...before.filter((k) => k !== from), to].sort();
+  return expected.length === after.length && expected.every((k, x) => k === after[x]) ? out : null;
+}

@@ -417,6 +417,33 @@ test.describe('Brief Studio', () => {
     expect(draft.n).toBe(3);
   });
 
+  test('version history shows how each column is filled, and a formula edit', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id, FORMULA_DRAFT);
+    await page.getByRole('button', { name: 'Start pilot' }).click();
+    await expect(page.getByText('Brief · Pilot')).toBeVisible();
+
+    // Version 2 changes only the formula (published as the publish path writes a version).
+    await sql(
+      `insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights)
+       select v.brief_id, v.org_id, v.workspace_id, 2,
+              jsonb_set(v.config, '{predicates}',
+                (select jsonb_agg(case when e ->> 'key' = 'programme_and_sites'
+                                       then jsonb_set(e, '{formula}', to_jsonb($2::text)) else e end order by o)
+                   from jsonb_array_elements(v.config -> 'predicates') with ordinality x(e, o))),
+              v.rubric, v.weights
+         from public.brief_version v where v.brief_id = $1 and v.version = 1`,
+      [id, 'drone_programme and site_count > 5'],
+    );
+
+    await page.goto(`/briefs/${id}/versions?a=1&b=2`);
+    const row = page.getByRole('row').filter({ has: page.getByRole('cell', { name: 'Columns', exact: true }) });
+    const [before, after] = [row.getByRole('cell').nth(1), row.getByRole('cell').nth(2)];
+    await expect(before).toContainText('Industry · One of a list · Fit: industry · Found in sources');
+    await expect(before).toContainText(`Programme and sites · Yes or no · Information only · Formula: ${PROGRAMME_FORMULA}`);
+    await expect(after).toContainText('Programme and sites · Yes or no · Information only · Formula: drone_programme and site_count > 5');
+  });
+
   test('formula columns are not offered as rule columns', async ({ page }) => {
     const id = await createBrief(page);
     await draftBrief(page, id, FORMULA_DRAFT);
