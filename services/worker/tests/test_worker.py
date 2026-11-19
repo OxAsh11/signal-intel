@@ -902,3 +902,81 @@ async def test_dispatch_malformed_entity_event_is_a_no_op(evt: str) -> None:
     assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
     assert _jobs(connector, "verdict.compute") == []
     assert pool.queries == []
+
+
+async def test_dispatch_backfill_event() -> None:
+    """predicate.backfill_requested queues one extract.backfill_record per record in scope."""
+    brief_id, workspace_id, org_id = str(uuid4()), str(uuid4()), str(uuid4())
+    record_id = str(uuid4())
+    seen: list[tuple[str, Any]] = []
+
+    class _Cur:
+        def __init__(self) -> None:
+            self._rows: list[tuple[Any, ...]] = []
+
+        async def execute(self, sql: str, args: Any = None) -> None:
+            seen.append((sql, args))
+            self._rows = [(record_id, org_id)] if "r.brief_id = %s" in sql.lower() else []
+
+        async def fetchall(self) -> list[tuple[Any, ...]]:
+            return self._rows
+
+        async def __aenter__(self) -> "_Cur":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Conn:
+        def cursor(self) -> _Cur:
+            return _Cur()
+
+        async def __aenter__(self) -> "_Conn":
+            return self
+
+        async def __aexit__(self, *_: Any) -> None:
+            pass
+
+    class _Pool:
+        def connection(self) -> _Conn:
+            return _Conn()
+
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        pool=_Pool(),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await app.tasks[DISPATCH_TASK].defer_async(
+            event="predicate.backfill_requested",
+            event_id=str(uuid4()),
+            org_id=org_id,
+            workspace_id=workspace_id,
+            payload={
+                "brief_id": brief_id,
+                "brief_version_id": str(uuid4()),
+                "org_id": org_id,
+                "workspace_id": workspace_id,
+                "predicate_keys": ["site_count", "industry"],
+            },
+        )
+        await app.run_worker_async(queues=["events"], wait=False, install_signal_handlers=False)
+
+    assert [j["status"] for j in connector.jobs.values() if j["task_name"] == DISPATCH_TASK] == [
+        "succeeded"
+    ]
+    (job,) = [j for j in connector.jobs.values() if j["task_name"] == "extract.backfill_record"]
+    assert job["queueing_lock"] == f"backfill:{record_id}:industry,site_count"
+    assert job["args"] == {
+        "source_record_id": record_id,
+        "predicate_keys": ["industry", "site_count"],
+        "org_id": org_id,
+        "workspace_id": workspace_id,
+    }
+    (scope_args,) = [a for sql, a in seen if "r.brief_id = %s" in sql.lower()]
+    assert scope_args[:2] == (workspace_id, brief_id)

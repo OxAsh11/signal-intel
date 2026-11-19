@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from typing import Any
+from uuid import uuid4
 
-from signal_core.modules.m01_preview import classify_edit, estimate_cost, over_budget
+from signal_core.modules.m01_preview import _counts, classify_edit, estimate_cost, over_budget
+from signal_core.modules.m03_extraction import BACKFILL_CAP, BACKFILL_SCOPE_SQL
 
 BASE = {
     "offer": "CAD",
@@ -92,3 +95,74 @@ def test_over_budget_when_any_cap_would_be_passed() -> None:
     caps = [(Decimal("100"), Decimal("10")), (Decimal("20"), Decimal("15"))]
     assert over_budget(caps, Decimal("6")) is True
     assert over_budget(caps, Decimal("5")) is False
+
+
+# ── Re-extraction count: the backfill scope (P2) ─────────────────────────────
+
+
+class _CountCursor:
+    def __init__(self, calls: list[tuple[str, Any]]) -> None:
+        self._calls = calls
+
+    async def execute(self, sql: str, args: Any = None) -> None:
+        self._calls.append((sql, args))
+
+    async def fetchone(self) -> tuple[int]:
+        return (7,)
+
+    async def __aenter__(self) -> _CountCursor:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+
+class _CountConn:
+    def __init__(self, calls: list[tuple[str, Any]]) -> None:
+        self._calls = calls
+
+    def cursor(self) -> _CountCursor:
+        return _CountCursor(self._calls)
+
+    async def __aenter__(self) -> _CountConn:
+        return self
+
+    async def __aexit__(self, *_: Any) -> None:
+        return None
+
+
+class _CountPool:
+    def __init__(self) -> None:
+        self.calls: list[tuple[str, Any]] = []
+
+    def connection(self) -> _CountConn:
+        return _CountConn(self.calls)
+
+
+def _spec(key: str) -> dict[str, Any]:
+    return {"key": key, "label": key, "value_type": "number", "role": "scale"}
+
+
+async def test_reextract_counts_the_backfill_scope() -> None:
+    pool = _CountPool()
+    ws, brief, version = uuid4(), uuid4(), uuid4()
+    old = {"predicates": [_spec("site_count"), "vertical"]}
+    new = {"predicates": [_spec("site_count"), "vertical", _spec("fleet_size")]}
+
+    counts = await _counts(pool, ws, brief, version, old, new, False, ["predicates"])  # type: ignore[arg-type]
+
+    assert counts["reextract_records"] == 7
+    (sql, args) = pool.calls[-1]
+    assert f"FROM ({BACKFILL_SCOPE_SQL}" in sql
+    assert args == (str(ws), str(brief), BACKFILL_CAP)
+
+
+async def test_reextract_not_counted_when_no_key_added() -> None:
+    pool = _CountPool()
+    old = {"predicates": [_spec("site_count")]}
+    new = {"predicates": [_spec("site_count") | {"label": "Industrial sites"}]}
+
+    counts = await _counts(pool, uuid4(), uuid4(), uuid4(), old, new, False, ["predicates"])  # type: ignore[arg-type]
+
+    assert counts["reextract_records"] == 0
+    assert pool.calls == []

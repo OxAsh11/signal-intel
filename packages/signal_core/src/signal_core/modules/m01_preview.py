@@ -16,8 +16,10 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
+from signal_core.brief_columns import predicate_keys
 from signal_core.config import get_settings
 from signal_core.logging import get_logger
+from signal_core.modules.m03_extraction import BACKFILL_CAP, BACKFILL_SCOPE_SQL
 from signal_core.scoring_core import ScoreInputs, score_account
 
 log = get_logger(__name__)
@@ -149,7 +151,9 @@ async def _build(pool: AsyncConnectionPool, preview_id: UUID) -> None:
     result = await _account_changes(pool, base_version_id, old_cfg, new_cfg, weights)
     result["changed_fields"] = changed
 
-    counts = await _counts(pool, workspace_id, base_version_id, old_cfg, new_cfg, rejudge, changed)
+    counts = await _counts(
+        pool, workspace_id, brief_id, base_version_id, old_cfg, new_cfg, rejudge, changed
+    )
     result["counts"] = counts
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute("SELECT model, unit, usd_per_million FROM public.model_price")
@@ -230,6 +234,7 @@ async def _account_changes(
 async def _counts(
     pool: AsyncConnectionPool,
     workspace_id: Any,
+    brief_id: Any,
     version_id: Any,
     old_cfg: dict[str, Any],
     new_cfg: dict[str, Any],
@@ -245,11 +250,13 @@ async def _counts(
             )
             row = await cur.fetchone()
             counts["rejudge_verdicts"] = int(row[0]) if row else 0
-        added = set(new_cfg.get("predicates") or []) - set(old_cfg.get("predicates") or [])
+        # New column keys are backfilled over the Brief's scope (capped per publish), not
+        # over every record in the workspace.
+        added = set(predicate_keys(new_cfg)) - set(predicate_keys(old_cfg))
         if added:
             await cur.execute(
-                "SELECT count(*) FROM public.source_record WHERE workspace_id = %s",
-                (str(workspace_id),),
+                f"SELECT count(*) FROM ({BACKFILL_SCOPE_SQL}) scope",
+                (str(workspace_id), str(brief_id), BACKFILL_CAP),
             )
             row = await cur.fetchone()
             counts["reextract_records"] = int(row[0]) if row else 0

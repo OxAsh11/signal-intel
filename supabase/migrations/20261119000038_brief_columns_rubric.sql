@@ -395,3 +395,8 @@ revoke execute on function
 grant execute on function
   public.create_brief(uuid, text, text, boolean), public.rename_brief(uuid, text)
   to authenticated;
+
+-- ── 8. Kill switch for the column backfill job (Task 3) ─────────────────────
+insert into public.job_type_config (job_type, enabled) values
+  ('extract.backfill_record', true)
+on conflict (job_type) do nothing;

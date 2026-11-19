@@ -29,6 +29,7 @@ from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.ai_gateway.registry import Predicate, validate_claim_value
+from signal_core.brief_columns import column_specs, predicate_keys
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
 
@@ -37,12 +38,30 @@ log = get_logger(__name__)
 # Deferrable handle wired by worker/app.py (like m04_identity.identity_resolve_job).
 # None until the worker app calls: m03_extraction.extract_relevance_judge_job = <task>
 extract_relevance_judge_job: Any = None
+# Wired the same way: the extract.backfill_record task queued by queue_predicate_backfill.
+extract_backfill_record_job: Any = None
 
 RELEVANCE_PROMPT_NAME = "relevance_judge"
 RELEVANCE_PROMPT_VERSION = 2
 NO_BRIEF_HYPOTHESIS = "Any organisation of commercial interest to the user."
 EXTRACTION_PROMPT_NAME = "extraction"
 EXTRACTION_PROMPT_VERSION = 2
+BACKFILL_PROMPT_NAME = "extraction_backfill"
+BACKFILL_PROMPT_VERSION = 1
+# Records queued per backfill event; the rest are logged as extraction.backfill_capped.
+BACKFILL_CAP = 500
+# Records a new column of a Brief is backfilled over: extracted, and found by one of the Brief's
+# radars or by no radar; newest first. Params: (workspace_id, brief_id, limit).
+BACKFILL_SCOPE_SQL = """
+    SELECT sr.id, sr.org_id
+      FROM public.source_record sr
+      LEFT JOIN public.radar r ON r.id = sr.radar_id
+     WHERE sr.workspace_id = %s
+       AND sr.extraction_status = 'extracted'
+       AND (sr.radar_id IS NULL OR r.brief_id = %s)
+     ORDER BY sr.created_at DESC, sr.id DESC
+     LIMIT %s
+"""
 # Longest text sent to the model for one record (about 10k tokens).
 MAX_CONTENT_CHARS = 40_000
 
@@ -110,6 +129,14 @@ class ExtractionResult(BaseModel):
     mentions: list[MentionExtract]
     claims: list[ClaimExtract]
     source_date: str | None = None  # ISO date of the article or posting, else null
+
+
+class BackfillResult(BaseModel):
+    """extraction_backfill output: ExtractionResult's claims and source_date. The mentions are
+    given to the model, so any it returns are ignored."""
+
+    claims: list[ClaimExtract]
+    source_date: str | None = None
 
 
 def parse_source_date(value: str | None, fetched_at: datetime) -> datetime:
@@ -189,14 +216,10 @@ async def _radar_lexicon(pool: AsyncConnectionPool, source_record_id: UUID) -> l
     return list(row[0] or []) if row else []
 
 
-async def relevance_hypothesis(
-    pool: AsyncConnectionPool, source_record_id: UUID, workspace_id: UUID
-) -> str:
-    """What the relevance judge tests the record against.
-
-    The hypothesis of the Brief behind the record's radar; failing that the hypotheses of the
-    workspace's active Briefs; failing that a neutral line.
-    """
+async def _radar_brief_config(
+    pool: AsyncConnectionPool, source_record_id: UUID
+) -> dict[str, Any] | None:
+    """The current config of the Brief behind the record's radar; None without one."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT bv.config FROM public.source_record sr"
@@ -207,11 +230,47 @@ async def relevance_hypothesis(
             (str(source_record_id),),
         )
         row = await cur.fetchone()
-    if row is not None:
-        config = row[0]
-        if isinstance(config, str):
-            config = json.loads(config)
-        hypothesis = str((config or {}).get("hypothesis") or "").strip()
+    if row is None:
+        return None
+    config = json.loads(row[0]) if isinstance(row[0], str) else row[0]
+    return config if isinstance(config, dict) else {}
+
+
+def _brief_keys(config: dict[str, Any]) -> set[str]:
+    """A Brief's column keys; empty for a legacy config (no column specs), which sends all."""
+    return set(predicate_keys(config)) if column_specs(config) else set()
+
+
+async def scope_predicate_keys(
+    pool: AsyncConnectionPool, source_record_id: UUID, workspace_id: UUID
+) -> set[str] | None:
+    """The predicate keys extraction sends for a record.
+
+    The columns of the Brief behind the record's radar; for a record without one, the union over
+    the workspace's active Briefs. None (send every predicate) when no Brief in reach has column
+    specs: legacy configs keep the old behaviour.
+    """
+    config = await _radar_brief_config(pool, source_record_id)
+    if config is not None:
+        keys = _brief_keys(config)
+    else:
+        keys = set()
+        for brief in await briefs.active_brief_versions(pool, workspace_id):
+            keys |= _brief_keys(brief.config)
+    return keys or None
+
+
+async def relevance_hypothesis(
+    pool: AsyncConnectionPool, source_record_id: UUID, workspace_id: UUID
+) -> str:
+    """What the relevance judge tests the record against.
+
+    The hypothesis of the Brief behind the record's radar; failing that the hypotheses of the
+    workspace's active Briefs; failing that a neutral line.
+    """
+    config = await _radar_brief_config(pool, source_record_id)
+    if config is not None:
+        hypothesis = str(config.get("hypothesis") or "").strip()
         if hypothesis:
             return hypothesis
     active = [b.hypothesis.strip() for b in await briefs.active_brief_versions(pool, workspace_id)]
@@ -366,6 +425,77 @@ async def _resume_extracted(pool: AsyncConnectionPool, source_record_id: UUID) -
     )
 
 
+class _Predicates:
+    """The predicates one extraction may use: rows of public.predicate, by key."""
+
+    def __init__(self, rows: list[tuple[Any, ...]]) -> None:
+        self.rows = rows
+        self.ids: dict[str, UUID] = {row[1]: UUID(str(row[0])) for row in rows}
+        self.specs: dict[str, Predicate] = {
+            row[1]: Predicate(key=row[1], value_type=row[3], allowed_values=row[4]) for row in rows
+        }
+
+    def prompt_json(self) -> str:
+        return json.dumps(
+            [
+                {
+                    "key": row[1],
+                    "label": row[2],
+                    "value_type": row[3],
+                    "allowed_values": row[4],
+                    "hint": row[5] or "",
+                }
+                for row in self.rows
+            ]
+        )
+
+
+async def _load_predicates(
+    pool: AsyncConnectionPool, workspace_id: UUID, keys: set[str] | None
+) -> _Predicates:
+    """The workspace's and global predicates; only *keys* when given (None: all of them)."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT id, key, label, value_type, allowed_values, extraction_hint"
+            " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
+            (str(workspace_id),),
+        )
+        rows = list(await cur.fetchall())
+    return _Predicates([r for r in rows if keys is None or r[1] in keys])
+
+
+def _validate_claims(
+    claims: list[ClaimExtract], predicates: _Predicates, source_record_id: UUID
+) -> list[tuple[ClaimExtract, UUID, int]]:
+    """(claim, predicate id, confidence) for each claim that is valid against its predicate.
+
+    Invalid output is rejected, never coerced; one bad claim drops only itself."""
+    valid: list[tuple[ClaimExtract, UUID, int]] = []
+    for claim in claims:
+        predicate = predicates.specs.get(claim.predicate_key)
+        if predicate is None:
+            log.warning(
+                "extraction.unknown_predicate",
+                predicate_key=claim.predicate_key,
+                source_record_id=str(source_record_id),
+            )
+            continue
+        error = validate_claim_value(predicate, claim.value)
+        confidence = claim_confidence(claim.confidence)
+        if error is None and confidence is None:
+            error = f"confidence {claim.confidence!r} is not an integer from 0 to 100"
+        if error is not None or confidence is None:
+            log.warning(
+                "extraction.claim_invalid",
+                predicate_key=claim.predicate_key,
+                error=error,
+                source_record_id=str(source_record_id),
+            )
+            continue
+        valid.append((claim, predicates.ids[claim.predicate_key], confidence))
+    return valid
+
+
 async def extract_structured(
     pool: AsyncConnectionPool,
     gateway: AiGateway,
@@ -390,36 +520,15 @@ async def extract_structured(
     org_id: UUID = source_record["org_id"]
     workspace_id: UUID = source_record["workspace_id"]
 
-    # Load workspace predicates for prompt injection, validation and claim linkage.
-    async with pool.connection() as conn, conn.cursor() as cur:
-        await cur.execute(
-            "SELECT id, key, label, value_type, allowed_values, extraction_hint"
-            " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
-            (str(workspace_id),),
-        )
-        pred_rows = await cur.fetchall()
-
-    predicates_list = [
-        {
-            "key": row[1],
-            "label": row[2],
-            "value_type": row[3],
-            "allowed_values": row[4],
-            "hint": row[5] or "",
-        }
-        for row in pred_rows
-    ]
-    pred_by_key: dict[str, UUID] = {row[1]: UUID(str(row[0])) for row in pred_rows}
-    predicate_by_key: dict[str, Predicate] = {
-        row[1]: Predicate(key=row[1], value_type=row[3], allowed_values=row[4]) for row in pred_rows
-    }
-    predicates_text = json.dumps(predicates_list)
+    # Only the Brief's columns are sent (and accepted); legacy Briefs send every predicate.
+    keys = await scope_predicate_keys(pool, source_record_id, workspace_id)
+    predicates = await _load_predicates(pool, workspace_id, keys)
 
     try:
         result = await gateway.run(
             Capability.EXTRACT,
             prompt,
-            {"content": text, "predicates": predicates_text},
+            {"content": text, "predicates": predicates.prompt_json()},
             ExtractionResult,
             ctx,
         )
@@ -429,32 +538,7 @@ async def extract_structured(
 
     extraction = result.value
     observed_at = parse_source_date(extraction.source_date, source_record["fetched_at"])
-
-    # Validate every claim against its predicate before any write. Invalid output is
-    # rejected, never coerced; one bad claim drops only itself.
-    valid_claims: list[tuple[ClaimExtract, UUID, int]] = []
-    for claim in extraction.claims:
-        predicate = predicate_by_key.get(claim.predicate_key)
-        if predicate is None:
-            log.warning(
-                "extraction.unknown_predicate",
-                predicate_key=claim.predicate_key,
-                source_record_id=str(source_record_id),
-            )
-            continue
-        error = validate_claim_value(predicate, claim.value)
-        confidence = claim_confidence(claim.confidence)
-        if error is None and confidence is None:
-            error = f"confidence {claim.confidence!r} is not an integer from 0 to 100"
-        if error is not None or confidence is None:
-            log.warning(
-                "extraction.claim_invalid",
-                predicate_key=claim.predicate_key,
-                error=error,
-                source_record_id=str(source_record_id),
-            )
-            continue
-        valid_claims.append((claim, pred_by_key[claim.predicate_key], confidence))
+    valid_claims = _validate_claims(extraction.claims, predicates, source_record_id)
 
     mention_ids: list[UUID] = []
     try:
@@ -582,3 +666,163 @@ async def extract_backfill(
         queued=len(rows),
     )
     return len(rows)
+
+
+# ---------------------------------------------------------------------------
+# Column backfill (P2): a new Brief version adds columns; fill them over extracted records
+# ---------------------------------------------------------------------------
+
+
+async def queue_predicate_backfill(
+    pool: AsyncConnectionPool, brief_id: UUID, workspace_id: UUID, keys: list[str]
+) -> int:
+    """Queue extract.backfill_record for each record in the Brief's backfill scope.
+
+    Newest first, at most BACKFILL_CAP per call; one queued job per record and key set however
+    often the event is delivered. Returns the number of records queued.
+    """
+    sorted_keys = sorted(set(keys))
+    if not sorted_keys:
+        return 0
+    cap = BACKFILL_CAP
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(BACKFILL_SCOPE_SQL, (str(workspace_id), str(brief_id), cap + 1))
+        rows = list(await cur.fetchall())
+    if len(rows) > cap:
+        log.warning(
+            "extraction.backfill_capped",
+            brief_id=str(brief_id),
+            workspace_id=str(workspace_id),
+            predicate_keys=sorted_keys,
+            cap=cap,
+        )
+        rows = rows[:cap]
+
+    job = extract_backfill_record_job
+    if job is None:
+        log.warning("extraction.backfill_not_wired", brief_id=str(brief_id))
+        return 0
+    from procrastinate.exceptions import AlreadyEnqueued
+
+    joined = ",".join(sorted_keys)
+    for record_id, org_id in rows:
+        with contextlib.suppress(AlreadyEnqueued):
+            await job.configure(queueing_lock=f"backfill:{record_id}:{joined}").defer_async(
+                source_record_id=str(record_id),
+                predicate_keys=sorted_keys,
+                org_id=str(org_id),
+                workspace_id=str(workspace_id),
+            )
+    log.info(
+        "extraction.backfill_queued",
+        brief_id=str(brief_id),
+        workspace_id=str(workspace_id),
+        predicate_keys=sorted_keys,
+        queued=len(rows),
+    )
+    return len(rows)
+
+
+async def _live_mentions(
+    pool: AsyncConnectionPool, source_record_id: UUID
+) -> list[tuple[UUID, str, str]]:
+    """(entity id, entity type, name) of the record's mentions that point at a live entity.
+
+    A mention never resolved (no entity) or whose entity was merged away is skipped."""
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(
+            "SELECT m.entity_id, m.entity_type::text, coalesce(m.raw_name, e.display_name),"
+            " e.status"
+            " FROM public.mention m LEFT JOIN public.entity e ON e.id = m.entity_id"
+            " WHERE m.source_record_id = %s ORDER BY m.created_at, m.id",
+            (str(source_record_id),),
+        )
+        rows = await cur.fetchall()
+    return [
+        (UUID(str(entity_id)), str(entity_type), str(name or ""))
+        for entity_id, entity_type, name, status in rows
+        if entity_id is not None and status != "merged"
+    ]
+
+
+async def backfill_record(
+    pool: AsyncConnectionPool,
+    gateway: AiGateway,
+    source_record_id: UUID,
+    keys: list[str],
+    ctx: CallContext,
+) -> int:
+    """Extract *keys* from an already extracted record onto its existing mentions' entities.
+
+    Creates no entity or mention and leaves the extraction status alone; the claims are written
+    in one transaction, and their claim.created events re-judge the verdicts. app.create_claim
+    dedupes, so a rerun adds no rows. Returns the number of claims written.
+    """
+    mentions = await _live_mentions(pool, source_record_id)
+    if not mentions:
+        log.info("extraction.backfill_no_mentions", source_record_id=str(source_record_id))
+        return 0
+    source_record = await _load_source_record(pool, source_record_id)
+    predicates = await _load_predicates(pool, source_record["workspace_id"], set(keys))
+    if not predicates.rows:
+        log.warning(
+            "extraction.backfill_no_predicates",
+            source_record_id=str(source_record_id),
+            predicate_keys=keys,
+        )
+        return 0
+
+    result = await gateway.run(
+        Capability.EXTRACT,
+        load_prompt(BACKFILL_PROMPT_NAME, BACKFILL_PROMPT_VERSION),
+        {
+            "mentions": json.dumps(
+                [
+                    {"index": i, "entity_type": entity_type, "name": name}
+                    for i, (_, entity_type, name) in enumerate(mentions)
+                ]
+            ),
+            "predicates": predicates.prompt_json(),
+            "content": _content_text(source_record),
+        },
+        BackfillResult,
+        ctx,
+    )
+    output = result.value
+    observed_at = parse_source_date(output.source_date, source_record["fetched_at"])
+    valid_claims = _validate_claims(output.claims, predicates, source_record_id)
+    written = 0
+    async with pool.connection() as conn, conn.transaction():
+        for claim, predicate_id, confidence in valid_claims:
+            if not 0 <= claim.mention_index < len(mentions):
+                log.warning(
+                    "extraction.claim_index_oob",
+                    mention_index=claim.mention_index,
+                    mentions=len(mentions),
+                    source_record_id=str(source_record_id),
+                )
+                continue
+            await conn.execute(
+                "SELECT app.create_claim(%s, %s, %s, %s::jsonb, %s, %s, %s, %s, %s, %s, %s)",
+                (
+                    str(source_record["org_id"]),
+                    str(mentions[claim.mention_index][0]),
+                    str(predicate_id),
+                    json.dumps(claim.value, allow_nan=False),
+                    claim.quote,
+                    claim.quote_original,
+                    claim.quote_language,
+                    str(source_record_id),
+                    observed_at,
+                    str(result.extractor_version_id),
+                    confidence,
+                ),
+            )
+            written += 1
+    log.info(
+        "extraction.backfill_done",
+        source_record_id=str(source_record_id),
+        predicate_keys=keys,
+        claims=written,
+    )
+    return written

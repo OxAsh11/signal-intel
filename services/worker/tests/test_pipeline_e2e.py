@@ -51,6 +51,7 @@ from signal_core.health import PgHealthStore
 from signal_core.jobs import DbKillSwitch
 from signal_core.metering import CallContext, PgApprovalStore
 from signal_core.modules.m02_radar import create_source_records
+from signal_core.modules.m03_extraction import BACKFILL_SCOPE_SQL, backfill_record
 from signal_core.modules.m09_activation import push_campaign_batch
 from signal_core.modules.m11_stage import mark_dormant_accounts
 from signal_core.modules.m12_meetings import confirm_meeting, sync_meeting
@@ -74,6 +75,17 @@ PAGE = (
 )
 # A later page names the same company without a domain: it must attach, not go to Review.
 PAGE_2 = "Acme Engineering designs every project in Revit and has opened a new studio in Rotterdam."
+
+# The Brief-columns scenario (P2) runs in its own tenant.
+DRONE_MARK = "drone inspection programme"
+DRONE_PAGE = (
+    "Volt Grid (voltgrid.example), a Dutch energy utility, runs a drone inspection programme "
+    "across its 40 substations."
+)
+ORG_P2 = UUID("00000000-0000-4000-8000-0000000e2f02")
+WS_P2 = UUID("00000000-0000-4000-8000-0000000e2f03")
+BRIEF_P2 = UUID("00000000-0000-4000-8000-0000000e2f05")
+OTHER_BRIEF_P2 = UUID("00000000-0000-4000-8000-0000000e2f06")
 
 
 def _free_port() -> int:
@@ -151,6 +163,8 @@ class FakeGateway:
 
     @staticmethod
     def _answer(name: str, variables: dict[str, str]) -> dict[str, Any]:
+        if DRONE_MARK in variables.get("content", ""):
+            return FakeGateway._drone_answer(name, variables)
         if name == "relevance_judge":
             assert variables.get("hypothesis", "").strip(), "relevance needs the Brief hypothesis"
             if "fake tender" in variables["content"].lower():
@@ -246,6 +260,72 @@ class FakeGateway:
         if name == "identity_tiebreak":
             return {"winner_index": None, "confidence": 0, "reason": "unsure"}
         raise AssertionError(f"unexpected prompt {name}")
+
+    @staticmethod
+    def _drone_answer(name: str, variables: dict[str, str]) -> dict[str, Any]:
+        """The Brief-columns scenario (P2): a Brief with typed columns, then a new column."""
+        keys = {p["key"] for p in json.loads(variables.get("predicates") or "[]")}
+        if name == "relevance_judge":
+            return {"relevant": True, "reason": "a utility with a drone programme"}
+        if name == "extraction":
+            # Only the record's Brief's columns are sent, not every workspace/global predicate.
+            assert keys == {"drone_programme", "industry"}, keys
+            return {
+                "mentions": [
+                    {
+                        "entity_type": "company",
+                        "raw_name": "Volt Grid",
+                        "raw_domain": "voltgrid.example",
+                        "raw_country": "NL",
+                        "raw_attributes": {},
+                    }
+                ],
+                "claims": [
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "drone_programme",
+                        "value": True,
+                        "quote": "runs a drone inspection programme",
+                        "confidence": 90,
+                    },
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "industry",
+                        "value": "energy",
+                        "confidence": 80,
+                    },
+                ],
+            }
+        if name == "extraction_backfill":
+            assert keys == {"site_count"}, keys
+            names = [m["name"] for m in json.loads(variables["mentions"])]
+            assert names == ["Volt Grid"], names
+            return {
+                "claims": [
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "site_count",
+                        "value": 40,
+                        "quote": "across its 40 substations",
+                        "confidence": 85,
+                    },
+                    # An index that was not given is dropped.
+                    {
+                        "mention_index": 3,
+                        "predicate_key": "site_count",
+                        "value": 2,
+                        "confidence": 85,
+                    },
+                ],
+                "source_date": "2026-10-01",
+            }
+        if name == "verdict":
+            return {"value": "Likely", "reasoning": "quoted", "supporting_claim_indices": [0]}
+        if name == "account_card":
+            return {"bullets": ["Runs drones"], "next_step": "Send the case study"}
+        if name == "identity_tiebreak":
+            return {"winner_index": None, "confidence": 0, "reason": "unsure"}
+        raise AssertionError(f"unexpected prompt {name} in the drone scenario")
 
 
 async def _configure(conn: AsyncConnection[Any]) -> None:
@@ -1236,3 +1316,204 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
         # ── Removing a member revokes their tokens at once ────────────────────
         await db.admin("update public.member set status = 'removed' where id = %s", (MEMBER,))
         assert await db.one("select count(*) from public.api_token where revoked_at is null") == 0
+
+
+# ── P2: Brief-scoped extraction and column backfill ─────────────────────────
+
+FLYTBASE = json.loads(
+    (REPO / "packages" / "signal_core" / "tests" / "fixtures" / "flytbase_columns.json").read_text(
+        encoding="utf-8"
+    )
+)
+
+
+async def _insert_version(db: Db, brief: UUID, version: int, config: dict[str, Any]) -> UUID:
+    """A new Brief version through a real insert path: the sync trigger fires on insert."""
+    version_id = await db.one(
+        "insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights)"
+        " values (%s, %s, %s, %s, %s::jsonb, '{}', '{}'::jsonb) returning id",
+        (brief, ORG_P2, WS_P2, version, json.dumps(config)),
+    )
+    await db.admin(
+        "update public.brief set current_version_id = %s where id = %s", (version_id, brief)
+    )
+    return UUID(str(version_id))
+
+
+async def _raw_record(db: Db, radar: UUID, status: str, tag: str) -> UUID:
+    """A record written straight to the store (no event), in a given state."""
+    record = await db.one(
+        "insert into public.source_record (org_id, workspace_id, connector_id, source_type, url,"
+        " fetched_at, content_hash, extraction_status, radar_id)"
+        " values (%s, %s, %s, 'website', %s, now(), %s, %s::public.extraction_status, %s) returning id",
+        (ORG_P2, WS_P2, f"radar:{radar}", f"https://{tag}.example/", tag, status, radar),
+    )
+    return UUID(str(record))
+
+
+@pytest.mark.asyncio
+async def test_brief_columns_backfill_end_to_end(conninfo: str) -> None:
+    pool = AsyncConnectionPool(
+        conninfo,
+        min_size=1,
+        max_size=1,
+        open=False,
+        configure=_configure,
+        kwargs={"autocommit": False, "prepare_threshold": None},
+    )
+    await pool.open()
+    try:
+        await _brief_columns_scenario(pool)
+    finally:
+        await pool.close()
+
+
+async def _brief_columns_scenario(pool: AsyncConnectionPool) -> None:
+    db = Db(pool)
+    await db.admin("insert into public.organisation (id, name) values (%s, 'P2 Org')", (ORG_P2,))
+    await db.admin(
+        "insert into public.workspace (id, org_id, name) values (%s, %s, 'P2')", (WS_P2, ORG_P2)
+    )
+    for brief, name in ((BRIEF_P2, "Drone utilities"), (OTHER_BRIEF_P2, "Other")):
+        await db.admin(
+            "insert into public.brief (id, org_id, workspace_id, name, state)"
+            " values (%s, %s, %s, %s, 'Active')",
+            (brief, ORG_P2, WS_P2, name),
+        )
+    # A workspace predicate no Brief uses: extraction must not send it.
+    await db.admin(
+        "insert into public.predicate (key, org_id, workspace_id, label, value_type)"
+        " values ('other_key', %s, %s, 'Other', 'text')",
+        (ORG_P2, WS_P2),
+    )
+    v1_config = {
+        "hypothesis": "Utilities that run drone programmes",
+        "predicates": FLYTBASE["predicates"][:2],  # drone_programme, industry
+        "evidence_rules": FLYTBASE["evidence_rules"],
+    }
+    await _insert_version(db, BRIEF_P2, 1, v1_config)
+    await _insert_version(db, OTHER_BRIEF_P2, 1, {"hypothesis": "Something else"})
+    radars: dict[UUID, UUID] = {}
+    for brief in (BRIEF_P2, OTHER_BRIEF_P2):
+        radars[brief] = UUID(
+            str(
+                await db.one(
+                    "insert into public.radar (org_id, workspace_id, brief_id, connector_type, name)"
+                    " values (%s, %s, %s, 'website', 'site') returning id",
+                    (ORG_P2, WS_P2, brief),
+                )
+            )
+        )
+
+    gateway = FakeGateway()
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        DbKillSwitch(pool),
+        HealthState(),
+        PgHealthStore(pool),
+        ai_configured=gateway.configured,
+        approvals=PgApprovalStore(pool),
+        gateway=gateway,  # type: ignore[arg-type]
+        pool=pool,
+    )
+    async with app.open_async():
+        await _drain(app, connector, pool)  # version 1's backfill event: nothing extracted yet
+        payload = SourcePayload(
+            url="https://voltgrid.example/news",
+            fetched_at=datetime.now(UTC),
+            content_hash=hashlib.sha256(DRONE_PAGE.encode()).hexdigest(),
+            payload_ref=None,
+            language="en",
+            raw=DRONE_PAGE.encode(),
+        )
+        assert (
+            await create_source_records(
+                pool, ORG_P2, WS_P2, f"radar:{radars[BRIEF_P2]}", "website", [payload]
+            )
+            == 1
+        )
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        record, radar_id, status = (
+            await db.admin(
+                "select id, radar_id, extraction_status::text from public.source_record"
+                " where org_id = %s and content_hash = %s",
+                (ORG_P2, payload.content_hash),
+            )
+        )[0]
+        assert (radar_id, status) == (radars[BRIEF_P2], "extracted")
+        entity = await db.one(
+            "select entity_id from public.mention where source_record_id = %s", (record,)
+        )
+        assert entity is not None
+        claim_keys_sql = (
+            "select p.key from public.claim c join public.predicate p on p.id = c.predicate_id"
+            " where c.entity_id = %s and c.status = 'active' order by p.key"
+        )
+        assert [r[0] for r in await db.admin(claim_keys_sql, (entity,))] == [
+            "drone_programme",
+            "industry",
+        ]
+
+        # Out of scope: another Brief's extracted record, and this Brief's pending record.
+        other = await _raw_record(db, radars[OTHER_BRIEF_P2], "extracted", "other-brief")
+        pending = await _raw_record(db, radars[BRIEF_P2], "pending", "pending-record")
+        scope = [r[0] for r in await db.admin(BACKFILL_SCOPE_SQL, (WS_P2, BRIEF_P2, 500))]
+        assert scope == [record]
+        assert other not in scope and pending not in scope
+
+        entities_sql = (
+            "select (select count(*) from public.entity where org_id = %s),"
+            " (select count(*) from public.mention where org_id = %s)"
+        )
+        before = (await db.admin(entities_sql, (ORG_P2, ORG_P2)))[0]
+
+        # ── Version 2 adds site_count; its event reaches the dispatcher and the jobs run ──
+        v2_config = v1_config | {"predicates": FLYTBASE["predicates"]}
+        v2 = await _insert_version(db, BRIEF_P2, 2, v2_config)
+        event_keys = await db.one(
+            "select payload -> 'predicate_keys' from public.outbox"
+            " where event = 'predicate.backfill_requested' and aggregate_id = %s",
+            (v2,),
+        )
+        assert event_keys == ["site_count"]
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+
+        backfills = [
+            j for j in connector.jobs.values() if j["task_name"] == "extract.backfill_record"
+        ]
+        assert [(j["queueing_lock"], j["status"]) for j in backfills] == [
+            (f"backfill:{record}:site_count", "succeeded")
+        ]
+        assert [r[0] for r in await db.admin(claim_keys_sql, (entity,))] == [
+            "drone_programme",
+            "industry",
+            "site_count",
+        ]
+        value, observed_at = (
+            await db.admin(
+                "select c.value, c.observed_at from public.claim c"
+                " join public.predicate p on p.id = c.predicate_id"
+                " where c.entity_id = %s and p.key = 'site_count' and c.status = 'active'",
+                (entity,),
+            )
+        )[0]
+        assert value == 40
+        assert observed_at == datetime(2026, 10, 1, tzinfo=UTC)
+        # No new entity or mention; the record's status is untouched.
+        assert (await db.admin(entities_sql, (ORG_P2, ORG_P2)))[0] == before
+        assert (
+            await db.one(
+                "select extraction_status::text from public.source_record where id = %s", (record,)
+            )
+            == "extracted"
+        )
+
+        # A rerun adds no duplicate claim.
+        claims_sql = "select count(*) from public.claim where entity_id = %s"
+        claims_before = await db.one(claims_sql, (entity,))
+        ctx = CallContext(ORG_P2, WS_P2, None, None, "extract.backfill", {})
+        assert await backfill_record(pool, gateway, UUID(str(record)), ["site_count"], ctx) == 1  # type: ignore[arg-type]
+        assert await db.one(claims_sql, (entity,)) == claims_before
