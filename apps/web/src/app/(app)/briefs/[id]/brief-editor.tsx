@@ -1,6 +1,8 @@
 'use client';
 import { useActionState } from 'react';
 import { ChipField, fieldInput } from './chip-field';
+import { ColumnsField } from './columns-field';
+import { RulesField } from './rules-field';
 import { startPilot } from '@/app/actions/briefs';
 import { Button, Card, FamilyTag } from '@signal/ui';
 import type { BriefConfig } from '@/lib/briefs';
@@ -176,6 +178,18 @@ export function BriefEditor({ brief, canEdit }: { brief: Brief; canEdit: boolean
             <input defaultValue={String(c.offer ?? '')} onChange={(e) => onChange({ ...c, offer: e.target.value })} className={fieldInput} />
           </label>
         )} />
+
+      <ColumnsField briefId={brief.id} config={cfg} disabled={disabled} />
+      <RulesField briefId={brief.id} config={cfg} disabled={disabled} />
+
+      {cfg.assumptions?.length ? (
+        <section className="si-card" aria-label="What I assumed">
+          <h2 className="si-label m-0">What I assumed</h2>
+          <ul className="m-0 flex flex-col gap-1.5 pl-5 text-[15px] leading-[1.6] text-ink">
+            {cfg.assumptions.map((a) => <li key={a}>{a}</li>)}
+          </ul>
+        </section>
+      ) : null}
     </div>
   );
 }

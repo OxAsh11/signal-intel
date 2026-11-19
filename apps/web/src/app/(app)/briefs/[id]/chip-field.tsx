@@ -6,6 +6,8 @@ import { saveBriefDraft } from '@/app/actions/briefs';
 type Props = {
   briefId: string;
   fieldName: string;
+  /** The config keys this part writes; defaults to `fieldName`. */
+  fields?: string[];
   label: string;
   required?: boolean;
   disabled?: boolean;
@@ -22,7 +24,7 @@ export const fieldInput = 'w-full rounded-sm border border-line-strong bg-surfac
  * One part of the AI's draft, shown as a readable statement. "Change" opens its editor; saving
  * writes the draft (AI-first: the AI fills it, the person checks it).
  */
-export function ChipField({ briefId, fieldName, label, required, disabled, isEmpty: isEmptyFn, currentConfig, renderValue, renderEditor }: Props) {
+export function ChipField({ briefId, fieldName, fields, label, required, disabled, isEmpty: isEmptyFn, currentConfig, renderValue, renderEditor }: Props) {
   const [open, setOpen] = useState(false);
   const [draft, setDraft] = useState(currentConfig);
   // A successful save closes the editor.
@@ -67,7 +69,10 @@ export function ChipField({ briefId, fieldName, label, required, disabled, isEmp
         <form action={formAction} className="flex flex-col gap-3">
           <fieldset disabled={isPending} className="contents">
             <input type="hidden" name="brief" value={briefId} />
-            <input type="hidden" name="config" value={JSON.stringify({ ...currentConfig, [fieldName]: (draft as Record<string, unknown>)[fieldName] })} />
+            <input type="hidden" name="config" value={JSON.stringify({
+              ...currentConfig,
+              ...Object.fromEntries((fields ?? [fieldName]).map((f) => [f, draft[f]])),
+            })} />
             {renderEditor(draft, (patch) => setDraft((d) => ({ ...d, ...patch })))}
             <div className="flex gap-2">
               <Button type="submit" variant="primary" size="sm">Save</Button>

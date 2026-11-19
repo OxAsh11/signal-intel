@@ -1,5 +1,6 @@
 'use client';
 import { useRouter } from 'next/navigation';
+import { describeRule, isColumnSpec, ROLE_LABELS, TYPE_LABELS, type BriefConfig, type EvidenceRule } from '@/lib/briefs';
 
 type Version = { id: string; version: number; config: Record<string, unknown>; published_at: string; change_note: string | null };
 
@@ -10,15 +11,30 @@ const FIELDS: { key: string; label: string }[] = [
   { key: 'sources', label: 'Sources' },
   { key: 'icp', label: 'ICP' },
   { key: 'personas', label: 'Personas' },
-  { key: 'predicates', label: 'Predicates' },
+  { key: 'predicates', label: 'Columns' },
+  { key: 'evidence_rules', label: 'Verdict rules' },
+  { key: 'assumptions', label: 'Assumptions' },
   { key: 'seeds', label: 'Seeds' },
   { key: 'research_template', label: 'Research template' },
   { key: 'scoring', label: 'Scoring' },
   { key: 'budget', label: 'Budget' },
 ];
 
-function display(value: unknown): string {
+function display(value: unknown, key: string, config: Record<string, unknown>): string {
   if (value === null || value === undefined) return '—';
+  // Columns, rules and assumptions read as people would say them, not as JSON.
+  if (key === 'predicates' && Array.isArray(value)) {
+    if (!value.length) return '—';
+    return (value as NonNullable<BriefConfig['predicates']>)
+      .map((c) => (isColumnSpec(c) ? `${c.label} · ${TYPE_LABELS[c.value_type] ?? c.value_type} · ${ROLE_LABELS[c.role] ?? c.role}` : c))
+      .join('\n');
+  }
+  if (key === 'evidence_rules' && Array.isArray(value)) {
+    if (!value.length) return '—';
+    const columns = Array.isArray(config.predicates) ? (config.predicates as NonNullable<BriefConfig['predicates']>) : [];
+    return (value as EvidenceRule[]).map((r) => describeRule(r, columns)).join('\n');
+  }
+  if (key === 'assumptions' && Array.isArray(value)) return value.length ? value.join('\n') : '—';
   if (typeof value === 'string') return value || '—';
   return JSON.stringify(value, null, 2);
 }
@@ -61,10 +77,10 @@ export function VersionDiff({ versions, vA, vB, briefId }:
                 <tr key={key} className={changed ? 'bg-caution/5' : ''}>
                   <td className="py-2 font-medium align-top">{label}</td>
                   <td className={`py-2 pl-4 font-mono text-xs align-top whitespace-pre-wrap ${changed ? 'text-caution' : ''}`}>
-                    {display(aVal)}
+                    {display(aVal, key, vA.config)}
                   </td>
                   <td className={`py-2 pl-4 font-mono text-xs align-top whitespace-pre-wrap ${changed ? 'bg-marker-soft text-ink' : ''}`}>
-                    {display(bVal)}
+                    {display(bVal, key, vB.config)}
                   </td>
                 </tr>
               );
