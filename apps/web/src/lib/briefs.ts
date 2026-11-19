@@ -1,6 +1,10 @@
+import { FormulaSyntaxError, parse, references } from '@signal/formula';
+
 export type ValueType = 'boolean' | 'number' | 'enum' | 'text' | 'date';
 export type Role = 'signal' | 'fit.vertical' | 'fit.geography' | 'fit.size' | 'fit.commercial_role' | 'scale' | 'info';
 export type RuleOp = 'is_true' | 'is_false' | 'present' | 'at_least' | 'one_of' | 'contains';
+/** How a column is filled: found in the sources by the AI, or computed by a formula. */
+export type FillMethod = 'extract' | 'formula';
 
 /** One column the AI fills for every company (an item of `config.predicates`). */
 export type ColumnSpec = {
@@ -11,6 +15,12 @@ export type ColumnSpec = {
   extraction_hint: string;
   decay_half_life_days: number | null;
   role: Role;
+  /** Absent means `extract`. */
+  fill_method?: FillMethod;
+  /** The expression of a formula column (1–500 characters); null otherwise. */
+  formula?: string | null;
+  /** Formula only: the column keys the formula reads, from `references()`. */
+  inputs?: string[];
 };
 
 /** A rule the verdict is decided by (an item of `config.evidence_rules`). */
@@ -62,6 +72,14 @@ export const TYPE_LABELS: Record<ValueType, string> = {
   date: 'Date',
 };
 
+export const FILL_LABELS: Record<FillMethod, string> = {
+  extract: 'Found in sources',
+  formula: 'Formula',
+};
+
+/** At most this many columns are read by one formula (Global Constraints). */
+export const MAX_FORMULA_INPUTS = 10;
+
 /** The rule ops each column type allows (Global Constraints). */
 export const OPS_BY_TYPE: Record<ValueType, RuleOp[]> = {
   boolean: ['is_true', 'is_false', 'present'],
@@ -82,6 +100,11 @@ export const OP_LABELS: Record<RuleOp, string> = {
 
 export function isColumnSpec(p: ColumnSpec | string): p is ColumnSpec {
   return typeof p === 'object' && p !== null;
+}
+
+/** A column computed by a formula: it has no hint and no evidence rule. */
+export function isFormulaColumn(p: ColumnSpec | string): p is ColumnSpec & { fill_method: 'formula' } {
+  return isColumnSpec(p) && p.fill_method === 'formula';
 }
 
 /** The Brief's column specs, skipping legacy plain keys. */
@@ -143,6 +166,8 @@ export type WorkspacePredicate = {
   allowed_values: unknown;
   extraction_hint: string | null;
   decay_half_life_days: number | null;
+  /** How the workspace fills it; absent means `extract`. */
+  fill_method?: string | null;
 };
 
 /** The scoring role a legacy key had before Briefs had column specs (scoring_core.LEGACY_ROLES). */
@@ -170,6 +195,8 @@ export function columnsFromWorkspace(preds: WorkspacePredicate[]): ColumnSpec[] 
   for (const p of preds) {
     if (out.length >= MAX_COLUMNS) break;
     if (!KEY_RE.test(p.key) || !(p.value_type in TYPE_LABELS)) continue;
+    // A legacy Brief collected only extracted columns; a formula column is never seeded as one.
+    if ((p.fill_method ?? 'extract') !== 'extract') continue;
     const value_type = p.value_type as ValueType;
     let allowed_values: string[] | null = null;
     if (value_type === 'enum') {
@@ -194,10 +221,16 @@ export function columnsFromWorkspace(preds: WorkspacePredicate[]): ColumnSpec[] 
 }
 
 /**
- * What is wrong with a column's key, in plain words, or null. `existingType` is the type the
- * workspace already holds the key as, when the key can still change (it follows the label).
+ * What is wrong with a column's key, in plain words, or null. `existing` is the workspace column
+ * with this key, when the key can still change (it follows the label): its type and fill method
+ * stay, so the column must match them.
  */
-export function columnKeyProblem(col: ColumnSpec, others: ColumnSpec[], existingType: string | undefined): string | null {
+export function columnKeyProblem(
+  col: ColumnSpec,
+  others: ColumnSpec[],
+  existing: { value_type: string; fill_method?: string | null } | undefined,
+): string | null {
+  const existingType = existing?.value_type;
   if (!KEY_RE.test(col.key)) {
     return 'The key must be 2 to 40 lowercase letters, digits or underscores, starting with a letter. Change the label.';
   }
@@ -206,7 +239,102 @@ export function columnKeyProblem(col: ColumnSpec, others: ColumnSpec[], existing
     const type = TYPE_LABELS[existingType as ValueType] ?? existingType;
     return `The workspace already has a column "${col.key}" of type ${type}. Change the label for another key, or set the type to ${type}.`;
   }
+  const fill = (existing?.fill_method ?? 'extract') as FillMethod;
+  if (existing && fill !== (col.fill_method ?? 'extract')) {
+    const how = FILL_LABELS[fill] ?? fill;
+    return `The workspace already has a column "${col.key}" filled by ${how}. Change the label for another key, or set Filled by to ${how}.`;
+  }
   return null;
+}
+
+/** The keys a formula reads (sorted, distinct), or null when it does not parse. */
+export function formulaReads(expr: string | null | undefined): string[] | null {
+  try {
+    return references(parse(expr ?? ''));
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * What is wrong with a formula column's expression, in plain words, or null. `specs` are the
+ * Brief's column specs (this one included); `legacyKeys` its plain keys, which have no spec.
+ */
+export function formulaProblem(col: ColumnSpec, specs: ColumnSpec[], legacyKeys: string[]): string | null {
+  const expr = col.formula ?? '';
+  if (!expr.trim()) return 'Write the formula this column computes.';
+  let reads: string[];
+  try {
+    reads = references(parse(expr));
+  } catch (e) {
+    if (e instanceof FormulaSyntaxError) return `Formula: ${e.reason} (at character ${e.position + 1})`;
+    throw e;
+  }
+  if (reads.includes(col.key)) return 'A formula cannot read its own column.';
+  for (const key of reads) {
+    if (specs.some((s) => s.key === key)) continue;
+    if (legacyKeys.includes(key)) return `Formula reads "${key}", which has no column spec yet; give it one first.`;
+    return `Formula reads "${key}", which is not a column of this Brief`;
+  }
+  if (!reads.length) return 'A formula reads at least one column of this Brief.';
+  if (reads.length > MAX_FORMULA_INPUTS) return `A formula reads at most ${MAX_FORMULA_INPUTS} columns.`;
+  return null;
+}
+
+const isLower = (c: string | undefined) => c !== undefined && c >= 'a' && c <= 'z';
+const isDigit = (c: string | undefined) => c !== undefined && c >= '0' && c <= '9';
+const isWord = (c: string | undefined) => isLower(c) || isDigit(c) || c === '_';
+const isSpace = (c: string | undefined) => c === ' ' || c === '\t' || c === '\r' || c === '\n';
+
+/**
+ * The formula with each reference to column `from` made a reference to `to`, read as the formula
+ * language reads it: whole identifiers only, never inside text, after "@" or as a function name.
+ * Returns the formula unchanged when it does not mention `from`, and null when it does but the
+ * change cannot be confirmed: the result must parse and read exactly the old columns with `from`
+ * swapped for `to`.
+ */
+export function renameFormulaRef(expr: string, from: string, to: string): string | null {
+  const chars = Array.from(expr);
+  const n = chars.length;
+  let out = '';
+  let replaced = false;
+  let i = 0;
+  while (i < n) {
+    const c = chars[i] as string;
+    const start = i;
+    if (c === '"') {
+      // Text: skipped whole, escapes included.
+      i += 1;
+      while (i < n && chars[i] !== '"') i += chars[i] === '\\' ? 2 : 1;
+      i = Math.min(i + 1, n);
+      out += chars.slice(start, i).join('');
+    } else if (c === '@' || isDigit(c)) {
+      // A system value, or a number's digits (letters after them start a new identifier).
+      i += 1;
+      while (i < n && (c === '@' ? isWord(chars[i]) : isDigit(chars[i]))) i += 1;
+      out += chars.slice(start, i).join('');
+    } else if (isLower(c)) {
+      while (i < n && isWord(chars[i])) i += 1;
+      const word = chars.slice(start, i).join('');
+      let j = i;
+      while (j < n && isSpace(chars[j])) j += 1;
+      if (word === from && chars[j] !== '(') {
+        out += to;
+        replaced = true;
+      } else {
+        out += word;
+      }
+    } else {
+      out += c;
+      i += 1;
+    }
+  }
+  if (!replaced) return expr;
+  const before = formulaReads(expr);
+  const after = formulaReads(out);
+  if (!before || !after || !before.includes(from) || before.includes(to)) return null;
+  const expected = [...before.filter((k) => k !== from), to].sort();
+  return expected.length === after.length && expected.every((k, x) => k === after[x]) ? out : null;
 }
 
 /** A "newer than" number of days from its input: blank is any age; anything else must be 1 to 3650 whole days. */

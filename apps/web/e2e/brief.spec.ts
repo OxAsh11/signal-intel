@@ -12,8 +12,8 @@ async function createBrief(page: Page): Promise<string> {
 }
 
 /** Plays the worker: saves the FlytBase draft exactly as the AI intake job does, then reloads. */
-async function draftBrief(page: Page, id: string): Promise<void> {
-  await sql('select app.save_brief_draft($1, $2::jsonb)', [id, JSON.stringify(FLYTBASE_DRAFT)]);
+async function draftBrief(page: Page, id: string, draft: object = FLYTBASE_DRAFT): Promise<void> {
+  await sql('select app.save_brief_draft($1, $2::jsonb)', [id, JSON.stringify(draft)]);
   await page.reload();
   await expect(page.getByText('Drafted by AI from your description.')).toBeVisible();
 }
@@ -49,7 +49,46 @@ async function expectRulesUnchanged(rules: Locator): Promise<void> {
   await expect(rule2.getByLabel('Test', { exact: true })).toHaveValue('one_of');
 }
 
-const DAYS_ERROR = 'Use a whole number of days from 1 to 3650, or leave it blank for any age.';
+const PROGRAMME_FORMULA = 'drone_programme and site_count > 0';
+
+/** The FlytBase draft with a formula column over two of its columns. */
+const FORMULA_DRAFT = {
+  ...FLYTBASE_DRAFT,
+  predicates: [
+    ...FLYTBASE_DRAFT.predicates,
+    {
+      key: 'programme_and_sites', label: 'Programme and sites', value_type: 'boolean', allowed_values: null,
+      extraction_hint: '', decay_half_life_days: null, role: 'info',
+      fill_method: 'formula', formula: PROGRAMME_FORMULA, inputs: ['drone_programme', 'site_count'],
+    },
+  ],
+};
+
+/**
+ * In the open Columns editor: adds a column with this label and makes it a formula (Yes or no).
+ * Returns its fieldset.
+ */
+async function addFormulaColumn(columns: Locator, n: number, label: string, formula: string): Promise<Locator> {
+  await columns.getByRole('button', { name: 'Add a column', exact: true }).click();
+  const column = columns.getByRole('group', { name: `Column ${n}`, exact: true });
+  await column.getByLabel('Label', { exact: true }).fill(label);
+  await column.getByLabel('Filled by', { exact: true }).selectOption('formula');
+  await column.getByLabel('Type', { exact: true }).selectOption('boolean');
+  await column.getByLabel('Formula', { exact: true }).fill(formula);
+  return column;
+}
+
+/** A formula column's spec in the saved draft. */
+async function draftColumn(id: string, key: string): Promise<Record<string, unknown> | undefined> {
+  const [row] = await sql<{ col: Record<string, unknown> }>(
+    `select e as col from public.brief b, jsonb_array_elements(b.draft_config -> 'predicates') e
+      where b.id = $1 and e ->> 'key' = $2`,
+    [id, key],
+  );
+  return row?.col;
+}
+
+const DAYS_ERROR ='Use a whole number of days from 1 to 3650, or leave it blank for any age.';
 const SEED_NOTICE =
   "This Brief used every workspace column. They are listed so nothing stops being collected; remove any you don't need.";
 
@@ -293,6 +332,149 @@ test.describe('Brief Studio', () => {
     ]);
   });
 
+  test('a formula column saves its expression and inputs', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id);
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    const column = await addFormulaColumn(columns, 4, 'Programme and sites', PROGRAMME_FORMULA);
+    // A formula column has no hint for the AI, and says what it reads.
+    await expect(column.getByLabel('Hint', { exact: true })).toHaveCount(0);
+    await expect(column.getByRole('alert')).toHaveCount(0);
+    await expect(column.getByText('Reads Runs or plans a drone programme · Industrial sites', { exact: true })).toBeVisible();
+    await columns.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(columns.getByRole('button', { name: 'Change', exact: true })).toBeVisible();
+    await expect(columns.getByText(PROGRAMME_FORMULA, { exact: true })).toBeVisible();
+    await expect(columns.getByText('Reads Runs or plans a drone programme · Industrial sites', { exact: true })).toBeVisible();
+    await expect(columns.getByText('Formula', { exact: true })).toBeVisible();
+    await expect(columns.getByText('Found in sources', { exact: true })).toHaveCount(3);
+
+    expect(await draftColumn(id, 'programme_and_sites')).toMatchObject({
+      fill_method: 'formula',
+      formula: PROGRAMME_FORMULA,
+      inputs: ['drone_programme', 'site_count'],
+      value_type: 'boolean',
+    });
+  });
+
+  test('a formula with a syntax error blocks Save', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id);
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    const column = await addFormulaColumn(columns, 4, 'Programme and sites', 'drone_programme and');
+    const save = columns.getByRole('button', { name: 'Save', exact: true });
+    await expect(column.getByRole('alert')).toHaveText('Formula: expected a value, found the end of the formula (at character 20)');
+    await expect(save).toBeDisabled();
+    await column.getByLabel('Formula', { exact: true }).fill(PROGRAMME_FORMULA);
+    await expect(column.getByRole('alert')).toHaveCount(0);
+    await expect(save).toBeEnabled();
+    await columns.getByRole('button', { name: 'Cancel', exact: true }).click();
+  });
+
+  test('a formula reading an unknown column blocks Save', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id);
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    const column = await addFormulaColumn(columns, 4, 'Programme and hiring', 'drone_programme and hiring');
+    const save = columns.getByRole('button', { name: 'Save', exact: true });
+    await expect(column.getByRole('alert')).toHaveText('Formula reads "hiring", which is not a column of this Brief');
+    await expect(save).toBeDisabled();
+    await column.getByLabel('Formula', { exact: true }).fill(PROGRAMME_FORMULA);
+    await expect(save).toBeEnabled();
+
+    // Removing a column the formula reads leaves the formula reading an unknown column.
+    await columns.getByRole('group', { name: 'Column 3', exact: true }).getByRole('button', { name: 'Remove column', exact: true }).click();
+    await expect(columns.getByText('Formula reads "site_count", which is not a column of this Brief', { exact: true })).toBeVisible();
+    await expect(save).toBeDisabled();
+    await columns.getByRole('button', { name: 'Cancel', exact: true }).click();
+  });
+
+  test('a formula cycle is refused with the database message', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id);
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    await addFormulaColumn(columns, 4, 'Score', 'sites_plus and drone_programme');
+    await addFormulaColumn(columns, 5, 'Sites plus', 'score or drone_programme');
+    // Each formula reads a column of this Brief, so the page lets it through; the database names the cycle.
+    await expect(columns.getByRole('alert')).toHaveCount(0);
+    await columns.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(columns.getByText('Formula columns form a cycle: score → sites_plus → score.', { exact: true })).toBeVisible();
+    // The editor stays open as it was.
+    await expect(columns.getByRole('group', { name: 'Column 5', exact: true }).getByLabel('Formula', { exact: true })).toHaveValue('score or drone_programme');
+
+    // Nothing was saved: the draft keeps its three columns.
+    const [draft] = await sql<{ n: number }>(
+      `select jsonb_array_length(draft_config -> 'predicates')::int as n from public.brief where id = $1`,
+      [id],
+    );
+    expect(draft.n).toBe(3);
+  });
+
+  test('formula columns are not offered as rule columns', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id, FORMULA_DRAFT);
+
+    const rules = rulesPart(page);
+    await rules.getByRole('button', { name: 'Change', exact: true }).click();
+    const extracted = ['Runs or plans a drone programme', 'Industry', 'Industrial sites'];
+    await expect(rules.getByRole('group', { name: 'Rule 1', exact: true }).getByLabel('Column', { exact: true }).locator('option')).toHaveText(extracted);
+    await rules.getByRole('button', { name: 'Add a rule', exact: true }).click();
+    await expect(rules.getByRole('group', { name: 'Rule 3', exact: true }).getByLabel('Column', { exact: true }).locator('option')).toHaveText(extracted);
+    await rules.getByRole('button', { name: 'Cancel', exact: true }).click();
+
+    // A column that becomes a formula takes its rules with it.
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    await columns.getByRole('group', { name: 'Column 1', exact: true }).getByLabel('Filled by', { exact: true }).selectOption('formula');
+    await expect(columns.getByText('When you save, 1 rule of a column now filled by a formula goes.', { exact: true })).toBeVisible();
+    await columns.getByRole('button', { name: 'Cancel', exact: true }).click();
+  });
+
+  test('relabelling a column re-points the formulas that read it', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id, FORMULA_DRAFT);
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    const formula = columns.getByRole('group', { name: 'Column 4', exact: true }).getByLabel('Formula', { exact: true });
+    const save = columns.getByRole('button', { name: 'Save', exact: true });
+    await columns.getByRole('group', { name: 'Column 1', exact: true }).getByLabel('Label', { exact: true }).fill('Operates drones');
+    await expect(formula).toHaveValue('operates_drones and site_count > 0');
+
+    // "not" is a word of the formula language: the formula cannot follow, so it says so and Save waits.
+    const third = columns.getByRole('group', { name: 'Column 3', exact: true }).getByLabel('Label', { exact: true });
+    await third.fill('Not');
+    await expect(formula).toHaveValue('operates_drones and site_count > 0');
+    await expect(
+      columns.getByText('Formula reads "site_count", the old key of "Not", and cannot follow its new key "not". Change the label or the formula.', { exact: true }),
+    ).toBeVisible();
+    await expect(save).toBeDisabled();
+    // A key it can read: the formula follows again.
+    await third.fill('Sites operated');
+    await expect(formula).toHaveValue('operates_drones and sites_operated > 0');
+    await expect(columns.getByRole('alert')).toHaveCount(0);
+    await save.click();
+    await expect(columns.getByRole('button', { name: 'Change', exact: true })).toBeVisible();
+    await expect(columns.getByText('operates_drones and sites_operated > 0', { exact: true })).toBeVisible();
+
+    expect(await draftColumn(id, 'programme_and_sites')).toMatchObject({
+      formula: 'operates_drones and sites_operated > 0',
+      inputs: ['operates_drones', 'sites_operated'],
+    });
+    const [draft] = await sql<{ predicate: string }>(
+      `select draft_config -> 'evidence_rules' -> 0 ->> 'predicate' as predicate from public.brief where id = $1`,
+      [id],
+    );
+    expect(draft.predicate).toBe('operates_drones');
+  });
+
   test('renaming a Brief', async ({ page, browser }) => {
     const id = await createBrief(page);
     await draftBrief(page, id);
@@ -368,17 +550,26 @@ test.describe('Brief page screens', () => {
       };
 
       const id = await createBrief(page);
-      await draftBrief(page, id);
+      await draftBrief(page, id, FORMULA_DRAFT);
       await expect(rulesPart(page).getByText('Rules out when "Industry" is one of: drone vendor', { exact: true })).toBeVisible();
+      await expect(columnsPart(page).getByText(PROGRAMME_FORMULA, { exact: true })).toBeVisible();
       await fits('the drafted Brief');
       await page.screenshot({ path: `test-results/brief-${vp.name}-draft.png`, fullPage: true });
 
       const columns = columnsPart(page);
       await columns.getByRole('button', { name: 'Change', exact: true }).click();
       await columns.getByRole('button', { name: 'Add a column', exact: true }).click();
-      await expect(columns.getByRole('group', { name: 'Column 4', exact: true })).toBeVisible();
+      await expect(columns.getByRole('group', { name: 'Column 5', exact: true })).toBeVisible();
       await fits('the open Columns editor');
       await page.screenshot({ path: `test-results/brief-${vp.name}-columns-editor.png`, fullPage: true });
+
+      // The formula column open in the editor, with a syntax error under its formula.
+      const formula = columns.getByRole('group', { name: 'Column 4', exact: true });
+      await formula.getByLabel('Formula', { exact: true }).fill('drone_programme and');
+      await expect(formula.getByRole('alert')).toHaveText('Formula: expected a value, found the end of the formula (at character 20)');
+      await formula.scrollIntoViewIfNeeded();
+      await fits('the open formula column');
+      await page.screenshot({ path: `test-results/brief-${vp.name}-formula-editor.png`, fullPage: true });
       await columns.getByRole('button', { name: 'Cancel', exact: true }).click();
 
       const rules = rulesPart(page);
