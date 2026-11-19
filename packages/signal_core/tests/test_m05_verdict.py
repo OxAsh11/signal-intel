@@ -303,3 +303,14 @@ def test_claim_source_falls_back_to_the_record_id() -> None:
     claim = (uuid4(), "k", True, "q", 90, datetime.now(UTC), None, record)
     assert m05.rubric_claim(claim).source == str(record)
     assert m05.rubric_claim(_claim("k", True, url="https://A.Example/x")).source == "a.example"
+
+
+def test_open_verdict_schema_offers_the_model_three_values() -> None:
+    """N2: the strict schema sent to the model never offers Confirmed; parsing still accepts it."""
+    schema = m05.OpenVerdictOutput.model_json_schema()
+    assert schema["properties"]["value"]["enum"] == ["Likely", "Unverified", "Contradicted"]
+    assert "Confirmed" not in json.dumps(schema)
+    parsed = m05.OpenVerdictOutput.model_validate(
+        {"value": "Confirmed", "reasoning": "r", "supporting_claim_indices": []}
+    )
+    assert parsed.value == "Confirmed"  # demoted to Likely by _open, see the test above

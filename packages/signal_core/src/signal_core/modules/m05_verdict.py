@@ -26,7 +26,7 @@ from typing import Any, Literal
 from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict
 
 import signal_core.modules.m15_account_card as _m15
 from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
@@ -76,16 +76,32 @@ class VerdictOutput(BaseModel):
     conflicting_claim_indices: list[int] = []
 
 
+class _OpenVerdictSchema(BaseModel):
+    """What verdict v3 is asked to answer: the strict schema sent to the model."""
+
+    model_config = ConfigDict(title="OpenVerdictOutput")
+
+    value: Literal["Likely", "Unverified", "Contradicted"]
+    reasoning: str
+    supporting_claim_indices: list[int]
+    conflicting_claim_indices: list[int] = []
+
+
 class OpenVerdictOutput(BaseModel):
     """Verdict v3, for a case the rubric left open: only the rules can confirm.
 
-    "Confirmed" is parsed (a paid answer is not thrown away and retried) and demoted to Likely
-    in code."""
+    The model is offered three values (the schema of _OpenVerdictSchema). A "Confirmed" it
+    returns anyway is still parsed, so a paid answer is not thrown away and retried, and
+    _open demotes it to Likely."""
 
     value: Literal["Confirmed", "Likely", "Unverified", "Contradicted"]
     reasoning: str
     supporting_claim_indices: list[int]
     conflicting_claim_indices: list[int] = []
+
+    @classmethod
+    def model_json_schema(cls, *args: Any, **kwargs: Any) -> dict[str, Any]:
+        return _OpenVerdictSchema.model_json_schema(*args, **kwargs)
 
 
 def rubric_claim(c: tuple[Any, ...]) -> RubricClaim:
