@@ -985,16 +985,50 @@ async def test_extraction_legacy_sends_all() -> None:
 
 
 async def test_scope_keys_union_of_active_briefs_without_radar() -> None:
+    """Every active Brief has column specs: the union of their keys."""
     full = _flytbase_config()
     record = _fake_source_record() | {
         "active_configs": [
             {"predicates": full["predicates"][:1]},
             {"predicates": [full["predicates"][2], "vertical"]},
-            {"hypothesis": "legacy"},
         ]
     }
     keys = await scope_predicate_keys(FakePool(record), SOURCE_RECORD_ID, WORKSPACE_ID)
     assert keys == {"drone_programme", "site_count", "vertical"}
+
+
+async def test_scope_keys_mixed_legacy_and_column_briefs_without_radar_sends_all() -> None:
+    """A legacy Brief in reach relies on every predicate, so a record without a radar sends all."""
+    full = _flytbase_config()
+    record = _fake_source_record() | {
+        "active_configs": [
+            {"predicates": full["predicates"]},
+            {"hypothesis": "legacy", "predicates": ["vertical"]},
+        ]
+    }
+    assert await scope_predicate_keys(FakePool(record), SOURCE_RECORD_ID, WORKSPACE_ID) is None
+
+
+async def test_extraction_mixed_briefs_without_radar_sends_all() -> None:
+    full = _flytbase_config()
+    gw = _make_gateway(_resp([]))
+    seen = _capture_variables(gw)
+    record = _fake_source_record() | {
+        "active_configs": [{"predicates": full["predicates"][:2]}, {"hypothesis": "legacy"}]
+    }
+    pool = FakePool(record, _workspace_predicates())
+
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+
+    assert _sent_predicate_keys(seen) == {p[1] for p in _workspace_predicates()}
+
+
+async def test_queue_backfill_not_wired_runs_no_query(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(_m03_extraction, "extract_backfill_record_job", None)
+    pool = FakePool(_fake_source_record() | {"scope_rows": [(str(uuid4()), str(ORG_ID))]})
+
+    assert await queue_predicate_backfill(pool, uuid4(), WORKSPACE_ID, ["site_count"]) == 0
+    assert pool.calls == []
 
 
 async def test_scope_keys_radar_brief_without_specs_is_legacy() -> None:

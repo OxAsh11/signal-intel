@@ -1592,12 +1592,24 @@ def build_app(
                 )
         elif evt == "predicate.backfill_requested" and pool is not None:
             # A version added columns: fill them over the records already extracted (P2).
-            await _m03_extraction.queue_predicate_backfill(
-                pool,
-                UUID(str(payload["brief_id"])),
-                UUID(str(payload["workspace_id"])),
-                [str(k) for k in payload.get("predicate_keys") or []],
-            )
+            keys = payload.get("predicate_keys")
+            if (
+                not payload.get("brief_id")
+                or not payload.get("workspace_id")
+                or not isinstance(keys, list)
+                or not keys
+            ):
+                # Malformed payload: a retry would fail the same way, so drop it loudly.
+                log.warning(
+                    "dispatch.malformed_backfill", event_type=evt, event_id=event.get("event_id")
+                )
+            else:
+                await _m03_extraction.queue_predicate_backfill(
+                    pool,
+                    UUID(str(payload["brief_id"])),
+                    UUID(str(payload["workspace_id"])),
+                    [str(k) for k in keys],
+                )
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")
             version = payload.get("version")

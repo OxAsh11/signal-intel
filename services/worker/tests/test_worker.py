@@ -904,6 +904,36 @@ async def test_dispatch_malformed_entity_event_is_a_no_op(evt: str) -> None:
     assert pool.queries == []
 
 
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"workspace_id": "ws", "predicate_keys": ["site_count"]},
+        {"brief_id": "b", "predicate_keys": ["site_count"]},
+        {"brief_id": "b", "workspace_id": "ws"},
+        {"brief_id": "b", "workspace_id": "ws", "predicate_keys": []},
+        {"brief_id": "b", "workspace_id": "ws", "predicate_keys": "site_count"},
+    ],
+)
+async def test_dispatch_malformed_backfill_event_is_a_no_op(payload: dict[str, Any]) -> None:
+    pool = _RowsPool([(str(uuid4()), str(uuid4()))])
+    connector = InMemoryConnector()
+    full = {k: str(uuid4()) if k in ("brief_id", "workspace_id") else v for k, v in payload.items()}
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "predicate.backfill_requested",
+                "org_id": str(uuid4()),
+                "workspace_id": None,
+                "payload": full,
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "extract.backfill_record") == []
+    assert pool.queries == []
+
+
 async def test_dispatch_backfill_event() -> None:
     """predicate.backfill_requested queues one extract.backfill_record per record in scope."""
     brief_id, workspace_id, org_id = str(uuid4()), str(uuid4()), str(uuid4())

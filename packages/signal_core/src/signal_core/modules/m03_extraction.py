@@ -244,19 +244,22 @@ def _brief_keys(config: dict[str, Any]) -> set[str]:
 async def scope_predicate_keys(
     pool: AsyncConnectionPool, source_record_id: UUID, workspace_id: UUID
 ) -> set[str] | None:
-    """The predicate keys extraction sends for a record.
+    """The predicate keys extraction sends for a record; None means send every predicate.
 
-    The columns of the Brief behind the record's radar; for a record without one, the union over
-    the workspace's active Briefs. None (send every predicate) when no Brief in reach has column
-    specs: legacy configs keep the old behaviour.
+    A record from a radar uses the columns of that radar's Brief (None when it is legacy). A
+    record without one uses the union over the workspace's active Briefs, but only when every one
+    of them has column specs: a legacy Brief in reach relies on every workspace and global
+    predicate, so any legacy Brief (or no Brief at all) gives None.
     """
     config = await _radar_brief_config(pool, source_record_id)
     if config is not None:
-        keys = _brief_keys(config)
-    else:
-        keys = set()
-        for brief in await briefs.active_brief_versions(pool, workspace_id):
-            keys |= _brief_keys(brief.config)
+        return _brief_keys(config) or None
+    keys: set[str] = set()
+    for brief in await briefs.active_brief_versions(pool, workspace_id):
+        brief_keys = _brief_keys(brief.config)
+        if not brief_keys:
+            return None
+        keys |= brief_keys
     return keys or None
 
 
@@ -684,6 +687,10 @@ async def queue_predicate_backfill(
     sorted_keys = sorted(set(keys))
     if not sorted_keys:
         return 0
+    job = extract_backfill_record_job
+    if job is None:
+        log.warning("extraction.backfill_not_wired", brief_id=str(brief_id))
+        return 0
     cap = BACKFILL_CAP
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(BACKFILL_SCOPE_SQL, (str(workspace_id), str(brief_id), cap + 1))
@@ -698,10 +705,6 @@ async def queue_predicate_backfill(
         )
         rows = rows[:cap]
 
-    job = extract_backfill_record_job
-    if job is None:
-        log.warning("extraction.backfill_not_wired", brief_id=str(brief_id))
-        return 0
     from procrastinate.exceptions import AlreadyEnqueued
 
     joined = ",".join(sorted_keys)
@@ -756,7 +759,8 @@ async def backfill_record(
 
     Creates no entity or mention and leaves the extraction status alone; the claims are written
     in one transaction, and their claim.created events re-judge the verdicts. app.create_claim
-    dedupes, so a rerun adds no rows. Returns the number of claims written.
+    dedupes, so a rerun adds no rows. Returns the number of valid claims sent to
+    app.create_claim, deduplicated ones included (not the number of new rows).
     """
     mentions = await _live_mentions(pool, source_record_id)
     if not mentions:
