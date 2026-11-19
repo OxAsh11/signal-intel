@@ -14,7 +14,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
-from signal_core.brief_columns import ICP_LIST_BY_ROLE, column_specs
+from signal_core.brief_columns import ICP_LIST_BY_ROLE, ColumnSpec, column_specs
 
 TIMING_WINDOW_DAYS = 90
 # A config with no column specs (legacy plain keys) reads these roles.
@@ -109,7 +109,10 @@ def _text(value: Any) -> str:
 
 def predicate_roles(config: dict[str, Any]) -> dict[str, str]:
     """Predicate key → scoring role: the Brief's column specs, or the legacy defaults."""
-    specs = column_specs(config)
+    return _roles_of(column_specs(config))
+
+
+def _roles_of(specs: list[ColumnSpec]) -> dict[str, str]:
     return {sp.key: sp.role for sp in specs} if specs else dict(LEGACY_ROLES)
 
 
@@ -118,7 +121,9 @@ def _icp_entries(config: dict[str, Any], role: str) -> list[str]:
     if not name:
         return []
     icp = config.get("icp") or {}
-    raw = icp.get(name.split(".", 1)[1]) or []
+    raw = icp.get(name.split(".", 1)[1])
+    if not isinstance(raw, list):
+        return []
     return [str(e) for e in raw if str(e).strip()]
 
 
@@ -155,8 +160,11 @@ def value_matches_icp(role: str, value: Any, entries: list[str]) -> bool | None:
         parsable = False
         for entry in folded:
             if m := _BAND_RANGE.match(entry):
+                lo, hi = int(m.group(1)), int(m.group(2))
+                if lo > hi:
+                    continue
                 parsable = True
-                if int(m.group(1)) <= number <= int(m.group(2)):
+                if lo <= number <= hi:
                     return True
             elif m := _BAND_OPEN.match(entry):
                 parsable = True
@@ -186,8 +194,9 @@ def score_account(
     claims = inputs.claims
     decayed = [(c, _decay(c[4], c[5], now)) for c in claims]
 
-    roles = predicate_roles(config)
-    legacy = not column_specs(config)
+    specs = column_specs(config)
+    roles = _roles_of(specs)
+    legacy = not specs
 
     # Fit: per fit-role predicate, 100 if any decisive claim is in the Brief's ICP list, else 0,
     # weighted by the freshest of its claims.
@@ -227,7 +236,7 @@ def score_account(
     for c in claims:
         if roles.get(c[1]) != "scale":
             continue
-        n = _as_number(c[2]) if not isinstance(c[2], str) else None
+        n = _as_number(c[2])
         if n is None:
             continue
         total_qty += n

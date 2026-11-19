@@ -139,6 +139,7 @@ def test_size_band_numeric() -> None:
     assert value_matches_icp("fit.size", 1500, ["1000+"]) is True
     assert value_matches_icp("fit.size", 450, ["mid-size"]) is None
     assert value_matches_icp("fit.size", "120 employees", ["51-200"]) is None
+    assert value_matches_icp("fit.size", 150, ["200-100"]) is None
     config = {
         "predicates": [
             {
@@ -163,6 +164,11 @@ def test_scale_reads_role() -> None:
     result = _score(FIXTURE, [_claim("site_count", 30)])
     assert result.scale == int(math.log1p(30) * 10)
     assert _score(FIXTURE, [_claim("site_count", "many")]).scale == 0
+    assert _score(FIXTURE, [_claim("site_count", "30")]).scale == int(math.log1p(30) * 10)
+    assert _score(FIXTURE, [_claim("site_count", True)]).scale == 0
+    assert _score(FIXTURE, [_claim("site_count", "nan")]).scale == 0
+    legacy = {"predicates": ["sites"]}
+    assert _score(legacy, [_claim("sites", "4")]).scale == int(math.log1p(4) * 10)
 
 
 def test_timing_counts_signal_only() -> None:
@@ -184,3 +190,63 @@ def test_legacy_config_unchanged_keys() -> None:
     assert result.scale == int(math.log1p(4) * 10)
     assert result.timing == 20
     assert ("vertical", "Manufacturing") in result.labels
+
+
+def test_text_matching_is_literal_on_word_boundaries() -> None:
+    assert value_matches_icp("fit.vertical", "C++ tooling", ["C++"]) is True
+    assert value_matches_icp("fit.vertical", "R&D services", ["r&d"]) is True
+    assert value_matches_icp("fit.vertical", "energyless", ["energy"]) is False
+    assert value_matches_icp("fit.vertical", "energy", ["energyless"]) is False
+
+
+def test_icp_list_given_as_string_is_ignored() -> None:
+    result = _score(_cfg(verticals="energy"), [_claim("industry", "mining")])  # type: ignore[arg-type]
+    assert result.fit == 50
+    assert result.gates == []
+
+
+def test_fit_mean_mixes_matched_and_missed() -> None:
+    config = {
+        "predicates": [
+            {**FIXTURE["predicates"][1]},
+            {
+                "key": "hq",
+                "label": "HQ",
+                "value_type": "text",
+                "allowed_values": None,
+                "extraction_hint": "",
+                "decay_half_life_days": None,
+                "role": "fit.commercial_role",
+            },
+        ],
+        "icp": {"verticals": ["energy"], "commercial_roles": ["operator"]},
+    }
+    result = _score(config, [_claim("industry", "energy"), _claim("hq", "reseller")])
+    assert result.fit == 50
+    assert result.explanation["fit"]["matched"] == ["industry"]
+    assert result.explanation["fit"]["missed"] == ["hq"]
+
+
+def test_stale_claim_lowers_predicate_weight() -> None:
+    config = {
+        "predicates": [
+            {**FIXTURE["predicates"][1], "decay_half_life_days": 30},
+            {
+                "key": "hq",
+                "label": "HQ",
+                "value_type": "text",
+                "allowed_values": None,
+                "extraction_hint": "",
+                "decay_half_life_days": None,
+                "role": "fit.commercial_role",
+            },
+        ],
+        "icp": {"verticals": ["energy"], "commercial_roles": ["operator"]},
+    }
+    old = NOW - timedelta(days=30)  # decay 0.5
+    claims = [
+        ("c1", "industry", "energy", 80, old, 30, "radar:r1"),
+        ("c2", "hq", "reseller", 80, NOW, None, "radar:r1"),
+    ]
+    # matched weight 0.5 x 100, missed weight 1 x 0 -> 50 / 1.5 = 33
+    assert _score(config, claims).fit == 33
