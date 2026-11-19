@@ -14,6 +14,7 @@ import procrastinate
 from procrastinate.exceptions import AlreadyEnqueued
 from psycopg_pool import AsyncConnectionPool
 
+import signal_core.column_runtime as _column_runtime
 import signal_core.modules.m03_extraction as _m03_extraction
 import signal_core.modules.m04_identity as _m04_identity
 import signal_core.modules.m05_verdict as _m05_verdict
@@ -97,6 +98,14 @@ RESEARCH_BANDS = frozenset({"High"})
 LIVE_STAGES = frozenset({"Contacted", "Engaged", "Qualified", "Dormant"})
 # Source types that are bookkeeping records, not evidence to extract from.
 NO_EXTRACTION_SOURCE_TYPES = frozenset({"synthetic", "enrichment"})
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +778,13 @@ def build_app(
             pool, gateway, UUID(source_record_id), predicate_keys, ctx
         )
 
+    @job(app, type="column.run", kill_switch=kill_switch, queue="compute", retry=2)
+    async def column_run_task(*, run_id: str, **_: Any) -> str:
+        """Fill one cell (P3). A run that is not queued any more is left alone, so a redelivered
+        job does nothing; a failure ends the run in error instead of raising (no retry)."""
+        assert pool is not None, "pool required for column.run"
+        return await _column_runtime.execute_run(pool, gateway, UUID(run_id))
+
     # Wire the deferrable handles so m03 can call defer_async via the module attrs.
     _m03_extraction.extract_relevance_judge_job = extract_relevance_judge_job
     _m03_extraction.extract_backfill_record_job = extract_backfill_record_job
@@ -1426,6 +1442,20 @@ def build_app(
             )
         return len(rows)
 
+    async def _defer_runs(run_ids: list[str]) -> None:
+        for run_id in run_ids:
+            await _enqueue("column.run", f"run:{run_id}", run_id=run_id)
+
+    async def _queue_auto_runs(event: dict[str, Any]) -> None:
+        """A new claim re-runs the formula columns that read its column (P3 auto-run)."""
+        try:
+            claim_id = UUID(str(event.get("aggregate_id")))
+        except ValueError:
+            log.warning("dispatch.malformed_claim", event_id=event.get("event_id"))
+            return
+        row = await _fetch_one("select app.queue_auto_runs(%s)", (claim_id,))
+        await _defer_runs([str(r) for r in (row[0] if row and row[0] else [])])
+
     async def _advance_stage(
         account_id: str, kind: str, activity_id: str | None, org_id: str, workspace_id: str
     ) -> None:
@@ -1457,6 +1487,8 @@ def build_app(
                 )
                 return
             await _recompute_verdicts(str(entity_id), org_id)
+            if evt == "claim.created":
+                await _queue_auto_runs(event)
             return
         if not workspace_id:
             return
@@ -1617,6 +1649,18 @@ def build_app(
                     UUID(str(payload["workspace_id"])),
                     [str(k) for k in keys],
                 )
+        elif evt == "column.run_requested":
+            # A person asked for runs (P3): one job per run, locked by the run id.
+            run_ids = payload.get("run_ids")
+            if not isinstance(run_ids, list) or not all(
+                isinstance(r, str) and _is_uuid(r) for r in run_ids
+            ):
+                # Malformed payload: a retry would fail the same way, so drop it loudly.
+                log.warning(
+                    "dispatch.malformed_run_request", event_type=evt, event_id=event.get("event_id")
+                )
+            else:
+                await _defer_runs(run_ids)
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")
             version = payload.get("version")

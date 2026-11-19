@@ -1058,3 +1058,196 @@ async def test_backfill_record_job_charges_the_brief(monkeypatch: Any) -> None:
     (ctx,) = seen
     assert str(ctx.brief_id) == brief_id
     assert ctx.job_args["brief_id"] == brief_id
+
+
+# ----------------------------------------------------------------------
+# P3: column runs
+# ----------------------------------------------------------------------
+
+
+class _RoutedPool(_RowsPool):
+    """Like _RowsPool, but app.queue_auto_runs answers with its own rows, and a cursor (the
+    webhook fan-out's) finds no subscription."""
+
+    def __init__(self, rows: list[tuple[Any, ...]], auto_runs: list[str]) -> None:
+        super().__init__(rows)
+        self.auto_runs = auto_runs
+
+    def connection(self) -> "_RowsPool._Ctx":
+        pool = self
+
+        class _NoRows:
+            async def execute(self, sql: str, args: Any = None) -> None:
+                pool.queries.append((sql, args))
+
+            async def fetchall(self) -> list[tuple[Any, ...]]:
+                return []
+
+            async def __aenter__(self) -> "_NoRows":
+                return self
+
+            async def __aexit__(self, *_: Any) -> None:
+                pass
+
+        class _Conn(_RowsPool._Conn):
+            async def execute(self, sql: str, args: Any = None) -> "_RowsPool._Cur":
+                pool.queries.append((sql, args))
+                if "app.queue_auto_runs" in sql:
+                    return _RowsPool._Cur([(pool.auto_runs,)])
+                return _RowsPool._Cur(pool.rows)
+
+            def cursor(self) -> _NoRows:
+                return _NoRows()
+
+        class _Ctx(_RowsPool._Ctx):
+            async def __aenter__(self) -> "_RowsPool._Conn":
+                return _Conn(pool)
+
+        return _Ctx(self)
+
+
+def test_column_run_job_is_registered(app_fixture: Any) -> None:
+    assert "column.run" in app_fixture.tasks
+
+
+async def test_dispatch_column_run_requested_defers_one_job_per_run() -> None:
+    runs = [str(uuid4()), str(uuid4())]
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, _RoutedPool([], [])),
+        [
+            {
+                "event": "column.run_requested",
+                "org_id": str(uuid4()),
+                "workspace_id": str(uuid4()),
+                "payload": {"run_ids": runs},
+            }
+        ]
+        * 2,  # a redelivered event queues nothing more while the jobs wait
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"] * 2
+    jobs = _jobs(connector, "column.run")
+    assert sorted((j["queueing_lock"], j["args"]["run_id"]) for j in jobs) == sorted(
+        (f"run:{r}", r) for r in runs
+    )
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [{}, {"run_ids": "abc"}, {"run_ids": [1, 2]}, {"run_ids": ["not-a-uuid"]}, {"run_ids": None}],
+)
+async def test_dispatch_malformed_run_request_is_skipped(payload: dict[str, Any]) -> None:
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, _RoutedPool([], [])),
+        [
+            {
+                "event": "column.run_requested",
+                "org_id": str(uuid4()),
+                "workspace_id": str(uuid4()),
+                "payload": payload,
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "column.run") == []
+
+
+async def test_dispatch_claim_created_queues_auto_runs_and_still_the_verdict() -> None:
+    org_id, entity_id, ws, claim_id = (str(uuid4()) for _ in range(4))
+    runs = [str(uuid4())]
+    pool = _RoutedPool([(ws,)], runs)
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": org_id,
+                "workspace_id": None,
+                "aggregate_type": "claim",
+                "aggregate_id": claim_id,
+                "payload": {"entity_id": entity_id, "predicate_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    (verdict,) = _jobs(connector, "verdict.compute")
+    assert verdict["queueing_lock"] == f"verdict:{entity_id}:{ws}"
+    (run,) = _jobs(connector, "column.run")
+    assert (run["queueing_lock"], run["args"]) == (f"run:{runs[0]}", {"run_id": runs[0]})
+    (auto_args,) = [a for sql, a in pool.queries if "app.queue_auto_runs" in sql]
+    assert auto_args == (UUID(claim_id),)
+
+
+async def test_dispatch_claim_created_with_no_dependents_queues_no_run() -> None:
+    pool = _RoutedPool([], [])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": str(uuid4()),
+                "workspace_id": None,
+                "aggregate_id": str(uuid4()),
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "column.run") == []
+
+
+async def test_dispatch_claim_created_with_a_malformed_claim_id_skips_auto_run() -> None:
+    pool = _RoutedPool([], [str(uuid4())])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": str(uuid4()),
+                "workspace_id": None,
+                "aggregate_id": "not-a-claim",
+                "payload": {"entity_id": str(uuid4())},
+            }
+        ],
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    assert _jobs(connector, "column.run") == []
+    assert not [sql for sql, _ in pool.queries if "app.queue_auto_runs" in sql]
+
+
+async def test_column_run_job_runs_the_executor(monkeypatch: Any) -> None:
+    import signal_core.column_runtime as column_runtime
+
+    seen: list[Any] = []
+
+    async def _fake_execute(pool: Any, gateway: Any, run_id: UUID) -> str:
+        seen.append((gateway, run_id))
+        return "succeeded"
+
+    monkeypatch.setattr(column_runtime, "execute_run", _fake_execute)
+    gateway = object()
+    run_id = str(uuid4())
+    connector = InMemoryConnector()
+    app = build_app(
+        connector,
+        AllEnabled(),
+        HealthState(),
+        FakeHealth(),
+        ai_configured=lambda: {"chat": True, "embed": True},
+        approvals=MemoryApprovalStore(),
+        gateway=gateway,  # type: ignore[arg-type]
+        pool=_RowsPool([]),  # type: ignore[arg-type]
+    )
+    async with app.open_async():
+        await (
+            app.tasks["column.run"]
+            .configure(queueing_lock=f"run:{run_id}")
+            .defer_async(run_id=run_id)
+        )
+        await app.run_worker_async(queues=["compute"], wait=False, install_signal_handlers=False)
+    assert [j["status"] for j in _jobs(connector, "column.run")] == ["succeeded"]
+    assert seen == [(gateway, UUID(run_id))]

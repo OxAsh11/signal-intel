@@ -195,8 +195,20 @@ async def test_pg_settle_sends_decimal_strings() -> None:
         "status": "ok",
         "brief_id": str(ctx.brief_id),
         "job_id": "j1",
+        "predicate_run_id": None,
         "lines": [{"unit": "ai_input_tokens", "quantity": 1000, "cost_usd": "0.004500"}],
     }
+
+
+async def test_pg_settle_sends_the_predicate_run() -> None:
+    pool = FakePool()
+    run = uuid4()
+    ctx = CallContext(uuid4(), uuid4(), None, None, "column.run", {}, predicate_run_id=run)
+    await PgBudgetGuard(pool).settle(  # type: ignore[arg-type]
+        uuid4(), ctx, "extract", "anthropic", "m", [line("0.01")], 5, "ok"
+    )
+    _, params = pool.calls[0]
+    assert json.loads(params[1])["predicate_run_id"] == str(run)
 
 
 async def test_pg_release_sends_null() -> None:
