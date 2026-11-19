@@ -29,7 +29,7 @@ from signal_core.ai_gateway.errors import AiOutputInvalid, AiProviderError
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.ai_gateway.prompts import Capability, load_prompt
 from signal_core.ai_gateway.registry import Predicate, validate_claim_value
-from signal_core.brief_columns import column_specs, predicate_keys
+from signal_core.brief_columns import column_specs, extract_keys
 from signal_core.logging import get_logger
 from signal_core.metering import CallContext
 
@@ -236,9 +236,10 @@ async def _radar_brief_config(
     return config if isinstance(config, dict) else {}
 
 
-def _brief_keys(config: dict[str, Any]) -> set[str]:
-    """A Brief's column keys; empty for a legacy config (no column specs), which sends all."""
-    return set(predicate_keys(config)) if column_specs(config) else set()
+def _brief_keys(config: dict[str, Any]) -> set[str] | None:
+    """The keys of a Brief's extract columns; None for a legacy config (no column specs),
+    which sends all. A formula column is never among them (P3, R1)."""
+    return set(extract_keys(config)) if column_specs(config) else None
 
 
 async def scope_predicate_keys(
@@ -253,14 +254,15 @@ async def scope_predicate_keys(
     """
     config = await _radar_brief_config(pool, source_record_id)
     if config is not None:
-        return _brief_keys(config) or None
+        return _brief_keys(config)
     keys: set[str] = set()
-    for brief in await briefs.active_brief_versions(pool, workspace_id):
+    active = await briefs.active_brief_versions(pool, workspace_id)
+    for brief in active:
         brief_keys = _brief_keys(brief.config)
-        if not brief_keys:
+        if brief_keys is None:
             return None
         keys |= brief_keys
-    return keys or None
+    return keys if active else None
 
 
 async def relevance_hypothesis(
@@ -456,11 +458,15 @@ class _Predicates:
 async def _load_predicates(
     pool: AsyncConnectionPool, workspace_id: UUID, keys: set[str] | None
 ) -> _Predicates:
-    """The workspace's and global predicates; only *keys* when given (None: all of them)."""
+    """The workspace's and global extract predicates; only *keys* when given (None: all of them).
+
+    Only fill_method 'extract' is ever loaded, so a formula column (or any column filled another
+    way) never reaches an extraction prompt, scoped, legacy or backfill alike (P3, R1)."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
             "SELECT id, key, label, value_type, allowed_values, extraction_hint"
-            " FROM public.predicate WHERE workspace_id = %s OR workspace_id IS NULL",
+            " FROM public.predicate"
+            " WHERE (workspace_id = %s OR workspace_id IS NULL) AND fill_method = 'extract'",
             (str(workspace_id),),
         )
         rows = list(await cur.fetchall())

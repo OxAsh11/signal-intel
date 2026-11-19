@@ -142,6 +142,11 @@ class FakeConn:
         if "public.mention" in sql_lower:  # the record's still-provisional mentions
             return [(str(m),) for m in self._source_record.get("provisional_mentions", [])]
         if "public.predicate" in sql_lower:
+            # Rows may carry a 7th field, fill_method (default extract), honoured like the SQL.
+            if "fill_method = 'extract'" in sql_lower:
+                return [
+                    p for p in self._predicates if (p[6] if len(p) > 6 else "extract") == "extract"
+                ]
             return self._predicates
         if "app.create_entity" in sql_lower:
             return [(str(self._entity_id),)]
@@ -1029,6 +1034,78 @@ async def test_queue_backfill_not_wired_runs_no_query(monkeypatch: pytest.Monkey
 
     assert await queue_predicate_backfill(pool, uuid4(), WORKSPACE_ID, ["site_count"]) == 0
     assert pool.calls == []
+
+
+def _formula_spec() -> dict[str, Any]:
+    return {
+        "key": "sites_doubled",
+        "label": "Sites doubled",
+        "value_type": "number",
+        "role": "info",
+        "fill_method": "formula",
+        "formula": "site_count * 2",
+        "inputs": ["site_count"],
+    }
+
+
+def _predicates_with_formula() -> list[tuple]:
+    # id, key, label, value_type, allowed_values, extraction_hint, fill_method
+    return [
+        *_workspace_predicates(),
+        (str(uuid4()), "sites_doubled", "Sites doubled", "number", None, "", "formula"),
+    ]
+
+
+async def test_formula_columns_never_reach_extraction() -> None:
+    """R1: a formula column reaches no extraction prompt: radar-scoped, legacy (send every
+    predicate) and backfill alike."""
+    config = _flytbase_config()
+    config["predicates"].append(_formula_spec())
+
+    # 1. Radar Brief with a formula column: scope and prompt hold extract columns only.
+    record = _fake_source_record() | {"radar_config": config}
+    assert await scope_predicate_keys(FakePool(record), SOURCE_RECORD_ID, WORKSPACE_ID) == {
+        "drone_programme",
+        "industry",
+        "site_count",
+    }
+    gw = _make_gateway(_resp([_claim("sites_doubled", 80)]))
+    seen = _capture_variables(gw)
+    pool = FakePool(record, _predicates_with_formula())
+    with structlog.testing.capture_logs() as logs:
+        await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+    assert "sites_doubled" not in _sent_predicate_keys(seen)
+    assert not any("create_claim" in sql for sql, _ in pool.calls)  # an AI answer for it drops
+    assert [e["predicate_key"] for e in logs if e["event"] == "extraction.unknown_predicate"] == [
+        "sites_doubled"
+    ]
+
+    # 2. Legacy path (no Brief with specs: send every predicate): still no formula column.
+    gw = _make_gateway(_resp([]))
+    seen = _capture_variables(gw)
+    legacy = _fake_source_record() | {"active_configs": [{"hypothesis": "legacy"}]}
+    pool = FakePool(legacy, _predicates_with_formula())
+    await extract_structured(pool, gw, SOURCE_RECORD_ID, _ctx())
+    assert _sent_predicate_keys(seen) == {p[1] for p in _workspace_predicates()}
+
+    # 3. Backfill of a new version's columns, formula included: only the extract key is sent.
+    gw = _make_gateway(_backfill_resp([]))
+    seen = _capture_variables(gw)
+    record = _backfill_record([(str(ENTITY_A), "company", "Volt Grid", "active")])
+    pool = FakePool(record, _predicates_with_formula())
+    await backfill_record(
+        pool, gw, SOURCE_RECORD_ID, ["site_count", "sites_doubled"], _backfill_ctx()
+    )
+    (variables,) = seen
+    assert {p["key"] for p in json.loads(variables["predicates"])} == {"site_count"}
+
+    # 4. Backfill of formula columns only: no AI call at all.
+    gw = _make_gateway(_backfill_resp([]))
+    pool = FakePool(record, _predicates_with_formula())
+    assert (
+        await backfill_record(pool, gw, SOURCE_RECORD_ID, ["sites_doubled"], _backfill_ctx()) == 0
+    )
+    assert gw._budget.lines == []  # type: ignore[attr-defined]
 
 
 async def test_scope_keys_radar_brief_without_specs_is_legacy() -> None:
