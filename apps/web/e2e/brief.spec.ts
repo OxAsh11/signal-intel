@@ -172,6 +172,38 @@ test.describe('Brief Studio', () => {
     expect(draft.rules).toContainEqual(expect.objectContaining({ predicate: 'hiring_drone_pilots', kind: 'requires', op: 'is_true' }));
   });
 
+  test('relabelling a drafted column keeps its rules', async ({ page }) => {
+    const id = await createBrief(page);
+    await draftBrief(page, id);
+
+    const columns = columnsPart(page);
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    const first = columns.getByRole('group', { name: 'Column 1', exact: true });
+    await first.getByLabel('Label', { exact: true }).fill('Operates drones');
+    // Not yet collected by the workspace, so the key follows the label; its rule follows the key.
+    await expect(first.getByText('Key: operates_drones', { exact: true })).toBeVisible();
+    await expect(columns.getByText(/^When you save, /)).toHaveCount(0);
+    await columns.getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(columns.getByRole('button', { name: 'Change', exact: true })).toBeVisible();
+    await expect(
+      rulesPart(page).getByText('Requires "Operates drones" = yes, from 1 source, in the last 730 days', { exact: true }),
+    ).toBeVisible();
+
+    const [draft] = await sql<{ predicate: string; n: number }>(
+      `select draft_config -> 'evidence_rules' -> 0 ->> 'predicate' as predicate,
+              jsonb_array_length(draft_config -> 'evidence_rules')::int as n
+         from public.brief where id = $1`,
+      [id],
+    );
+    expect(draft).toEqual({ predicate: 'operates_drones', n: 2 });
+
+    // Removing a column says which rules go, and why.
+    await columns.getByRole('button', { name: 'Change', exact: true }).click();
+    await columns.getByRole('group', { name: 'Column 2', exact: true }).getByRole('button', { name: 'Remove column', exact: true }).click();
+    await expect(columns.getByText('When you save, 1 rule of a removed column goes.', { exact: true })).toBeVisible();
+    await columns.getByRole('button', { name: 'Cancel', exact: true }).click();
+  });
+
   test('an invalid rule is refused with the database message', async ({ page }) => {
     const id = await createBrief(page);
     await draftBrief(page, id);

@@ -15,6 +15,39 @@ type Row = { id: number; col: Column; keyFixed: boolean };
 const VALUE_TYPES = Object.keys(TYPE_LABELS) as ValueType[];
 const ROLES = Object.keys(ROLE_LABELS) as Role[];
 
+/** Why a rule goes when the columns are saved. */
+type RuleLoss = 'removed' | 'changed';
+
+/**
+ * The saved rules against the edited columns. Each rule follows its column by row, not by key, so
+ * a key that changed with its label takes the rule along. A rule goes only when its column was
+ * removed, or when its column's type or values no longer allow its test.
+ */
+function rulesForRows(links: { rule: EvidenceRule; rowId: number | null }[], rows: Row[]) {
+  const kept: EvidenceRule[] = [];
+  const lost: RuleLoss[] = [];
+  for (const { rule, rowId } of links) {
+    const col = rows.find((r) => r.id === rowId)?.col;
+    if (!col || !isColumnSpec(col)) {
+      lost.push('removed');
+      continue;
+    }
+    const [fit] = rulesThatFit([{ ...rule, predicate: col.key }], [col]);
+    if (fit) kept.push(fit);
+    else lost.push('changed');
+  }
+  return { kept, lost };
+}
+
+function lossNote(lost: RuleLoss[]): string {
+  const n = (k: RuleLoss) => lost.filter((l) => l === k).length;
+  const rules = (k: number) => `${k} ${k === 1 ? 'rule' : 'rules'}`;
+  const parts = [];
+  if (n('removed')) parts.push(`${rules(n('removed'))} of a removed column`);
+  if (n('changed')) parts.push(`${rules(n('changed'))} whose column's type or values no longer allow the test`);
+  return `When you save, ${parts.join(' and ')} ${lost.length === 1 ? 'goes' : 'go'}.`;
+}
+
 /** The rules that still fit the edited columns: a removed column takes its rules with it. */
 export function rulesThatFit(rules: EvidenceRule[], columns: Column[]): EvidenceRule[] {
   const specs = new Map(columns.filter(isColumnSpec).map((c) => [c.key, c]));
@@ -97,12 +130,15 @@ function ColumnsEditor({ start, saved, existing, seeded, onChange, block }: {
   const [rows, setRows] = useState<Row[]>(() =>
     start.map((col, id) => ({ id, col, keyFixed: existing.has(isColumnSpec(col) ? col.key : col) })));
   const nextId = useRef(rows.length);
-  const savedRules = saved.evidence_rules ?? [];
+  // Each saved rule is tied to the row of its column when the editor opens (rows start at id = index).
+  const [ruleLinks] = useState(() => (saved.evidence_rules ?? []).map((rule) => {
+    const at = start.findIndex((c) => (isColumnSpec(c) ? c.key : c) === rule.predicate);
+    return { rule, rowId: at >= 0 ? at : null };
+  }));
 
   const commit = (next: Row[]) => {
     setRows(next);
-    const columns = next.map((r) => r.col);
-    onChange({ predicates: columns, evidence_rules: rulesThatFit(savedRules, columns) });
+    onChange({ predicates: next.map((r) => r.col), evidence_rules: rulesForRows(ruleLinks, next).kept });
   };
   const update = (id: number, patch: Partial<ColumnSpec>) =>
     commit(rows.map((r, i) => {
@@ -130,7 +166,7 @@ function ColumnsEditor({ start, saved, existing, seeded, onChange, block }: {
   const firstProblem = problems.values().next().value ?? null;
   useEffect(() => block(firstProblem), [block, firstProblem]);
 
-  const dropped = savedRules.length - rulesThatFit(savedRules, rows.map((r) => r.col)).length;
+  const { lost } = rulesForRows(ruleLinks, rows);
 
   return (
     <div className="flex flex-col gap-4">
@@ -190,11 +226,7 @@ function ColumnsEditor({ start, saved, existing, seeded, onChange, block }: {
           </fieldset>
         );
       })}
-      {dropped > 0 ? (
-        <p className="m-0 text-[13px] text-ink">
-          Removing a column also removes its rules: {dropped} {dropped === 1 ? 'rule goes' : 'rules go'} when you save.
-        </p>
-      ) : null}
+      {lost.length ? <p className="m-0 text-[13px] text-ink">{lossNote(lost)}</p> : null}
       <div>
         <Button size="sm" onClick={add} disabled={rows.length >= MAX_COLUMNS}>Add a column</Button>
         {rows.length >= MAX_COLUMNS ? <span className="ml-2 text-[13px] text-ink-muted">A Brief has at most {MAX_COLUMNS} columns.</span> : null}
