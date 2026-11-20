@@ -27,8 +27,21 @@ export async function setBriefLens(form: FormData): Promise<void> {
       });
     }
   }
-  const next = String(form.get('next') ?? '');
-  // Only a path on this site: never `//host` or a full URL.
-  if (next.startsWith('/') && !next.startsWith('//') && !next.startsWith('/\\')) redirect(next);
+  const next = sameSitePath(String(form.get('next') ?? ''));
+  if (next) redirect(next);
   refresh();
+}
+
+/**
+ * `next` as a path on this site, or null. Parsed the way a browser would (which drops tabs and
+ * newlines and reads `\` as `/`), so `/\t/evil.com` or `/\evil.com` can't pass as a local path.
+ */
+function sameSitePath(next: string): string | null {
+  if (!next.startsWith('/')) return null;
+  try {
+    const url = new URL(next, 'http://x');
+    return url.origin === 'http://x' ? url.pathname + url.search : null;
+  } catch {
+    return null;
+  }
 }

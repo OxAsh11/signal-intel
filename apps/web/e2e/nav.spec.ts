@@ -219,8 +219,16 @@ async function secondWorkspace(org: string, name = 'Second'): Promise<string> {
   return id;
 }
 
+/**
+ * The lens cookie as the app reads it. Next's cookies().set URL-encodes the value, so the browser
+ * holds `<ws>%3A<brief>`; the raw value must be exactly that encoding of `<ws>:<brief>`.
+ */
 async function lensCookie(context: BrowserContext) {
-  return (await context.cookies()).find((c) => c.name === 'si_brief');
+  const c = (await context.cookies()).find((x) => x.name === 'si_brief');
+  if (!c) return undefined;
+  const value = decodeURIComponent(c.value);
+  expect(c.value, 'si_brief is stored URL-encoded').toBe(encodeURIComponent(value));
+  return { ...c, value };
 }
 
 test.describe('Brief lens', () => {
@@ -317,19 +325,42 @@ test.describe('Brief lens', () => {
     }
 
     // An old cookie naming an archived Brief, or another workspace's Brief, is skipped too.
-    for (const value of [`${ws.ws}:${archived}`, `${ws.ws}:${foreign}`]) {
+    // Both the encoded form the app writes and a raw `:` are read the same way.
+    for (const value of [
+      encodeURIComponent(`${ws.ws}:${archived}`),
+      encodeURIComponent(`${ws.ws}:${foreign}`),
+      `${ws.ws}:${archived}`,
+    ]) {
       await context.addCookies([{ name: 'si_brief', value, domain: 'localhost', path: '/', sameSite: 'Lax', httpOnly: true }]);
       await page.goto('/briefs');
       await expect(lens(page), value).toHaveValue(latest);
     }
 
+    // A tampered `next` that points off-site is refused: the choice is saved and the page stays put.
+    for (const next of ['/\t/evil.example', '//evil.example/x', 'https://evil.example/', String.raw`/\evil.example`, 'javascript:alert(1)']) {
+      await context.addCookies([
+        { name: 'si_brief', value: encodeURIComponent(`${ws.ws}:${latest}`), domain: 'localhost', path: '/', sameSite: 'Lax', httpOnly: true },
+      ]);
+      await page.goto(`/briefs?brief=${other}`);
+      await expect(lens(page)).toHaveValue(other);
+      await page.locator('input[name="next"]').evaluate((el: HTMLInputElement, v) => (el.value = v), next);
+      await lens(page).selectOption('all');
+      await expect.poll(async () => (await lensCookie(context))?.value, JSON.stringify(next)).toBe(`${ws.ws}:all`);
+      const url = new URL(page.url());
+      expect(url.hostname, JSON.stringify(next)).toBe('localhost');
+      expect(url.pathname, JSON.stringify(next)).toBe('/briefs');
+    }
+
     // Choosing on a page whose URL names a Brief lands on the same page without it.
+    await context.addCookies([
+      { name: 'si_brief', value: encodeURIComponent(`${ws.ws}:${latest}`), domain: 'localhost', path: '/', sameSite: 'Lax', httpOnly: true },
+    ]);
     await page.goto(`/briefs?brief=${other}`);
     await expect(lens(page)).toHaveValue(other);
     await lens(page).selectOption('all');
     await expect(page).toHaveURL(/\/briefs$/);
     await expect(lens(page)).toHaveValue('all');
-    expect((await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
   });
 
   test('a user in two workspaces gets a lens resolved within each one', async ({ page, context }) => {
