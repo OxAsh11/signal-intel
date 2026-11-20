@@ -47,7 +47,7 @@ class _MockConn:
     def __init__(self) -> None:
         self.calls: list[str] = []
         self.args: list[tuple[str, tuple[str, ...]]] = []  # (fn_name, args)
-        self.existing: list[tuple[str, str, str]] = []
+        self.existing: list[tuple[str, str, str, str]] = []
         self.sqls: list[str] = []
 
     async def execute(self, sql: str, args: tuple[str, ...] = ()) -> None:
@@ -72,7 +72,7 @@ class _MockCursor:
         self._conn.calls.append("cursor")
         self._conn.sqls.append(sql)
 
-    async def fetchall(self) -> list[tuple[str, str, str]]:
+    async def fetchall(self) -> list[tuple[str, str, str, str]]:
         return self._conn.existing
 
 
@@ -232,7 +232,7 @@ async def test_run_brief_intake_calls_fail_and_reraises_on_gateway_error() -> No
 
 async def test_intake_saves_cleaned_columns_and_names_the_brief() -> None:
     pool = MockPool()
-    pool.conn.existing = [("size", "Size", "number")]
+    pool.conn.existing = [("size", "Size", "number", "extract")]
     gw = _RawGateway(_COLUMNS_RAW)
     inp = _make_inp()
     with structlog.testing.capture_logs() as logs:
@@ -280,7 +280,7 @@ def test_brief_draft_columns_default_empty_and_stay_lenient() -> None:
 async def test_intake_drops_a_column_whose_key_exists_with_another_type() -> None:
     """I1: the workspace holds "industry" as text; the drafted enum and its rules drop."""
     pool = MockPool()
-    pool.conn.existing = [("industry", "Industry", "text")]
+    pool.conn.existing = [("industry", "Industry", "text", "extract")]
     raw = {
         **_COLUMNS_RAW,
         "evidence_rules": [
@@ -299,6 +299,46 @@ async def test_intake_drops_a_column_whose_key_exists_with_another_type() -> Non
         'column "industry" already exists in this workspace as text; give it another key' in r
         for r in reasons
     )
+
+
+async def test_intake_drops_a_column_whose_key_exists_with_another_fill_method() -> None:
+    """P3 (R4): the workspace fills "drone_programme" by formula; the drafted extract column, its
+    rule and a formula reading it drop, and the prompt still sees only key, label, value_type."""
+    pool = MockPool()
+    pool.conn.existing = [("drone_programme", "Drone", "boolean", "formula")]
+    raw = {
+        **_COLUMNS_RAW,
+        "predicates": [
+            *_COLUMNS_RAW["predicates"],  # type: ignore[misc]
+            {
+                "key": "drone_label",
+                "label": "Drone label",
+                "value_type": "text",
+                "role": "info",
+                "fill_method": "formula",
+                "formula": 'if(drone_programme, "yes", "no")',
+                "inputs": ["drone_programme"],
+            },
+        ],
+    }
+    gw = _RawGateway(raw)
+    with structlog.testing.capture_logs() as logs:
+        await run_brief_intake(_make_inp(), gw, pool)  # type: ignore[arg-type]
+    ((_, saved),) = pool.args_for("app.save_brief_draft")
+    config = json.loads(saved)
+    assert [p["key"] for p in config["predicates"]] == ["industry"]
+    assert config["evidence_rules"] == []
+    reasons = [e["reason"] for e in logs if e["event"] == "brief_intake.column_dropped"]
+    assert (
+        'column "drone_programme" already exists in this workspace filled by formula;'
+        " give it another key" in reasons
+    )
+    assert 'column "drone_label": input "drone_programme" was dropped' in reasons
+    assert json.loads(gw.variables["existing_predicates"]) == [
+        {"key": "drone_programme", "label": "Drone", "value_type": "boolean"}
+    ]
+    (sql,) = [s for s in pool.conn.sqls if "public.predicate" in s]
+    assert "fill_method" in sql
 
 
 async def test_intake_tolerates_a_null_name_and_odd_assumptions() -> None:

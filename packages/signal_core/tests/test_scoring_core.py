@@ -250,3 +250,30 @@ def test_stale_claim_lowers_predicate_weight() -> None:
     ]
     # matched weight 0.5 x 100, missed weight 1 x 0 -> 50 / 1.5 = 33
     assert _score(config, claims).fit == 33
+
+
+def _derived(key: str, value: object) -> tuple[object, ...]:
+    """A formula's claim: written against the workspace's derived:formula source record."""
+    return (f"d-{key}-{value}", key, value, 100, NOW, None, "derived:formula")
+
+
+def test_derived_claims_add_no_corroboration() -> None:
+    config = _cfg(verticals=["energy"])
+    one = _score(config, [_claim("industry", "Energy")])
+    with_derived = _score(
+        config, [_claim("industry", "Energy"), _derived("has_programme_and_sites", True)]
+    )
+    assert with_derived.evidence == one.evidence
+    assert with_derived.explanation["evidence"]["claims"] == 1
+    two = _score(config, [_claim("industry", "Energy"), _claim("drone_programme", True)])
+    assert two.evidence > one.evidence  # evidence from sources does corroborate
+
+
+def test_derived_claims_count_for_fit_and_scale() -> None:
+    config = _cfg(verticals=["energy"])
+    fit = _score(config, [_derived("industry", "Energy")])
+    assert fit.fit == 100
+    assert fit.explanation["fit"]["claim_ids"] == ["d-industry-Energy"]
+    scale = _score(config, [_derived("site_count", 40)])
+    assert scale.scale > 0
+    assert scale.explanation["scale"]["claim_ids"] == ["d-site_count-40"]

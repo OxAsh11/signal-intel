@@ -39,7 +39,10 @@ from psycopg_pool import AsyncConnectionPool
 import api.mcp_server as mcp_server
 import signal_core.modules.m04_identity as m04
 import signal_core.modules.m05_verdict as m05
+import signal_core.modules.m06_research as m06
+import signal_core.modules.m08_scoring as m08
 import signal_core.modules.m13_integrations as m13
+import signal_core.modules.m15_account_card as m15
 from api.main import build_app as build_api
 from signal_core.ai_gateway.gateway import Result
 from signal_core.ai_gateway.prompts import render
@@ -1550,3 +1553,506 @@ async def _brief_columns_scenario(pool: AsyncConnectionPool) -> None:
         assert await db.one(claims_sql, (entity,)) == claims_before
         # Version 2 is judged under the same rules: still no verdict call for this Brief.
         assert set(gateway.verdicts) == {(2, "Something else")}, gateway.verdicts
+
+
+# ── P3: column runs, formula auto-run ───────────────────────────────────────
+
+USER_P3 = UUID("00000000-0000-4000-8000-0000000e3001")
+ORG_P3 = UUID("00000000-0000-4000-8000-0000000e3002")
+WS_P3 = UUID("00000000-0000-4000-8000-0000000e3003")
+MEMBER_P3 = UUID("00000000-0000-4000-8000-0000000e3004")
+BRIEF_P3 = UUID("00000000-0000-4000-8000-0000000e3005")
+P3_PAGE = (
+    "Volt Grid (voltgrid.example), a Dutch energy utility, published its drone fleet audit: the "
+    "programme now inspects its substations every month."
+)
+P3_COLUMNS = [
+    *FLYTBASE["predicates"],
+    {
+        "key": "has_programme_and_sites",
+        "label": "Programme and sites",
+        "value_type": "boolean",
+        "fill_method": "formula",
+        "formula": "drone_programme and site_count > 0",
+        "inputs": ["drone_programme", "site_count"],
+        "role": "info",
+    },
+    {
+        "key": "sites_label",
+        "label": "Sites",
+        "value_type": "text",
+        "fill_method": "formula",
+        "formula": 'if(site_count > 0, concat(site_count, " sites"), null)',
+        "inputs": ["site_count"],
+        "role": "info",
+    },
+]
+
+
+class P3Gateway(FakeGateway):
+    """The P2 drone page answers, for a Brief whose columns include two formula columns."""
+
+    @staticmethod
+    def _answer(name: str, variables: dict[str, str]) -> dict[str, Any]:
+        keys = {p["key"] for p in json.loads(variables.get("predicates") or "[]")}
+        if name == "relevance_judge":
+            return {"relevant": True, "reason": "a utility with a drone programme"}
+        if name == "extraction":
+            # Formula columns never reach an extraction prompt.
+            assert keys == {"drone_programme", "industry", "site_count"}, keys
+            return {
+                "mentions": [
+                    {
+                        "entity_type": "company",
+                        "raw_name": "Volt Grid",
+                        "raw_domain": "voltgrid.example",
+                        "raw_country": "NL",
+                        "raw_attributes": {},
+                    }
+                ],
+                "claims": [
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "drone_programme",
+                        "value": True,
+                        "quote": "published its drone fleet audit",
+                        "confidence": 90,
+                    },
+                    {
+                        "mention_index": 0,
+                        "predicate_key": "industry",
+                        "value": "energy",
+                        "confidence": 80,
+                    },
+                ],
+            }
+        if name == "account_card":
+            return {"bullets": ["Runs drones"], "next_step": "Send the case study"}
+        if name == "identity_tiebreak":
+            return {"winner_index": None, "confidence": 0, "reason": "unsure"}
+        raise AssertionError(f"unexpected prompt {name} in the column runs scenario")
+
+
+@pytest.mark.asyncio
+async def test_column_runs_end_to_end(conninfo: str) -> None:
+    pool = AsyncConnectionPool(
+        conninfo,
+        min_size=1,
+        max_size=1,
+        open=False,
+        configure=_configure,
+        kwargs={"autocommit": False, "prepare_threshold": None},
+    )
+    await pool.open()
+    try:
+        await _column_runs_scenario(pool)
+    finally:
+        await pool.close()
+
+
+async def _as_p3_user(db: Db, sql: str, params: tuple[Any, ...] = ()) -> Any:
+    async with db.pool.connection() as conn:
+        await conn.execute("reset role")
+        await conn.execute("select set_config('request.jwt.claim.sub', %s, true)", (str(USER_P3),))
+        await conn.execute("set local role authenticated")
+        cur = await conn.execute(sql, params)
+        rows = await cur.fetchall() if cur.description else []
+        await conn.commit()
+        await conn.execute("set role service_role")
+    return rows[0][0] if rows else None
+
+
+async def _seed_p3(db: Db) -> tuple[UUID, dict[str, UUID]]:
+    """The P3 tenant: an owner, an Active Brief with the FlytBase and two formula columns, and a
+    website radar. Returns the radar and the workspace's predicate ids by key."""
+    await db.admin("insert into auth.users (id, email) values (%s, 'owner@p3.test')", (USER_P3,))
+    await db.admin("insert into public.organisation (id, name) values (%s, 'P3 Org')", (ORG_P3,))
+    await db.admin(
+        "insert into public.workspace (id, org_id, name) values (%s, %s, 'P3')", (WS_P3, ORG_P3)
+    )
+    await db.admin(
+        "insert into public.member (id, org_id, user_id, email)"
+        " values (%s, %s, %s, 'owner@p3.test')",
+        (MEMBER_P3, ORG_P3, USER_P3),
+    )
+    await db.admin(
+        "insert into public.role_assignment (org_id, member_id, role) values (%s, %s, 'Owner')",
+        (ORG_P3, MEMBER_P3),
+    )
+    await db.admin(
+        "insert into public.brief (id, org_id, workspace_id, name, state)"
+        " values (%s, %s, %s, 'Drone utilities', 'Active')",
+        (BRIEF_P3, ORG_P3, WS_P3),
+    )
+    config = {
+        "hypothesis": "Utilities that run drone programmes",
+        "predicates": P3_COLUMNS,
+        "evidence_rules": FLYTBASE["evidence_rules"],
+    }
+    version_id = await db.one(
+        "insert into public.brief_version"
+        " (brief_id, org_id, workspace_id, version, config, rubric, weights)"
+        " values (%s, %s, %s, 1, %s::jsonb, '{}', '{}'::jsonb) returning id",
+        (BRIEF_P3, ORG_P3, WS_P3, json.dumps(config)),
+    )
+    await db.admin(
+        "update public.brief set current_version_id = %s where id = %s", (version_id, BRIEF_P3)
+    )
+    radar = await db.one(
+        "insert into public.radar (org_id, workspace_id, brief_id, connector_type, name)"
+        " values (%s, %s, %s, 'website', 'site') returning id",
+        (ORG_P3, WS_P3, BRIEF_P3),
+    )
+    rows = await db.admin("select key, id from public.predicate where workspace_id = %s", (WS_P3,))
+    return UUID(str(radar)), {str(k): UUID(str(v)) for k, v in rows}
+
+
+class _Switch:
+    """The real kill switch, with job types that can be turned off for a step."""
+
+    def __init__(self, inner: DbKillSwitch) -> None:
+        self.inner = inner
+        self.off: set[str] = set()
+
+    async def is_enabled(self, job_type: str) -> bool:
+        return job_type not in self.off and await self.inner.is_enabled(job_type)
+
+
+async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
+    db = Db(pool)
+    radar, predicates = await _seed_p3(db)
+    formula, label = predicates["has_programme_and_sites"], predicates["sites_label"]
+    entity: Any = None
+
+    async def cell(predicate: UUID) -> tuple[Any, ...]:
+        row = await _as_p3_user(
+            db,
+            "select array[state, value::text] from public.cells(%s, %s, %s)",
+            (WS_P3, [entity], [predicate]),
+        )
+        return tuple(row)
+
+    claims_sql = "select count(*) from public.claim where entity_id = %s and predicate_id = %s"
+    active_sql = (
+        "select id from public.claim where entity_id = %s and predicate_id = %s"
+        " and status = 'active'"
+    )
+    created_sql = (
+        "select count(*) from public.outbox where event = 'claim.created'"
+        " and payload ->> 'entity_id' = %s and payload ->> 'predicate_id' = %s"
+    )
+    runs_sql = (
+        "select status, inputs_hash = app.run_inputs_hash(entity_id, predicate_id), claim_id"
+        " from public.predicate_run where entity_id = %s and predicate_id = %s"
+        " order by queued_at, id"
+    )
+
+    gateway = P3Gateway()
+    connector = InMemoryConnector()
+    switch = _Switch(DbKillSwitch(pool))
+    app = build_app(
+        connector,
+        switch,
+        HealthState(),
+        PgHealthStore(pool),
+        ai_configured=gateway.configured,
+        approvals=PgApprovalStore(pool),
+        gateway=gateway,  # type: ignore[arg-type]
+        pool=pool,
+    )
+    async with app.open_async():
+        await _drain(app, connector, pool)
+        payload = SourcePayload(
+            url="https://voltgrid.example/audit",
+            fetched_at=datetime.now(UTC),
+            content_hash=hashlib.sha256(P3_PAGE.encode()).hexdigest(),
+            payload_ref=None,
+            language="en",
+            raw=P3_PAGE.encode(),
+        )
+        assert (
+            await create_source_records(pool, ORG_P3, WS_P3, f"radar:{radar}", "website", [payload])
+            == 1
+        )
+
+        # 1. Extracting the drone page creates the input claim.
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        record = await db.one(
+            "select id from public.source_record where org_id = %s and content_hash = %s",
+            (ORG_P3, payload.content_hash),
+        )
+        entity = await db.one(
+            "select entity_id from public.mention where source_record_id = %s", (record,)
+        )
+        assert entity is not None
+        assert (
+            await db.one(
+                "select value from public.claim where entity_id = %s and predicate_id = %s"
+                " and status = 'active'",
+                (entity, predicates["drone_programme"]),
+            )
+            is True
+        )
+
+        # 2. The auto-run computed the formula, once: derived (site_count unknown, so false).
+        runs = await db.admin(runs_sql, (entity, formula))
+        assert [(r[0], r[1]) for r in runs] == [("succeeded", True)]
+        assert await cell(formula) == ("derived", "false")
+        assert await cell(label) == ("empty", None)  # no site_count claim: never queued
+        run_jobs = [j for j in connector.jobs.values() if j["task_name"] == "column.run"]
+        assert [j["status"] for j in run_jobs] == ["succeeded"]
+        assert run_jobs[0]["queueing_lock"] == f"run:{run_jobs[0]['args']['run_id']}"
+
+        # 3. A new site_count claim makes the cell stale until the auto-run brings it back.
+        await db.admin(
+            "select app.create_claim(%s, %s, %s, '40'::jsonb, 'its 40 substations', null, null,"
+            " %s, now(), %s, 85::smallint)",
+            (ORG_P3, entity, predicates["site_count"], record, CANARY_EXTRACTOR_VERSION),
+        )
+        assert await cell(formula) == ("stale", "false")
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await cell(formula) == ("derived", "true")
+        assert await cell(label) == ("derived", '"40 sites"')
+        assert [r[0] for r in await db.admin(runs_sql, (entity, formula))] == ["succeeded"] * 2
+
+        # 4. Review Focus 5: a re-run with unchanged inputs writes no claim and emits nothing.
+        claims_before = await db.one(claims_sql, (entity, formula))
+        created_before = await db.one(created_sql, (str(entity), str(formula)))
+        active_before = await db.one(active_sql, (entity, formula))
+        request = await _as_p3_user(
+            db,
+            "select public.request_column_run(%s, %s, 'selected', %s, null, %s)",
+            (WS_P3, formula, BRIEF_P3, [entity]),
+        )
+        assert request == {"queued": 1, "cost_usd": 0}
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        runs = await db.admin(runs_sql, (entity, formula))
+        assert [r[0] for r in runs] == ["succeeded"] * 3
+        assert runs[-1][2] == active_before  # the same claim, reused
+        assert await db.one(claims_sql, (entity, formula)) == claims_before
+        assert await db.one(created_sql, (str(entity), str(formula))) == created_before
+        assert await cell(formula) == ("derived", "true")
+
+        # I1 (R7): a derived claim is as old and as sure as its inputs, and it is not evidence:
+        # the verdict and the account card never read it; scoring reads it (fit, scale, timing).
+        inputs_sql = (
+            "select max(observed_at), min(confidence) from public.claim"
+            " where entity_id = %s and predicate_id = any(%s) and status = 'active'"
+        )
+        expected = (
+            await db.admin(
+                inputs_sql, (entity, [predicates["drone_programme"], predicates["site_count"]])
+            )
+        )[0]
+        derived = (
+            await db.admin(
+                "select observed_at, confidence from public.claim where id = %s", (active_before,)
+            )
+        )[0]
+        assert derived == expected
+        assert expected[1] < 100
+        live = [r[0] for r in await db.admin(m05.LIVE_CLAIMS_SQL, (entity,))]
+        assert live and active_before not in live
+        card = [r[0] for r in await db.admin(m15.TOP_CLAIMS_SQL, (entity,))]
+        assert card and active_before not in card
+        scored = [r[0] for r in await db.admin(m08.CLAIMS_SQL, (entity,))]
+        assert active_before in scored
+        # Research is written from sourced claims only, and a new derived claim never makes the
+        # last research document look out of date.
+        research = await db.admin(
+            m06.SOURCE_CLAIMS_SQL, (m06._EXCERPT_CHARS, entity, m06._MAX_SOURCE_CLAIMS)
+        )
+        assert research and "has_programme_and_sites" not in [r[3] for r in research]
+        newest_sourced = await db.one(
+            "select max(c.created_at) from public.claim c join public.source_record sr"
+            " on sr.id = c.source_record_id where c.entity_id = %s"
+            " and sr.connector_id not like 'derived:%%'",
+            (entity,),
+        )
+        assert await db.one(m06.NEWEST_CLAIM_SQL, (entity,)) == newest_sourced
+
+        # N2: a human mark holds while the sourced evidence is unchanged, although the mark
+        # stored the derived claim among the entity's active claims; a new sourced claim ends it.
+        ctx = CallContext(ORG_P3, WS_P3, None, None, "verdict.compute", {})
+        verdict_id, verdict_value = (
+            await db.admin(
+                "select v.id, v.value::text from public.verdict v"
+                " join public.brief b on b.current_version_id = v.brief_version_id"
+                " where v.entity_id = %s and b.id = %s",
+                (entity, BRIEF_P3),
+            )
+        )[0]
+        assert verdict_value == "Confirmed"
+        review = await db.one(
+            "insert into public.verdict_review (org_id, workspace_id, verdict_id, reason,"
+            " verdict_value) values (%s, %s, %s, 'sample', 'Confirmed') returning id",
+            (ORG_P3, WS_P3, verdict_id),
+        )
+        await _as_p3_user(
+            db,
+            "select public.resolve_verdict_review(%s, 'correct', 'Likely', 'one source only')",
+            (review,),
+        )
+        stored = await db.one(
+            "select inputs -> 'live_claim_ids' from public.verdict where id = %s", (verdict_id,)
+        )
+        assert str(active_before) in stored
+        assert await m05.compute_verdict(pool, gateway, entity, WS_P3, ctx) == "Likely"  # type: ignore[arg-type]
+        await db.admin(
+            "select app.create_claim(%s, %s, %s, '\"utilities\"'::jsonb, 'a grid utility',"
+            " null, null, %s, now(), %s, 80::smallint)",
+            (ORG_P3, entity, predicates["industry"], record, CANARY_EXTRACTOR_VERSION),
+        )
+        assert await m05.compute_verdict(pool, gateway, entity, WS_P3, ctx) == "Confirmed"  # type: ignore[arg-type]
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+
+        # A redelivered job for that finished run does nothing.
+        last_run = await db.one(
+            "select id from public.predicate_run where entity_id = %s and predicate_id = %s"
+            " order by queued_at desc, id desc limit 1",
+            (entity, formula),
+        )
+        finished_sql = "select finished_at from public.predicate_run where id = %s"
+        finished = await db.one(finished_sql, (last_run,))
+        await app.tasks["column.run"].defer_async(run_id=str(last_run))
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await db.one(finished_sql, (last_run,)) == finished
+        assert await db.one(claims_sql, (entity, formula)) == claims_before
+
+        # Review Focus 2: site_count goes away; the label re-run finds nothing and the cell shows
+        # no_data, not the older derived value.
+        await db.admin(
+            "update public.claim set status = 'retracted'"
+            " where entity_id = %s and predicate_id = %s",
+            (entity, predicates["site_count"]),
+        )
+        assert await cell(label) == ("stale", '"40 sites"')
+        estimate = await _as_p3_user(
+            db, "select public.estimate_column_run(%s, %s, 'stale')", (WS_P3, label)
+        )
+        assert (estimate["count"], estimate["cost_usd"]) == (1, 0)
+        request = await _as_p3_user(
+            db, "select public.request_column_run(%s, %s, 'stale')", (WS_P3, label)
+        )
+        assert request == {"queued": 1, "cost_usd": 0}
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await cell(label) == ("no_data", None)
+        assert await db.one(active_sql, (entity, label)) is None
+
+        # I4 (R8): a version adding a formula column fills it on the existing account, with no
+        # new evidence and no extraction.
+        sourced_sql = (
+            "select count(*) from public.claim c join public.source_record sr"
+            " on sr.id = c.source_record_id where c.entity_id = %s"
+            " and sr.connector_id not like 'derived:%%'"
+        )
+        sourced_before = await db.one(sourced_sql, (entity,))
+        calls_before = len(gateway.calls)
+        v2_config = {
+            "hypothesis": "Utilities that run drone programmes",
+            "predicates": [
+                *P3_COLUMNS,
+                {
+                    "key": "programme_text",
+                    "label": "Programme",
+                    "value_type": "text",
+                    "fill_method": "formula",
+                    "formula": 'if(drone_programme, "runs drones", "no drones")',
+                    "inputs": ["drone_programme"],
+                    "role": "info",
+                },
+                {
+                    "key": "drone_fleet",
+                    "label": "Drone fleet",
+                    "value_type": "number",
+                    "fill_method": "formula",
+                    "formula": "if(drone_programme, 500, 0)",
+                    "inputs": ["drone_programme"],
+                    "role": "scale",
+                },
+            ],
+            "evidence_rules": FLYTBASE["evidence_rules"],
+        }
+        v2 = await db.one(
+            "insert into public.brief_version"
+            " (brief_id, org_id, workspace_id, version, config, rubric, weights)"
+            " values (%s, %s, %s, 2, %s::jsonb, '{}', '{}'::jsonb) returning id",
+            (BRIEF_P3, ORG_P3, WS_P3, json.dumps(v2_config)),
+        )
+        await db.admin(
+            "update public.brief set current_version_id = %s where id = %s", (v2, BRIEF_P3)
+        )
+        programme_text = UUID(
+            str(
+                await db.one(
+                    "select id from public.predicate where workspace_id = %s"
+                    " and key = 'programme_text'",
+                    (WS_P3,),
+                )
+            )
+        )
+        assert await cell(programme_text) == ("queued", None)
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await cell(programme_text) == ("derived", '"runs drones"')
+        # N1: the derived scale claim reaches the score with no verdict change (site_count is
+        # gone, so the scale comes from the formula alone: log1p(500) * 10).
+        score = await db.admin(
+            "select s.scale, s.explanation -> 'scale' -> 'claim_ids' from public.score s"
+            " join public.account a on a.id = s.account_id"
+            " where a.entity_id = %s and s.brief_version_id = %s",
+            (entity, v2),
+        )
+        fleet_claim = await db.one(
+            "select c.id from public.claim c join public.predicate p on p.id = c.predicate_id"
+            " where c.entity_id = %s and p.key = 'drone_fleet' and c.status = 'active'",
+            (entity,),
+        )
+        assert score == [(62, [str(fleet_claim)])]
+        assert await db.one(sourced_sql, (entity,)) == sourced_before
+        assert "extraction" not in gateway.calls[calls_before:]
+
+        # I3 (R9): a run whose job the kill switch skipped stays queued with no job. After an
+        # hour it is abandoned: the next request closes it and queues a run that fills the cell.
+        select_sql = "select public.request_column_run(%s, %s, 'selected', %s, null, %s)"
+        switch.off.add("column.run")
+        assert await _as_p3_user(db, select_sql, (WS_P3, formula, BRIEF_P3, [entity])) == {
+            "queued": 1,
+            "cost_usd": 0,
+        }
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        stuck = await db.one(
+            "select id from public.predicate_run where entity_id = %s and predicate_id = %s"
+            " and status = 'queued'",
+            (entity, formula),
+        )
+        assert stuck is not None
+        assert await _as_p3_user(db, select_sql, (WS_P3, formula, BRIEF_P3, [entity])) == {
+            "queued": 0,
+            "cost_usd": 0,
+        }
+        await db.admin(
+            "update public.predicate_run set queued_at = now() - interval '2 hours' where id = %s",
+            (stuck,),
+        )
+        switch.off.clear()
+        assert await _as_p3_user(db, select_sql, (WS_P3, formula, BRIEF_P3, [entity])) == {
+            "queued": 1,
+            "cost_usd": 0,
+        }
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        status = await db.admin(
+            "select status, error from public.predicate_run where id = %s", (stuck,)
+        )
+        assert status[0] == ("error", "abandoned")
+        runs = await db.admin(runs_sql, (entity, formula))
+        assert runs[-1][0] == "succeeded"
+        assert (await cell(formula))[0] == "derived"

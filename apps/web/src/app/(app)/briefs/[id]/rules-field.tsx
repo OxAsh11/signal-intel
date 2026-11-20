@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from 'react';
 import { Button } from '@signal/ui';
 import { ChipField, fieldInput } from './chip-field';
 import {
-  columnSpecs, describeRule, MAX_RULES, OP_LABELS, OPS_BY_TYPE, parseDays,
+  columnSpecs, describeRule, isFormulaColumn, MAX_RULES, OP_LABELS, OPS_BY_TYPE, parseDays,
   type BriefConfig, type ColumnSpec, type EvidenceRule, type RuleOp,
 } from '@/lib/briefs';
 
@@ -57,7 +57,9 @@ function RulesEditor({ saved, onChange, block }: {
   onChange: (patch: Record<string, unknown>) => void;
   block: (problem: string | null) => void;
 }) {
-  const columns = columnSpecs(saved);
+  const allColumns = columnSpecs(saved);
+  // A formula's value has no quote, so it can never satisfy a rule: formula columns are not offered.
+  const columns = allColumns.filter((c) => !isFormulaColumn(c));
   const [rows, setRows] = useState<Row[]>(() => (saved.evidence_rules ?? []).map((rule, id) => ({ id, rule, ageError: null })));
   const nextId = useRef(rows.length);
 
@@ -78,7 +80,10 @@ function RulesEditor({ saved, onChange, block }: {
     return { predicate: col.key, kind, op, value: startValue(op), min_sources: 1, max_age_days: null };
   };
 
-  if (!columns.length) return <p className="m-0 text-[14px] text-ink-muted">Add a column first: every rule tests one column.</p>;
+  if (!allColumns.length) return <p className="m-0 text-[14px] text-ink-muted">Add a column first: every rule tests one column.</p>;
+  if (!columns.length) {
+    return <p className="m-0 text-[14px] text-ink-muted">Add a column found in sources first: a rule cannot test a formula column.</p>;
+  }
 
   return (
     <div className="flex flex-col gap-4">

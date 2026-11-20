@@ -1,6 +1,8 @@
 export type ValueType = 'boolean' | 'number' | 'enum' | 'text' | 'date';
 export type Role = 'signal' | 'fit.vertical' | 'fit.geography' | 'fit.size' | 'fit.commercial_role' | 'scale' | 'info';
 export type RuleOp = 'is_true' | 'is_false' | 'present' | 'at_least' | 'one_of' | 'contains';
+/** How a column is filled: found in the sources by the AI, or computed by a formula. */
+export type FillMethod = 'extract' | 'formula';
 
 /** One column the AI fills for every company (an item of `config.predicates`). */
 export type ColumnSpec = {
@@ -11,6 +13,12 @@ export type ColumnSpec = {
   extraction_hint: string;
   decay_half_life_days: number | null;
   role: Role;
+  /** Absent means `extract`. */
+  fill_method?: FillMethod;
+  /** The expression of a formula column (1–500 characters); null otherwise. */
+  formula?: string | null;
+  /** Formula only: the column keys the formula reads, from `references()`. */
+  inputs?: string[];
 };
 
 /** A rule the verdict is decided by (an item of `config.evidence_rules`). */
@@ -62,6 +70,12 @@ export const TYPE_LABELS: Record<ValueType, string> = {
   date: 'Date',
 };
 
+export const FILL_LABELS: Record<FillMethod, string> = {
+  extract: 'Found in sources',
+  formula: 'Formula',
+};
+
+
 /** The rule ops each column type allows (Global Constraints). */
 export const OPS_BY_TYPE: Record<ValueType, RuleOp[]> = {
   boolean: ['is_true', 'is_false', 'present'],
@@ -82,6 +96,11 @@ export const OP_LABELS: Record<RuleOp, string> = {
 
 export function isColumnSpec(p: ColumnSpec | string): p is ColumnSpec {
   return typeof p === 'object' && p !== null;
+}
+
+/** A column computed by a formula: it has no hint and no evidence rule. */
+export function isFormulaColumn(p: ColumnSpec | string): p is ColumnSpec & { fill_method: 'formula' } {
+  return isColumnSpec(p) && p.fill_method === 'formula';
 }
 
 /** The Brief's column specs, skipping legacy plain keys. */
@@ -143,6 +162,8 @@ export type WorkspacePredicate = {
   allowed_values: unknown;
   extraction_hint: string | null;
   decay_half_life_days: number | null;
+  /** How the workspace fills it; absent means `extract`. */
+  fill_method?: string | null;
 };
 
 /** The scoring role a legacy key had before Briefs had column specs (scoring_core.LEGACY_ROLES). */
@@ -170,6 +191,8 @@ export function columnsFromWorkspace(preds: WorkspacePredicate[]): ColumnSpec[] 
   for (const p of preds) {
     if (out.length >= MAX_COLUMNS) break;
     if (!KEY_RE.test(p.key) || !(p.value_type in TYPE_LABELS)) continue;
+    // A legacy Brief collected only extracted columns; a formula column is never seeded as one.
+    if ((p.fill_method ?? 'extract') !== 'extract') continue;
     const value_type = p.value_type as ValueType;
     let allowed_values: string[] | null = null;
     if (value_type === 'enum') {
@@ -194,10 +217,16 @@ export function columnsFromWorkspace(preds: WorkspacePredicate[]): ColumnSpec[] 
 }
 
 /**
- * What is wrong with a column's key, in plain words, or null. `existingType` is the type the
- * workspace already holds the key as, when the key can still change (it follows the label).
+ * What is wrong with a column's key, in plain words, or null. `existing` is the workspace column
+ * with this key, when the key can still change (it follows the label): its type and fill method
+ * stay, so the column must match them.
  */
-export function columnKeyProblem(col: ColumnSpec, others: ColumnSpec[], existingType: string | undefined): string | null {
+export function columnKeyProblem(
+  col: ColumnSpec,
+  others: ColumnSpec[],
+  existing: { value_type: string; fill_method?: string | null } | undefined,
+): string | null {
+  const existingType = existing?.value_type;
   if (!KEY_RE.test(col.key)) {
     return 'The key must be 2 to 40 lowercase letters, digits or underscores, starting with a letter. Change the label.';
   }
@@ -205,6 +234,11 @@ export function columnKeyProblem(col: ColumnSpec, others: ColumnSpec[], existing
   if (existingType && existingType !== col.value_type) {
     const type = TYPE_LABELS[existingType as ValueType] ?? existingType;
     return `The workspace already has a column "${col.key}" of type ${type}. Change the label for another key, or set the type to ${type}.`;
+  }
+  const fill = (existing?.fill_method ?? 'extract') as FillMethod;
+  if (existing && fill !== (col.fill_method ?? 'extract')) {
+    const how = FILL_LABELS[fill] ?? fill;
+    return `The workspace already has a column "${col.key}" filled by ${how}. Change the label for another key, or set Filled by to ${how}.`;
   }
   return null;
 }

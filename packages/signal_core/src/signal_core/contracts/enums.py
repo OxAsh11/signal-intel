@@ -200,6 +200,7 @@ class EventType(StrEnum):
     RADAR_FETCH_QUEUED = "radar.fetch_queued"
     BRIEF_PREVIEW_REQUESTED = "brief.preview_requested"
     PREDICATE_BACKFILL_REQUESTED = "predicate.backfill_requested"
+    COLUMN_RUN_REQUESTED = "column.run_requested"
 
 
 class UsageUnit(StrEnum):

@@ -57,6 +57,8 @@ account_card_generate_job: Any | None = None
 
 # Claims that count towards a verdict: active and not past their expiry. Each row is
 # (id, key, value, quote, confidence, observed_at, record url, record id).
+# The evidence a verdict weighs. A formula's derived claim (source record derived:...) restates
+# other claims and carries no quote, so it never reaches the rubric or the judge.
 LIVE_CLAIMS_SQL = """
     SELECT c.id, p.key, c.value, c.quote, c.confidence, c.observed_at, sr.url, sr.id
       FROM public.claim c
@@ -65,8 +67,39 @@ LIVE_CLAIMS_SQL = """
      WHERE c.entity_id = %s
        AND c.status = 'active'
        AND (c.expires_at IS NULL OR c.expires_at > now())
+       AND sr.connector_id NOT LIKE 'derived:%%'
      ORDER BY c.observed_at DESC, c.id
 """
+
+
+# Which of these claims a formula derived (source record derived:...).
+DERIVED_IDS_SQL = """
+    SELECT c.id::text FROM public.claim c
+      JOIN public.source_record sr ON sr.id = c.source_record_id
+     WHERE c.id = ANY(%s::uuid[]) AND sr.connector_id LIKE 'derived:%%'
+"""
+
+
+async def _derived_claim_ids(pool: AsyncConnectionPool, ids: list[str]) -> set[str]:
+    if not ids:
+        return set()
+    async with pool.connection() as conn, conn.cursor() as cur:
+        await cur.execute(DERIVED_IDS_SQL, (ids,))
+        rows = await cur.fetchall()
+    return {str(r[0]) for r in rows}
+
+
+async def _mark_still_holds(
+    pool: AsyncConnectionPool, stored: list[str], claims: list[tuple[Any, ...]]
+) -> bool:
+    """A human mark holds while the evidence it was given is unchanged. The mark stored every
+    active claim (public.resolve_verdict_review); the live claims leave derived ones out, so the
+    stored derived ids are set aside before comparing."""
+    live = {str(c[0]) for c in claims}
+    kept = set(stored)
+    if kept == live:
+        return True
+    return kept - await _derived_claim_ids(pool, sorted(kept - live)) == live
 
 
 class VerdictOutput(BaseModel):
@@ -245,9 +278,9 @@ async def _verdict_for_brief(
         existing = await cur.fetchone()
     if existing is not None:
         inputs = existing[1] if isinstance(existing[1], dict) else {}
-        if inputs.get("human_override") and set(inputs.get("live_claim_ids") or []) == {
-            str(c[0]) for c in claims
-        }:
+        if inputs.get("human_override") and await _mark_still_holds(
+            pool, [str(i) for i in inputs.get("live_claim_ids") or []], claims
+        ):
             return str(existing[0])
 
     rules = evidence_rules(brief.config)

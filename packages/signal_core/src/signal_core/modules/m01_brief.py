@@ -43,10 +43,12 @@ async def run_brief_intake(
     )
     try:
         existing = await _existing_predicates(pool, inp.workspace_id)
+        # The prompt sees key, label and value_type only (no prompt change in P3).
+        shown = [{k: p[k] for k in ("key", "label", "value_type")} for p in existing]
         result = await gateway.run(
             Capability.WRITE,
             prompt,
-            {"description": inp.description, "existing_predicates": json.dumps(existing)},
+            {"description": inp.description, "existing_predicates": json.dumps(shown)},
             BriefDraft,
             ctx,
         )
@@ -61,8 +63,9 @@ async def run_brief_intake(
         a.strip() for a in config.get("assumptions") or [] if isinstance(a, str) and a.strip()
     ][:MAX_ASSUMPTIONS]
     existing_types = {p["key"]: p["value_type"] for p in existing}
+    existing_fills = {p["key"]: p["fill_method"] for p in existing}
     specs, rules, dropped = clean_columns(
-        config["predicates"], config["evidence_rules"], existing_types
+        config["predicates"], config["evidence_rules"], existing_types, existing_fills
     )
     for reason in dropped:
         log.warning("brief_intake.column_dropped", brief_id=str(inp.brief_id), reason=reason)
@@ -80,14 +83,15 @@ async def run_brief_intake(
 async def _existing_predicates(
     pool: AsyncConnectionPool, workspace_id: UUID
 ) -> list[dict[str, str]]:
-    """The workspace's predicates the intake prompt asks the AI to reuse.
+    """The workspace's predicates the intake prompt asks the AI to reuse, with the fill_method
+    each is held with (a drafted column may not reuse a key filled another way).
 
     Global predicates (no workspace) are not offered: a Brief's columns live in its workspace."""
     async with pool.connection() as conn, conn.cursor() as cur:
         await cur.execute(
-            "SELECT key, label, value_type FROM public.predicate"
+            "SELECT key, label, value_type, fill_method FROM public.predicate"
             " WHERE workspace_id = %s ORDER BY key",
             (str(workspace_id),),
         )
         rows = await cur.fetchall()
-    return [{"key": r[0], "label": r[1], "value_type": r[2]} for r in rows]
+    return [{"key": r[0], "label": r[1], "value_type": r[2], "fill_method": r[3]} for r in rows]

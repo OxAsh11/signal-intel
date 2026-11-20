@@ -16,7 +16,7 @@ from uuid import UUID
 
 from psycopg_pool import AsyncConnectionPool
 
-from signal_core.brief_columns import predicate_keys
+from signal_core.brief_columns import extract_keys, predicate_keys
 from signal_core.config import get_settings
 from signal_core.logging import get_logger
 from signal_core.modules.m03_extraction import BACKFILL_CAP, BACKFILL_SCOPE_SQL
@@ -251,8 +251,9 @@ async def _counts(
             row = await cur.fetchone()
             counts["rejudge_verdicts"] = int(row[0]) if row else 0
         # New column keys are backfilled over the Brief's scope (capped per publish), not
-        # over every record in the workspace.
-        added = set(predicate_keys(new_cfg)) - set(predicate_keys(old_cfg))
+        # over every record in the workspace. Only extract columns re-extract: a formula column
+        # is filled by its own runs.
+        added = set(extract_keys(new_cfg)) - set(predicate_keys(old_cfg))
         if added:
             await cur.execute(
                 f"SELECT count(*) FROM ({BACKFILL_SCOPE_SQL}) scope",

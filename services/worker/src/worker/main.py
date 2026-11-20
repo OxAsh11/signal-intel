@@ -6,6 +6,7 @@ import signal
 
 from procrastinate import PsycopgConnector
 from psycopg import AsyncConnection
+from psycopg_pool import AsyncConnectionPool
 
 from signal_core.ai_gateway.factory import build_gateway
 from signal_core.config import Settings, get_settings
@@ -52,6 +53,40 @@ async def relay_loop(
                 pass
 
 
+EXTRACT_MODEL_SQL = (
+    "insert into public.ai_capability_model (capability, model) values ('extract', %s)"
+    " on conflict (capability) do update set model = excluded.model, updated_at = now()"
+    " where public.ai_capability_model.model is distinct from excluded.model"
+)
+
+
+EXTRACT_PRICES_SQL = (
+    "select count(*) from public.model_price"
+    " where model = %s and unit in ('ai_input_tokens', 'ai_output_tokens')"
+)
+
+
+async def record_ai_models(pool: AsyncConnectionPool, settings: Settings) -> None:
+    """Column run estimates are priced in SQL: tell it which model extraction uses, and warn when
+    that model has no price (every extract estimate would then fail). Never stops the worker."""
+    model = settings.ai_model_extract
+    try:
+        async with pool.connection() as conn:
+            await conn.execute(EXTRACT_MODEL_SQL, (model,))
+            cur = await conn.execute(EXTRACT_PRICES_SQL, (model,))
+            row = await cur.fetchone()
+    except Exception:  # an estimate falls back to the seeded model; the worker still starts
+        log.exception("worker.ai_models_not_recorded")
+        return
+    if not row or int(row[0]) < 2:
+        log.warning(
+            "worker.extract_model_unpriced",
+            model=model,
+            detail="add input and output token prices to public.model_price;"
+            " until then extract column estimates and requests fail",
+        )
+
+
 async def amain() -> None:
     settings = get_settings()
     configure_logging(settings.log_level, json=settings.app_env != "local")
@@ -67,6 +102,7 @@ async def amain() -> None:
         conninfo=conninfo, configure=configure_worker_connection, kwargs={"prepare_threshold": None}
     )
     gateway = build_gateway(settings, pool)
+    await record_ai_models(pool, settings)
     app = build_app(
         connector,
         DbKillSwitch(pool),

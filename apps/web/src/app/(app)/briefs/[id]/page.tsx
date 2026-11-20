@@ -34,11 +34,12 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
     if (ver?.config) seedConfig = ver.config as import('@/lib/briefs').BriefConfig;
   }
   const briefForEditor = { ...brief, draft_config: seedConfig };
-  // The workspace's own predicates (not global ones): the Columns editor fixes the type of a key the
-  // workspace already collects, and a Brief without column specs starts its editor from them.
+  // The workspace's own predicates (not global ones): the Columns editor fixes the type and fill
+  // method of a key the workspace already collects, and a Brief without column specs starts its
+  // editor from them.
   const { data: preds } = await supabase
     .from('predicate')
-    .select('key, label, value_type, allowed_values, extraction_hint, decay_half_life_days')
+    .select('key, label, value_type, allowed_values, extraction_hint, decay_half_life_days, fill_method')
     .eq('workspace_id', ctx.workspace.id)
     .order('key');
   const workspacePredicates = (preds ?? []) as WorkspacePredicate[];

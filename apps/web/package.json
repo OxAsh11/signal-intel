@@ -13,6 +13,7 @@
   "dependencies": {
     "@next/env": "16.4.5",
     "@signal/contracts": "workspace:*",
+    "@signal/formula": "workspace:*",
     "@signal/ui": "workspace:*",
     "@supabase/ssr": "^0.12.7",
     "@supabase/supabase-js": "^2.119.0",

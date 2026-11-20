@@ -1,6 +1,9 @@
 'use client';
 import { useRouter } from 'next/navigation';
-import { describeRule, isColumnSpec, ROLE_LABELS, TYPE_LABELS, type BriefConfig, type EvidenceRule } from '@/lib/briefs';
+import {
+  describeRule, FILL_LABELS, isColumnSpec, isFormulaColumn, ROLE_LABELS, TYPE_LABELS,
+  type BriefConfig, type ColumnSpec, type EvidenceRule,
+} from '@/lib/briefs';
 
 type Version = { id: string; version: number; config: Record<string, unknown>; published_at: string; change_note: string | null };
 
@@ -20,13 +23,25 @@ const FIELDS: { key: string; label: string }[] = [
   { key: 'budget', label: 'Budget' },
 ];
 
+/**
+ * One column as people would say it: label, type, role and how it is filled; a formula shows its
+ * expression, so a formula edit is visible in the comparison.
+ */
+function describeColumn(c: ColumnSpec): string {
+  const parts = [c.label, TYPE_LABELS[c.value_type] ?? c.value_type, ROLE_LABELS[c.role] ?? c.role];
+  const fill = c.fill_method ?? 'extract';
+  const how = FILL_LABELS[fill] ?? fill;
+  parts.push(isFormulaColumn(c) ? `${how}: ${c.formula ?? ''}` : how);
+  return parts.join(' · ');
+}
+
 function display(value: unknown, key: string, config: Record<string, unknown>): string {
   if (value === null || value === undefined) return '—';
   // Columns, rules and assumptions read as people would say them, not as JSON.
   if (key === 'predicates' && Array.isArray(value)) {
     if (!value.length) return '—';
     return (value as NonNullable<BriefConfig['predicates']>)
-      .map((c) => (isColumnSpec(c) ? `${c.label} · ${TYPE_LABELS[c.value_type] ?? c.value_type} · ${ROLE_LABELS[c.role] ?? c.role}` : c))
+      .map((c) => (isColumnSpec(c) ? describeColumn(c) : c))
       .join('\n');
   }
   if (key === 'evidence_rules' && Array.isArray(value)) {

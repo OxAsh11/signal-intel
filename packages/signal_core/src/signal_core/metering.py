@@ -55,6 +55,8 @@ class CallContext:
     job_id: str | None
     job_type: str
     job_args: dict[str, Any]
+    # The column run (predicate_run) this call fills, if any: its spend is recorded against it.
+    predicate_run_id: UUID | None = None
 
 
 @dataclass
@@ -217,6 +219,7 @@ class PgBudgetGuard:
             "status": status,
             "brief_id": str(ctx.brief_id) if ctx.brief_id else None,
             "job_id": ctx.job_id,
+            "predicate_run_id": str(ctx.predicate_run_id) if ctx.predicate_run_id else None,
             "lines": [
                 {"unit": str(ln.unit), "quantity": ln.quantity, "cost_usd": str(ln.cost_usd)}
                 for ln in lines

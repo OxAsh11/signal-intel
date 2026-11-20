@@ -27,6 +27,17 @@ from signal_core.metering import CallContext
 
 log = get_logger(__name__)
 
+# The card's top claims: the entity's active claims found in sources, surest first. A formula's
+# derived claim (source record derived:...) restates other claims, so it is left out.
+TOP_CLAIMS_SQL = """
+    SELECT c.id, p.key, c.value FROM public.claim c
+      JOIN public.predicate p ON p.id = c.predicate_id
+      JOIN public.source_record sr ON sr.id = c.source_record_id
+     WHERE c.entity_id = %s AND c.status = 'active'
+       AND sr.connector_id NOT LIKE 'derived:%%'
+     ORDER BY c.confidence DESC LIMIT 10
+"""
+
 # Module-level handle wired by build_app()
 account_card_generate_job: Any | None = None
 
@@ -178,15 +189,7 @@ async def generate_account_card(
     # 8. Fetch top claims
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
-            await cur.execute(
-                """
-                SELECT c.id, p.key, c.value FROM public.claim c
-                JOIN public.predicate p ON p.id = c.predicate_id
-                WHERE c.entity_id = %s AND c.status = 'active'
-                ORDER BY c.confidence DESC LIMIT 10
-                """,
-                (str(entity_id),),
-            )
+            await cur.execute(TOP_CLAIMS_SQL, (str(entity_id),))
             claims = await cur.fetchall()
 
     claims_summary = (

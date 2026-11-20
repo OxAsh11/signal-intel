@@ -14,6 +14,7 @@ import procrastinate
 from procrastinate.exceptions import AlreadyEnqueued
 from psycopg_pool import AsyncConnectionPool
 
+import signal_core.column_runtime as _column_runtime
 import signal_core.modules.m03_extraction as _m03_extraction
 import signal_core.modules.m04_identity as _m04_identity
 import signal_core.modules.m05_verdict as _m05_verdict
@@ -91,12 +92,22 @@ DORMANCY_CRON = "30 4 * * *"  # daily, 04:30 UTC
 VERDICT_SAMPLE_CRON = "0 6 * * 1"  # weekly, Monday 06:00 UTC
 RADAR_REFETCH_HOURS = 24
 RESUME_BATCH = 50
+# column.run retries after 16 minutes: app.start_run takes back a run running for more than 15.
+COLUMN_RUN_RETRY_SECONDS = 16 * 60
 # Bands that earn a research document automatically (M6), when the verdict supports them.
 RESEARCH_BANDS = frozenset({"High"})
 # Stages in which an account should always have a next step (M12).
 LIVE_STAGES = frozenset({"Contacted", "Engaged", "Qualified", "Dormant"})
 # Source types that are bookkeeping records, not evidence to extract from.
 NO_EXTRACTION_SOURCE_TYPES = frozenset({"synthetic", "enrichment"})
+
+
+def _is_uuid(value: str) -> bool:
+    try:
+        UUID(value)
+    except ValueError:
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -769,6 +780,23 @@ def build_app(
             pool, gateway, UUID(source_record_id), predicate_keys, ctx
         )
 
+    @job(
+        app,
+        type="column.run",
+        kill_switch=kill_switch,
+        queue="compute",
+        retry=2,
+        retry_wait=COLUMN_RUN_RETRY_SECONDS,
+    )
+    async def column_run_task(*, run_id: str, **_: Any) -> str:
+        """Fill one cell (P3). A finished run, or one another worker started less than 15 minutes
+        ago, is left alone, so a redelivered job does nothing. A failure while filling ends the run
+        in error and the job succeeds. Only when even the error cannot be recorded does the job
+        raise: its retry comes after COLUMN_RUN_RETRY_SECONDS, late enough for app.start_run to
+        take the abandoned run back."""
+        assert pool is not None, "pool required for column.run"
+        return await _column_runtime.execute_run(pool, gateway, UUID(run_id))
+
     # Wire the deferrable handles so m03 can call defer_async via the module attrs.
     _m03_extraction.extract_relevance_judge_job = extract_relevance_judge_job
     _m03_extraction.extract_backfill_record_job = extract_backfill_record_job
@@ -1426,6 +1454,64 @@ def build_app(
             )
         return len(rows)
 
+    async def _rescore_accounts(entity_id: str, org_id: str) -> int:
+        """Queue score.compute for every account of the entity, as verdict.changed does."""
+        rows = await _fetch_all(
+            "select id, workspace_id from public.account where entity_id = %s", (entity_id,)
+        )
+        for account_id, ws in rows:
+            await _enqueue(
+                "score.compute",
+                f"score:{account_id}",
+                account_id=str(account_id),
+                workspace_id=str(ws),
+                org_id=org_id,
+            )
+        return len(rows)
+
+    async def _defer_runs(run_ids: list[str]) -> None:
+        for run_id in run_ids:
+            await _enqueue("column.run", f"run:{run_id}", run_id=run_id)
+
+    async def _queue_auto_runs(event: dict[str, Any]) -> None:
+        """A new claim re-runs the formula columns that read its column (P3 auto-run).
+
+        app.queue_auto_runs commits the runs together with a column.run_requested event, whose
+        dispatch defers the jobs; nothing is deferred here, so a run is never left without one."""
+        try:
+            claim_id = UUID(str(event.get("aggregate_id")))
+        except ValueError:
+            log.warning("dispatch.malformed_claim", event_id=event.get("event_id"))
+            return
+        row = await _fetch_one("select app.queue_auto_runs(%s)", (claim_id,))
+        if row and row[0]:
+            log.info("column_run.auto_queued", claim_id=str(claim_id), runs=len(row[0]))
+
+    async def _queue_merged_formula_runs(winner: str) -> None:
+        """A merge can leave the winner two derived claims for one formula cell: its formula
+        columns re-run, and the re-run keeps one (app.write_formula_claim). Like the auto-run,
+        app.queue_entity_formula_runs commits the runs with a column.run_requested event."""
+        try:
+            entity_id = UUID(winner)
+        except ValueError:
+            log.warning("dispatch.malformed_merge", winner=winner)
+            return
+        row = await _fetch_one("select app.queue_entity_formula_runs(%s)", (entity_id,))
+        if row and row[0]:
+            log.info("column_run.merge_queued", entity_id=winner, runs=len(row[0]))
+
+    async def _is_derived_claim(payload: dict[str, Any]) -> bool:
+        """Was the claim written by a formula (its source record is derived:…)?"""
+        record = payload.get("source_record_id")
+        if not isinstance(record, str) or not _is_uuid(record):
+            return False
+        row = await _fetch_one(
+            "select exists (select 1 from public.source_record"
+            " where id = %s and connector_id like 'derived:%%')",
+            (record,),
+        )
+        return row is not None and row[0] is True
+
     async def _advance_stage(
         account_id: str, kind: str, activity_id: str | None, org_id: str, workspace_id: str
     ) -> None:
@@ -1456,7 +1542,19 @@ def build_app(
                     "dispatch.missing_entity", event_type=evt, event_id=event.get("event_id")
                 )
                 return
-            await _recompute_verdicts(str(entity_id), org_id)
+            if evt == "entity.merged":
+                await _recompute_verdicts(str(entity_id), org_id)
+                await _queue_merged_formula_runs(str(entity_id))
+                return
+            # A formula's derived claim restates evidence the verdict has already judged: it
+            # re-runs the formulas reading its column, but never re-judges (and never loops).
+            # Scoring does read it (fit, scale, timing, labels), so each account is re-scored:
+            # without a verdict change nothing else would reach score.compute.
+            if await _is_derived_claim(payload):
+                await _rescore_accounts(str(entity_id), org_id)
+            else:
+                await _recompute_verdicts(str(entity_id), org_id)
+            await _queue_auto_runs(event)
             return
         if not workspace_id:
             return
@@ -1617,6 +1715,18 @@ def build_app(
                     UUID(str(payload["workspace_id"])),
                     [str(k) for k in keys],
                 )
+        elif evt == "column.run_requested":
+            # A person asked for runs (P3): one job per run, locked by the run id.
+            run_ids = payload.get("run_ids")
+            if not isinstance(run_ids, list) or not all(
+                isinstance(r, str) and _is_uuid(r) for r in run_ids
+            ):
+                # Malformed payload: a retry would fail the same way, so drop it loudly.
+                log.warning(
+                    "dispatch.malformed_run_request", event_type=evt, event_id=event.get("event_id")
+                )
+            else:
+                await _defer_runs(run_ids)
         elif evt == "brief.version_published" and pool is not None:
             brief_id = payload.get("brief_id")
             version = payload.get("version")
