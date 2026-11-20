@@ -1,9 +1,11 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type Page } from '@playwright/test';
+import { expect, test, type BrowserContext, type Page } from '@playwright/test';
 import { NAV } from '../src/lib/nav';
-import { newUser, onboard, signIn, sql } from './support';
+import { FLYTBASE_DRAFT, newUser, onboard, signIn, sql } from './support';
 
 const sidebar = (page: Page) => page.getByRole('navigation', { name: 'Main' });
+const aside = (page: Page) => page.getByRole('complementary', { name: 'Sidebar' });
+const lens = (page: Page) => page.getByRole('combobox', { name: 'Brief lens' });
 const TOP_LABELS = NAV.map((i) => i.label);
 const SUB_LABELS = NAV.flatMap((i) => (i.children ?? []).map((c) => [i.label, c.label] as const));
 
@@ -142,6 +144,21 @@ test.describe('journey navigation', () => {
     await page.screenshot({ path: 'test-results/shell-phone-home.png', fullPage: true });
   });
 
+  test('at 390px the page header sits right under the sidebar, with no gap', async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    for (const path of ['/', '/email/inbox']) {
+      await page.goto(path);
+      await expect(sidebar(page).getByRole('link', { name: 'Home', exact: true })).toBeVisible();
+      await expect(lens(page)).toBeVisible();
+      const [side, header] = await Promise.all([aside(page).boundingBox(), page.locator('header').first().boundingBox()]);
+      expect(side && header, path).toBeTruthy();
+      const gap = header!.y - (side!.y + side!.height);
+      expect(gap, `${path}: header top vs sidebar bottom`).toBeGreaterThanOrEqual(-1);
+      expect(gap, `${path}: header top vs sidebar bottom`).toBeLessThanOrEqual(16);
+      await page.screenshot({ path: `test-results/shell-phone-${path === '/' ? 'home' : 'email-inbox'}-top.png` });
+    }
+  });
+
   test('the sidebar counts pending review decisions, and shows nothing at zero', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto('/');
@@ -168,5 +185,237 @@ test.describe('journey navigation', () => {
     const review = nav.getByRole('link', { name: /^Review\s*1\s*pending$/ });
     await expect(review).toBeVisible();
     await expect(review).toContainText('1');
+  });
+});
+
+/** A Brief in the workspace; `publishedHoursAgo` publishes version 1 that long ago (as Start pilot writes it). */
+async function seedBrief(
+  ws: { ws: string; org: string },
+  name: string,
+  state: 'Draft' | 'Pilot' | 'Active' | 'Paused' | 'Archived',
+  publishedHoursAgo: number | null,
+): Promise<string> {
+  const [{ id }] = await sql<{ id: string }>(
+    `insert into public.brief (org_id, workspace_id, name, state) values ($1, $2, $3, 'Draft') returning id`,
+    [ws.org, ws.ws, name],
+  );
+  if (publishedHoursAgo == null) {
+    if (state !== 'Draft') await sql(`update public.brief set state = $2 where id = $1`, [id, state]);
+    return id;
+  }
+  const [v] = await sql<{ id: string }>(
+    `insert into public.brief_version (brief_id, org_id, workspace_id, version, config, rubric, weights, change_note, published_at)
+     values ($1, $2, $3, 1, $4::jsonb, '{}', '{}', 'Pilot', now() - make_interval(hours => $5::int))
+     returning id`,
+    [id, ws.org, ws.ws, JSON.stringify(FLYTBASE_DRAFT), publishedHoursAgo],
+  );
+  await sql(`update public.brief set state = $2, current_version_id = $3, updated_at = now() where id = $1`, [id, state, v.id]);
+  return id;
+}
+
+/** A second workspace in the same organisation (the Owner sees every workspace of the org). */
+async function secondWorkspace(org: string, name = 'Second'): Promise<string> {
+  const [{ id }] = await sql<{ id: string }>(`insert into public.workspace (org_id, name) values ($1, $2) returning id`, [org, name]);
+  return id;
+}
+
+async function lensCookie(context: BrowserContext) {
+  return (await context.cookies()).find((c) => c.name === 'si_brief');
+}
+
+test.describe('Brief lens', () => {
+  let userId = '';
+
+  test.beforeEach(async ({ page, context }) => {
+    const user = await newUser('lens');
+    userId = user.id;
+    await signIn(context, user.email);
+    await onboard(page, 'FlytBase Lens');
+    await page.setViewportSize({ width: 1440, height: 900 });
+  });
+
+  test('with no cookie it shows the most recently published Pilot or Active Brief', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    await seedBrief(ws, 'Older Brief', 'Active', 48);
+    const newer = await seedBrief(ws, 'Newer Brief', 'Pilot', 2);
+    await seedBrief(ws, 'Draft Brief', 'Draft', null);
+    // Archived, though published last: never the lens and never listed.
+    await seedBrief(ws, 'Archived Brief', 'Archived', 1);
+
+    expect(await lensCookie(context)).toBeUndefined();
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(newer);
+    await expect(lens(page).locator('option:checked')).toHaveText('Newer Brief · Pilot');
+    await expect(lens(page).locator('option')).toHaveText(['All Briefs', 'Draft Brief', 'Newer Brief · Pilot', 'Older Brief']);
+    // Top of the sidebar, under the brand and above the nav; reachable by keyboard.
+    const brand = await aside(page).getByRole('link', { name: 'Signal Intel' }).boundingBox();
+    const select = await lens(page).boundingBox();
+    const home = await sidebar(page).getByRole('link', { name: 'Home', exact: true }).boundingBox();
+    expect(select!.y).toBeGreaterThan(brand!.y);
+    expect(select!.y).toBeLessThan(home!.y);
+    await lens(page).focus();
+    await expect(lens(page)).toBeFocused();
+    await page.screenshot({ path: 'test-results/shell-desktop-lens.png', fullPage: true });
+  });
+
+  test('choosing "All Briefs" persists across navigation', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    await seedBrief(ws, 'Ports Brief', 'Active', 5);
+    const latest = await seedBrief(ws, 'Mines Brief', 'Active', 1);
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(latest);
+
+    await lens(page).selectOption('all');
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
+    const cookie = (await lensCookie(context))!;
+    expect(cookie.httpOnly).toBe(true);
+    expect(cookie.sameSite).toBe('Lax');
+    const days = (cookie.expires - Date.now() / 1000) / 86400;
+    expect(days).toBeGreaterThan(89);
+    expect(days).toBeLessThan(91);
+
+    for (const path of ['/briefs', '/sources', '/email/inbox', '/']) {
+      await page.goto(path);
+      await expect(lens(page), path).toHaveValue('all');
+      await expect(lens(page).locator('option:checked'), path).toHaveText('All Briefs');
+    }
+  });
+
+  test('opening a Brief makes it the lens', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    const older = await seedBrief(ws, 'Harbour Brief', 'Active', 30);
+    const latest = await seedBrief(ws, 'Quarry Brief', 'Active', 1);
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(latest);
+
+    await page.goto(`/briefs/${older}`);
+    await expect(page.getByText('Brief · Active')).toBeVisible();
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:${older}`);
+    await expect(lens(page)).toHaveValue(older);
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(older);
+    await expect(lens(page).locator('option:checked')).toHaveText('Harbour Brief');
+  });
+
+  test('a URL or cookie naming an archived, deleted or foreign Brief falls back without error', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    const latest = await seedBrief(ws, 'Live Brief', 'Active', 1);
+    const other = await seedBrief(ws, 'Other Brief', 'Active', 10);
+    const archived = await seedBrief(ws, 'Retired Brief', 'Archived', 0);
+    const wsB = await secondWorkspace(ws.org);
+    const foreign = await seedBrief({ ws: wsB, org: ws.org }, 'Elsewhere Brief', 'Active', 0);
+
+    // A valid ?brief= outranks everything.
+    await page.goto(`/?brief=${other}`);
+    await expect(lens(page)).toHaveValue(other);
+
+    for (const bad of [archived, foreign, randomUUID(), 'not-a-brief']) {
+      await page.goto(`/?brief=${bad}`);
+      await expect(sidebar(page).getByRole('link', { name: 'Home', exact: true }), bad).toBeVisible();
+      await expect(lens(page), bad).toHaveValue(latest);
+      await expect(page.getByText(/Application error|could not be found/), bad).toHaveCount(0);
+    }
+
+    // An old cookie naming an archived Brief, or another workspace's Brief, is skipped too.
+    for (const value of [`${ws.ws}:${archived}`, `${ws.ws}:${foreign}`]) {
+      await context.addCookies([{ name: 'si_brief', value, domain: 'localhost', path: '/', sameSite: 'Lax', httpOnly: true }]);
+      await page.goto('/briefs');
+      await expect(lens(page), value).toHaveValue(latest);
+    }
+
+    // Choosing on a page whose URL names a Brief lands on the same page without it.
+    await page.goto(`/briefs?brief=${other}`);
+    await expect(lens(page)).toHaveValue(other);
+    await lens(page).selectOption('all');
+    await expect(page).toHaveURL(/\/briefs$/);
+    await expect(lens(page)).toHaveValue('all');
+    expect((await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
+  });
+
+  test('a user in two workspaces gets a lens resolved within each one', async ({ page, context }) => {
+    const a = await workspaceOf(userId);
+    const b = await secondWorkspace(a.org);
+    const alpha = await seedBrief(a, 'Alpha Brief', 'Active', 3);
+    const bravo = await seedBrief({ ws: b, org: a.org }, 'Bravo Brief', 'Pilot', 2);
+    const workspace = page.getByRole('combobox', { name: 'Workspace' });
+
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(alpha);
+    await lens(page).selectOption('all');
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${a.ws}:all`);
+
+    // In B the cookie set in A is ignored: B resolves to its own latest Brief.
+    await workspace.selectOption({ label: 'FlytBase Lens · Second' });
+    await expect(lens(page)).toHaveValue(bravo);
+    await expect(lens(page).locator('option')).toHaveText(['All Briefs', 'Bravo Brief · Pilot']);
+    expect((await lensCookie(context))?.value).toBe(`${a.ws}:all`);
+
+    await lens(page).selectOption('all');
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${b}:all`);
+
+    // And back in A, B's choice does not apply.
+    await workspace.selectOption({ label: 'FlytBase Lens · Default' });
+    await expect(lens(page)).toHaveValue(alpha);
+    await expect(lens(page).locator('option')).toHaveText(['All Briefs', 'Alpha Brief']);
+  });
+});
+
+test.describe('budget meter', () => {
+  let userId = '';
+
+  test.beforeEach(async ({ page, context }) => {
+    const user = await newUser('meter');
+    userId = user.id;
+    await signIn(context, user.email);
+    await onboard(page, 'FlytBase Meter');
+  });
+
+  const spend = (ws: { ws: string; org: string }, usd: number) =>
+    sql(
+      `insert into public.usage_ledger (org_id, workspace_id, capability, provider, model, unit, quantity, cost_usd, status)
+       values ($1, $2, 'judge', 'anthropic', 'e2e', 'ai_input_tokens', 1000, $3, 'ok')`,
+      [ws.org, ws.ws, usd],
+    );
+
+  test('85% of the monthly cap shows in mustard, 100% in lava; at 390px it moves to Settings', async ({ page }) => {
+    const ws = await workspaceOf(userId);
+    await sql(`insert into public.budget (org_id, workspace_id, period, cap_usd) values ($1, $2, 'month', 100)`, [ws.org, ws.ws]);
+    await spend(ws, 85);
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const meter = aside(page).getByRole('link', { name: /\$85\.00 \/ \$100\.00/ });
+    await expect(meter).toBeVisible();
+    await expect(meter).toHaveAttribute('href', '/settings');
+    await expect(meter).toHaveClass(/si-fam-mustard/);
+    await expect(meter).toHaveAttribute('data-level', 'warn');
+    await page.screenshot({ path: 'test-results/shell-desktop-budget.png', fullPage: true });
+
+    // Hidden from the phone row, and shown on Settings instead.
+    await page.setViewportSize({ width: 390, height: 844 });
+    await expect(meter).toBeHidden();
+    await page.goto('/settings');
+    await expect(page.locator('main').getByRole('link', { name: /\$85\.00 \/ \$100\.00/ })).toBeVisible();
+    await expect(aside(page).getByRole('link', { name: /\$85\.00/ })).toBeHidden();
+    await page.screenshot({ path: 'test-results/shell-phone-settings.png', fullPage: true });
+
+    await spend(ws, 20);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const over = aside(page).getByRole('link', { name: /\$105\.00 \/ \$100\.00/ });
+    await expect(over).toBeVisible();
+    await expect(over).toHaveClass(/si-fam-lava/);
+    await expect(over).toHaveAttribute('data-level', 'over');
+  });
+
+  test('with no monthly cap it shows the spend and "no cap"', async ({ page }) => {
+    const ws = await workspaceOf(userId);
+    await spend(ws, 12.5);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const meter = aside(page).getByRole('link', { name: /\$12\.50 · no cap/ });
+    await expect(meter).toBeVisible();
+    await expect(meter).toHaveAttribute('data-level', 'none');
+    await expect(meter).not.toHaveClass(/si-fam-/);
   });
 });

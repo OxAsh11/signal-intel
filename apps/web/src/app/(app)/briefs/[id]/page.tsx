@@ -1,9 +1,12 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
+import { cookies } from 'next/headers';
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgContext, atLeast } from '@/lib/org';
+import { LENS_COOKIE, lensCookieValue } from '@/lib/brief-lens';
+import { LensOnOpen } from '@/components/brief-lens';
 import { BriefIntakeLoading } from './brief-intake-loading';
 import { BriefEditor, StartPilotCard } from './brief-editor';
 import { StateControls } from './state-controls';
@@ -24,6 +27,8 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
     .eq('id', id).eq('workspace_id', ctx.workspace.id).maybeSingle();
 
   if (error || !brief) notFound();
+  // Opening a Brief makes it the lens (cookies can only be set from an action, so the page asks).
+  const lensIsThis = lensCookieValue((await cookies()).get(LENS_COOKIE)?.value, ctx.workspace.id) === id;
   const canEdit = atLeast(ctx.workspaceRole, 'Editor');
 
   const hasDraftChanges = !!brief.draft_config;
@@ -63,6 +68,7 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
 
   return (
     <>
+      {brief.state !== 'Archived' ? <LensOnOpen briefId={id} already={lensIsThis} /> : null}
       <div className="flex flex-wrap items-end justify-between gap-4">
         <div className="flex min-w-0 flex-col gap-2">
           <Link href="/briefs" className="text-[13px] text-ink-muted">‹ Briefs</Link>
