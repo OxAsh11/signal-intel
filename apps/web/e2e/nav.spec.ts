@@ -336,19 +336,41 @@ test.describe('Brief lens', () => {
       await expect(lens(page), value).toHaveValue(latest);
     }
 
-    // A tampered `next` that points off-site is refused: the choice is saved and the page stays put.
-    for (const next of ['/\t/evil.example', '//evil.example/x', 'https://evil.example/', String.raw`/\evil.example`, 'javascript:alert(1)']) {
+    // A tampered `next` that points off-site is refused: the choice is saved, the action answers
+    // with no redirect, nothing leaves localhost, and the page stays exactly where it was.
+    const offsite: string[] = [];
+    await page.route(/evil\.example/, (route) => {
+      offsite.push(route.request().url());
+      return route.abort();
+    });
+    const lensAction = () =>
+      page.waitForResponse((r) => r.request().method() === 'POST' && r.request().headers()['next-action'] !== undefined);
+    const tampered = [
+      '/\t/evil.example',
+      '//evil.example/x',
+      'https://evil.example/',
+      String.raw`/\evil.example`,
+      'javascript:alert(1)',
+      '/.//evil.example',
+      '/a/..//evil.example',
+    ];
+    for (const next of tampered) {
+      const label = JSON.stringify(next);
       await context.addCookies([
         { name: 'si_brief', value: encodeURIComponent(`${ws.ws}:${latest}`), domain: 'localhost', path: '/', sameSite: 'Lax', httpOnly: true },
       ]);
       await page.goto(`/briefs?brief=${other}`);
       await expect(lens(page)).toHaveValue(other);
       await page.locator('input[name="next"]').evaluate((el: HTMLInputElement, v) => (el.value = v), next);
+      const action = lensAction();
       await lens(page).selectOption('all');
-      await expect.poll(async () => (await lensCookie(context))?.value, JSON.stringify(next)).toBe(`${ws.ws}:all`);
+      const res = await action;
+      expect(res.headers()['x-action-redirect'], label).toBeUndefined();
+      await expect.poll(async () => (await lensCookie(context))?.value, label).toBe(`${ws.ws}:all`);
+      // A redirect, even to a local path, would have dropped `?brief=`: it is still there.
       const url = new URL(page.url());
-      expect(url.hostname, JSON.stringify(next)).toBe('localhost');
-      expect(url.pathname, JSON.stringify(next)).toBe('/briefs');
+      expect(`${url.host}${url.pathname}${url.search}`, label).toBe(`${new URL(res.url()).host}/briefs?brief=${other}`);
+      expect(offsite, label).toEqual([]);
     }
 
     // Choosing on a page whose URL names a Brief lands on the same page without it.
@@ -357,10 +379,14 @@ test.describe('Brief lens', () => {
     ]);
     await page.goto(`/briefs?brief=${other}`);
     await expect(lens(page)).toHaveValue(other);
+    const action = lensAction();
     await lens(page).selectOption('all');
+    // Control for the checks above: a real redirect does show in the action's response.
+    expect((await action).headers()['x-action-redirect']).toMatch(/^\/briefs(;|$)/);
     await expect(page).toHaveURL(/\/briefs$/);
     await expect(lens(page)).toHaveValue('all');
     await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
+    expect(offsite).toEqual([]);
   });
 
   test('a user in two workspaces gets a lens resolved within each one', async ({ page, context }) => {

@@ -34,13 +34,18 @@ export async function setBriefLens(form: FormData): Promise<void> {
 
 /**
  * `next` as a path on this site, or null. Parsed the way a browser would (which drops tabs and
- * newlines and reads `\` as `/`), so `/\t/evil.com` or `/\evil.com` can't pass as a local path.
+ * newlines and reads `\` as `/`), so `/\t/evil.com` or `/\evil.com` can't pass as a local path;
+ * and the normalised result must still start with exactly one `/`.
  */
 function sameSitePath(next: string): string | null {
   if (!next.startsWith('/')) return null;
   try {
     const url = new URL(next, 'http://x');
-    return url.origin === 'http://x' ? url.pathname + url.search : null;
+    if (url.origin !== 'http://x') return null;
+    // Guard the value that is sent, not only the parse: `/.//evil.com` parses on this origin but
+    // normalises to `//evil.com`, which a browser reads as protocol-relative.
+    const path = url.pathname + url.search;
+    return path.startsWith('/') && !path.startsWith('//') && !path.startsWith('/\\') ? path : null;
   } catch {
     return null;
   }
