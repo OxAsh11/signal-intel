@@ -72,7 +72,7 @@ export default async function SourcesPage() {
       </div>
 
       <Card family="pool" kind="feature" aria-labelledby="funnel-h">
-        <FamilyTag family="pool">Discovery · funnel</FamilyTag>
+        <FamilyTag family="pool">Sources · funnel</FamilyTag>
         <h2 id="funnel-h" className="si-h2 text-[20px]">What happened to every page</h2>
         <div className="grid grid-cols-[minmax(140px,240px)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3">
           {steps.map(([label, n, note]) => (

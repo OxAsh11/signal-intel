@@ -3,7 +3,7 @@ import { Suspense, type ReactNode } from 'react';
 import { navLinks } from '@/lib/nav';
 import { getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
-import { NavLinks } from './nav-links';
+import { NavCount, NavLinks } from './nav-links';
 import { MembershipGate } from './membership-gate';
 import { UserMenu } from './user-menu';
 import { WorkspaceSwitcher } from './workspace-switcher';
@@ -14,21 +14,25 @@ import { WorkspaceSwitcher } from './workspace-switcher';
  * scrolling row of top-level items above the page.
  */
 
-/** Pending decisions in the current workspace: identity review items plus verdict reviews. */
-async function reviewCount(): Promise<number> {
+/**
+ * Pending decisions in the current workspace (identity review items plus verdict reviews), as the
+ * mustard count on Review. Streams in on its own so the sidebar never waits on the database.
+ */
+async function ReviewCount() {
   const [ctx, supabase] = await Promise.all([getOrgContext(), createClient()]);
-  if (!ctx?.workspace || !supabase) return 0;
+  if (!ctx?.workspace || !supabase) return null;
   const ws = ctx.workspace.id;
-  const head = (table: 'review_item' | 'verdict_review') =>
-    supabase.from(table).select('id', { count: 'exact', head: true }).eq('workspace_id', ws).eq('status', 'pending');
+  const head = async (table: 'review_item' | 'verdict_review') => {
+    const { count, error } = await supabase
+      .from(table)
+      .select('id', { count: 'exact', head: true })
+      .eq('workspace_id', ws)
+      .eq('status', 'pending');
+    if (error) console.error(`sidebar review count: ${table} failed for workspace ${ws}: ${error.message}`);
+    return count ?? 0;
+  };
   const [items, verdicts] = await Promise.all([head('review_item'), head('verdict_review')]);
-  return (items.count ?? 0) + (verdicts.count ?? 0);
-}
-
-async function Sidebar() {
-  const review = await reviewCount();
-  // footer: the budget meter slot (P4 Task 3).
-  return <NavLinks nav={navLinks()} counts={{ review }} footer={null} />;
+  return <NavCount n={items + verdicts} />;
 }
 
 export function AppShell({ children }: { children: ReactNode }) {
@@ -41,9 +45,13 @@ export function AppShell({ children }: { children: ReactNode }) {
             Signal Intel
           </Link>
         </div>
-        {/* The nav reads the pathname and the review count, which are request data. */}
+        {/* The nav reads the pathname, which is request data; the review count streams in after it. */}
         <Suspense fallback={null}>
-          <Sidebar />
+          <NavLinks
+            nav={navLinks()}
+            counts={{ review: <Suspense fallback={null}><ReviewCount /></Suspense> }}
+            footer={null /* the budget meter slot (P4 Task 3) */}
+          />
         </Suspense>
       </aside>
       <div className="flex min-w-0 flex-col">

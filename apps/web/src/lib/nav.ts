@@ -118,3 +118,10 @@ export function navPath(pathname: string): string {
   const m = /^\/workspace\/[^/]+\/([^/]+)/.exec(pathname);
   return m ? (WORKSPACE_ALIASES[m[1]] ?? pathname) : pathname;
 }
+
+/** The menu an item belongs to: itself when it has sub-pages, else its parent (if any). */
+export function navSection(href: string): NavItem | null {
+  const item = navItem(href);
+  if (item.children) return item;
+  return NAV.find((p) => p.children?.some((c) => c.href === href)) ?? null;
+}

@@ -79,6 +79,15 @@ test.describe('journey navigation', () => {
     const main = page.locator('main');
     await expect(main.getByText('Coming with the Email engine', { exact: true })).toBeVisible();
     await expect(main.getByRole('link', { name: "Open today's inbox" })).toHaveAttribute('href', `/workspace/${ws}/inbox`);
+    // One highlighted row: the Inbox sub-item is the page; its parent is not highlighted on desktop.
+    const nav = sidebar(page);
+    const inbox = nav.getByRole('link', { name: 'Inbox', exact: true });
+    await expect(inbox).toHaveAttribute('aria-current', 'page');
+    await expect(inbox).toHaveClass(/si-nav-on/);
+    const parent = nav.getByRole('link', { name: 'Email engine', exact: true });
+    await expect(parent).toHaveAttribute('aria-current', 'true');
+    await expect(parent).not.toHaveClass(/si-nav-on/);
+    await expect(nav.locator('.si-nav-on')).toHaveCount(1);
     await page.screenshot({ path: 'test-results/shell-desktop-email-inbox.png', fullPage: true });
 
     await page.goto('/people');
@@ -96,6 +105,8 @@ test.describe('journey navigation', () => {
     await page.setViewportSize({ width: 390, height: 844 });
     for (const path of ['/', '/email', '/email/inbox', '/people']) {
       await page.goto(path);
+      // The nav streams in behind the shell: wait for it before reading what it renders.
+      await expect(sidebar(page).getByRole('link', { name: 'Home', exact: true })).toBeVisible();
       const links = await sidebar(page)
         .getByRole('link')
         .evaluateAll((els) =>
@@ -109,8 +120,24 @@ test.describe('journey navigation', () => {
       const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
       expect(overflow, `${path} scrolls sideways`).toBeLessThanOrEqual(1);
     }
+    // Sub-items move into the page's tab row: every Email engine page, sibling to sibling.
     await page.goto('/email/inbox');
+    const tabs = page.getByRole('navigation', { name: 'Email engine pages' });
+    await expect(tabs.getByRole('link')).toHaveText(['Sequences', 'Approvals', 'Inbox', 'Mailboxes']);
+    await expect(tabs.getByRole('link', { name: 'Inbox', exact: true })).toHaveAttribute('aria-current', 'page');
     await page.screenshot({ path: 'test-results/shell-phone-email-inbox.png', fullPage: true });
+    await tabs.getByRole('link', { name: 'Approvals', exact: true }).click();
+    await expect(page).toHaveURL(/\/email\/approvals$/);
+    await expect(page.getByRole('heading', { level: 1, name: 'Approvals', exact: true })).toBeVisible();
+    await expect(tabs.getByRole('link', { name: 'Approvals', exact: true })).toHaveAttribute('aria-current', 'page');
+    const tabOverflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
+    expect(tabOverflow, '/email/approvals scrolls sideways').toBeLessThanOrEqual(1);
+    // The CRM pages carry their own row, and on desktop the row is hidden (the sidebar lists them).
+    await page.goto('/crm');
+    await expect(page.getByRole('navigation', { name: 'CRM pages' }).getByRole('link')).toHaveText(['Pipeline', 'Meetings', 'Tasks']);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await expect(page.getByRole('navigation', { name: 'CRM pages' })).toBeHidden();
+    await page.setViewportSize({ width: 390, height: 844 });
     await page.goto('/');
     await page.screenshot({ path: 'test-results/shell-phone-home.png', fullPage: true });
   });

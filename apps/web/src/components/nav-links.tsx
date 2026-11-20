@@ -6,16 +6,21 @@ import { usePathname } from 'next/navigation';
 import { cx } from '@signal/ui';
 import { GROUP_LABELS, navPath, type NavLink } from '@/lib/nav';
 
-type Counts = { review?: number };
+/** Counts shown beside an item: server-rendered nodes (see NavCount), so they can stream in. */
+type Counts = { review?: ReactNode };
 
 const ORDER = ['find', 'work', 'engage', 'measure'] as const;
+
+/** The one highlighted row: the page the user is on (`si-nav-on` marks it for tests). */
+const ACTIVE = 'si-nav-on bg-signal-soft font-medium text-signal-strong hover:bg-signal-soft';
 
 /** A top-level item is active on its route or below it; Home only on `/`. */
 function isOn(href: string, path: string): boolean {
   return href === '/' ? path === '/' : path === href || path.startsWith(`${href}/`);
 }
 
-function Count({ n }: { n?: number }) {
+/** A mustard count of pending decisions; nothing at zero. */
+export function NavCount({ n }: { n?: number }) {
   if (!n) return null;
   return (
     <span className="rounded-[6px] bg-marker-soft px-1.5 font-mono text-[12px] text-caution">
@@ -37,8 +42,8 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
 
   const top = (item: NavLink) => {
     const childOn = item.children?.some((c) => c.href === path) ?? false;
-    const on = childOn || isOn(item.href, path);
-    const exact = item.children ? item.href === path : on;
+    const exact = item.children ? item.href === path : isOn(item.href, path);
+    const on = exact || childOn;
     return (
       <div key={item.key} className="contents md:flex md:flex-col md:gap-0.5">
         <Link
@@ -46,11 +51,14 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
           aria-current={exact ? 'page' : on ? 'true' : undefined}
           className={cx(
             'flex items-center justify-between gap-2 rounded-[4px] px-2.5 py-1.5 text-[14px] leading-5 whitespace-nowrap text-ink no-underline hover:bg-surface-sunken hover:no-underline',
-            on && 'bg-signal-soft font-medium text-signal-strong hover:bg-signal-soft',
+            exact && ACTIVE,
+            // Holds the current page: on desktop the sub-item carries the highlight and the parent is
+            // only medium weight; on phone sub-items are hidden, so the parent is highlighted.
+            !exact && childOn && 'bg-signal-soft font-medium text-signal-strong md:bg-transparent md:text-ink md:hover:bg-surface-sunken',
           )}
         >
           <span>{item.label}</span>
-          {item.key === 'review' ? <Count n={counts.review} /> : null}
+          {item.key === 'review' ? counts.review : null}
         </Link>
         {item.children?.map((c) => (
           <Link
@@ -59,7 +67,7 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
             aria-current={c.href === path ? 'page' : undefined}
             className={cx(
               'hidden rounded-[4px] py-1 pr-2.5 pl-[22px] text-[13px] leading-[18px] text-ink-muted no-underline hover:bg-surface-sunken hover:text-ink hover:no-underline md:block',
-              c.href === path && 'font-medium text-ink',
+              c.href === path && ACTIVE,
             )}
           >
             {c.label}

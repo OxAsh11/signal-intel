@@ -1,7 +1,8 @@
 import Link from 'next/link';
 import { Card, FamilyTag } from '@signal/ui';
-import type { NavItem } from '@/lib/nav';
+import { navLinks, navSection, type NavItem } from '@/lib/nav';
 import { getOrgContext } from '@/lib/org';
+import { SectionTabs } from './section-tabs';
 
 const COMING: Record<NonNullable<NavItem['placeholder']>, string> = {
   email: 'Coming with the Email engine',
@@ -17,8 +18,10 @@ const COMING: Record<NonNullable<NavItem['placeholder']>, string> = {
 export async function PlaceholderPage({ item }: { item: NavItem }) {
   const ctx = await getOrgContext();
   const ws = ctx?.workspace?.id;
+  const section = navSection(item.href);
   return (
     <>
+      {section?.children ? <SectionTabs label={section.label} items={navLinks(section.children)} /> : null}
       <div className="flex flex-col gap-3">
         <h1 className="si-h1">{item.label}</h1>
         <p className="si-lede">{item.job}</p>
