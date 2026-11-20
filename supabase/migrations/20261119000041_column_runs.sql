@@ -471,7 +471,8 @@ begin
 end $$;
 
 -- Finishes a running run: succeeded, no_data, condition_not_met or error, with finished_at and the
--- run's cost (its usage_ledger rows). A formula run ending no_data clears its cell first. A run
+-- run's cost (its usage_ledger rows). A formula run ending no_data clears its cell first; one ending
+-- error leaves the cell at most one active derived claim. A run
 -- that is not running is left alone. Returns the run's status afterwards.
 -- An auto-run formula whose inputs changed while it ran (app.run_inputs_hash now differs from the
 -- hash the run started with) queues one more run: the input claim's own auto-run found this run
@@ -496,6 +497,18 @@ begin
   end if;
   if p_status = 'no_data' and (select fill_method from public.predicate where id = r.predicate_id) = 'formula' then
     perform app.clear_formula_claims(p_run);
+  end if;
+  -- An errored formula run writes nothing, but its cell keeps at most one active derived claim
+  -- (after a merge the winner can hold two): the newest stays, the others are superseded by it.
+  if p_status = 'error' and (select fill_method from public.predicate where id = r.predicate_id) = 'formula' then
+    perform pg_advisory_xact_lock(hashtextextended(r.entity_id::text || ':' || r.predicate_id::text, 0));
+    with cell as (
+      select c.id, first_value(c.id) over (order by c.created_at desc, c.id desc) as keep
+        from public.claim c
+       where c.entity_id = r.entity_id and c.predicate_id = r.predicate_id and c.status = 'active'
+         and c.source_record_id = app.derived_source_record(r.workspace_id, 'formula'))
+    update public.claim c set status = 'superseded', superseded_by = cell.keep
+      from cell where c.id = cell.id and cell.id <> cell.keep;
   end if;
   update public.predicate_run
      set status = p_status,

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(112);
+select plan(114);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A = owner, J = Editor, K = Viewer.
@@ -636,6 +636,34 @@ select app.complete_formula_run((select v from ids where k = 'r_win'), 'true', '
 select is((select count(*)::int from public.claim where entity_id = (select v from ids where k = 'e_win')
              and predicate_id = (select v from ids where k = 'f') and status = 'active'), 1,
   '92. the re-run leaves exactly one active derived claim, even when its value matches one of them');
+
+-- ── A merged cell whose re-run errors keeps one active derived claim, the newest ──
+insert into ids select 'e_win2', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Merge Winner 2', 'tenant');
+insert into ids select 'e_lose2', app.create_entity((select v from ids where k = 'org'), 'company', 'CR Merge Loser 2', 'tenant');
+insert into public.account (org_id, workspace_id, entity_id)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v from ids where k in ('e_win2', 'e_lose2');
+insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, queued_at)
+select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), v, (select v from ids where k = 'f'), 1, now()
+  from ids where k in ('e_win2', 'e_lose2');
+select app.start_run(r.id)
+  from ids i join public.predicate_run r on r.entity_id = i.v and r.predicate_id = (select v from ids where k = 'f')
+ where i.k in ('e_win2', 'e_lose2');
+select app.complete_formula_run(r.id, case when i.k = 'e_win2' then 'true' else 'false' end::jsonb, '[]')
+  from ids i join public.predicate_run r on r.entity_id = i.v and r.predicate_id = (select v from ids where k = 'f')
+ where i.k in ('e_win2', 'e_lose2');
+select app.merge_entities((select v from ids where k = 'e_win2'), (select v from ids where k = 'e_lose2'), null);
+with x as (insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version)
+           values ((select v from ids where k = 'org'), (select v from ids where k = 'ws'), (select v from ids where k = 'e_win2'),
+                   (select v from ids where k = 'f'), 1) returning id)
+insert into ids select 'r_win2', id from x;
+select app.start_run((select v from ids where k = 'r_win2'));
+select is(app.finish_run((select v from ids where k = 'r_win2'), 'error', null, '[]', null, 'boom'), 'error',
+  '94. the merged cell''s re-run errors');
+select is((select array_agg(id) from public.claim where entity_id = (select v from ids where k = 'e_win2')
+             and predicate_id = (select v from ids where k = 'f') and status = 'active'),
+  (select array[id] from public.claim where entity_id = (select v from ids where k = 'e_win2')
+      and predicate_id = (select v from ids where k = 'f') order by created_at desc, id desc limit 1),
+  '95. an errored run leaves at most one active derived claim for the cell: the newest');
 
 -- ── M3: the cost of a global column is priced over the requesting workspace ──
 with x as (insert into public.predicate (key, label, value_type)
