@@ -32,6 +32,30 @@ log = get_logger(__name__)
 _SOURCE_RE = re.compile(r"\[SOURCE:([0-9a-fA-F\-]{36})\]")
 _EXCERPT_CHARS = 1500
 _MAX_SOURCE_CLAIMS = 60
+
+# When the entity last gained evidence from a source (a newer claim makes the last research
+# document out of date). A formula's derived claim (source record derived:...) restates other
+# claims, so it is not new evidence (R7).
+NEWEST_CLAIM_SQL = """
+    SELECT MAX(c.created_at) FROM public.claim c
+      JOIN public.source_record sr ON sr.id = c.source_record_id
+     WHERE c.entity_id = %s AND sr.connector_id NOT LIKE 'derived:%%'
+"""
+
+# The source material: the entity's live claims found in sources, with their quotes and their
+# records' excerpts. Derived claims are left out: research is written from stored sources.
+SOURCE_CLAIMS_SQL = """
+    SELECT sr.id, sr.url, left(sp.content, %s), p.key, c.value, c.quote
+      FROM public.claim c
+      JOIN public.predicate p ON p.id = c.predicate_id
+      JOIN public.source_record sr ON sr.id = c.source_record_id
+      LEFT JOIN public.source_payload sp ON sp.source_record_id = sr.id
+     WHERE c.entity_id = %s AND c.status = 'active'
+       AND (c.expires_at IS NULL OR c.expires_at > now())
+       AND sr.connector_id NOT LIKE 'derived:%%'
+     ORDER BY c.observed_at DESC
+     LIMIT %s
+"""
 # Used when the Brief has no research template (M1: "default applies").
 DEFAULT_SECTIONS = ["Company overview", "Evidence for the hypothesis", "Why now", "Open questions"]
 
@@ -134,10 +158,7 @@ async def generate_research_doc(
         # Check if any claims have been created after the doc was published
         async with pool.connection() as conn:
             async with conn.cursor() as cur:
-                await cur.execute(
-                    "SELECT MAX(c.created_at) FROM public.claim c WHERE c.entity_id = %s",
-                    (str(entity_id),),
-                )
+                await cur.execute(NEWEST_CLAIM_SQL, (str(entity_id),))
                 claims_row = await cur.fetchone()
 
         latest_claim_at = claims_row[0] if claims_row else None
@@ -155,18 +176,7 @@ async def generate_research_doc(
     async with pool.connection() as conn:
         async with conn.cursor() as cur:
             await cur.execute(
-                """
-                SELECT sr.id, sr.url, left(sp.content, %s), p.key, c.value, c.quote
-                FROM public.claim c
-                JOIN public.predicate p ON p.id = c.predicate_id
-                JOIN public.source_record sr ON sr.id = c.source_record_id
-                LEFT JOIN public.source_payload sp ON sp.source_record_id = sr.id
-                WHERE c.entity_id = %s AND c.status = 'active'
-                  AND (c.expires_at IS NULL OR c.expires_at > now())
-                ORDER BY c.observed_at DESC
-                LIMIT %s
-                """,
-                (_EXCERPT_CHARS, str(entity_id), _MAX_SOURCE_CLAIMS),
+                SOURCE_CLAIMS_SQL, (_EXCERPT_CHARS, str(entity_id), _MAX_SOURCE_CLAIMS)
             )
             source_rows = await cur.fetchall()
 

@@ -298,6 +298,57 @@ async def test_human_mark_holds_on_the_rubric_path(
     assert gateway.calls == []
 
 
+def _derived(monkeypatch: pytest.MonkeyPatch, *derived: str) -> list[list[str]]:
+    """Stands in for the derived-claim lookup: these ids are formula claims. Returns the asks."""
+    asked: list[list[str]] = []
+
+    async def lookup(pool: Any, ids: list[str]) -> set[str]:
+        asked.append(list(ids))
+        return {i for i in ids if i in derived}
+
+    monkeypatch.setattr(m05, "_derived_claim_ids", lookup)
+    return asked
+
+
+async def test_human_mark_holds_when_the_entity_has_a_derived_claim(
+    monkeypatch: pytest.MonkeyPatch, upsert: AsyncMock
+) -> None:
+    """The mark stored every active claim, a formula's too; the live claims leave it out."""
+    _use(monkeypatch, _brief(RUBRIC_CONFIG))
+    claims = [_claim("drone_programme", True)]
+    formula_claim = str(uuid4())
+    asked = _derived(monkeypatch, formula_claim)
+    held = (
+        "Likely",
+        {"human_override": True, "live_claim_ids": [str(claims[0][0]), formula_claim]},
+    )
+    gateway = RecordingGateway()
+    assert (
+        await m05.compute_verdict(_pool(claims, existing=held), gateway, uuid4(), uuid4(), _ctx())
+        == "Likely"
+    )  # type: ignore[arg-type]
+    upsert.assert_not_called()
+    assert asked == [[formula_claim]]
+
+
+@pytest.mark.parametrize("change", ["added", "removed"])
+async def test_human_mark_is_released_when_a_sourced_claim_changes(
+    monkeypatch: pytest.MonkeyPatch, upsert: AsyncMock, change: str
+) -> None:
+    _use(monkeypatch, _brief(RUBRIC_CONFIG))
+    first, second = _claim("drone_programme", True), _claim("industry", "energy")
+    formula_claim = str(uuid4())
+    _derived(monkeypatch, formula_claim)
+    stored = [str(first[0]), formula_claim] + ([str(second[0])] if change == "removed" else [])
+    claims = [first, second] if change == "added" else [first]
+    held = ("Likely", {"human_override": True, "live_claim_ids": stored})
+    pool = _pool(claims, existing=held)
+    assert (
+        await m05.compute_verdict(pool, RecordingGateway(), uuid4(), uuid4(), _ctx()) == "Confirmed"
+    )  # type: ignore[arg-type]
+    upsert.assert_called_once()
+
+
 def test_claim_source_falls_back_to_the_record_id() -> None:
     record = UUID(int=7)
     claim = (uuid4(), "k", True, "q", 90, datetime.now(UTC), None, record)

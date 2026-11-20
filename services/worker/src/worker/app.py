@@ -1454,6 +1454,21 @@ def build_app(
             )
         return len(rows)
 
+    async def _rescore_accounts(entity_id: str, org_id: str) -> int:
+        """Queue score.compute for every account of the entity, as verdict.changed does."""
+        rows = await _fetch_all(
+            "select id, workspace_id from public.account where entity_id = %s", (entity_id,)
+        )
+        for account_id, ws in rows:
+            await _enqueue(
+                "score.compute",
+                f"score:{account_id}",
+                account_id=str(account_id),
+                workspace_id=str(ws),
+                org_id=org_id,
+            )
+        return len(rows)
+
     async def _defer_runs(run_ids: list[str]) -> None:
         for run_id in run_ids:
             await _enqueue("column.run", f"run:{run_id}", run_id=run_id)
@@ -1533,7 +1548,11 @@ def build_app(
                 return
             # A formula's derived claim restates evidence the verdict has already judged: it
             # re-runs the formulas reading its column, but never re-judges (and never loops).
-            if not await _is_derived_claim(payload):
+            # Scoring does read it (fit, scale, timing, labels), so each account is re-scored:
+            # without a verdict change nothing else would reach score.compute.
+            if await _is_derived_claim(payload):
+                await _rescore_accounts(str(entity_id), org_id)
+            else:
                 await _recompute_verdicts(str(entity_id), org_id)
             await _queue_auto_runs(event)
             return

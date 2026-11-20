@@ -1071,9 +1071,14 @@ class _RoutedPool(_RowsPool):
     finds no subscription."""
 
     def __init__(
-        self, rows: list[tuple[Any, ...]], auto_runs: list[str], derived: bool = False
+        self,
+        rows: list[tuple[Any, ...]],
+        auto_runs: list[str],
+        derived: bool = False,
+        accounts: list[tuple[Any, ...]] | None = None,
     ) -> None:
         super().__init__(rows)
+        self.accounts = accounts or []
         self.auto_runs = auto_runs
         self.derived = derived
 
@@ -1100,6 +1105,8 @@ class _RoutedPool(_RowsPool):
                     return _RowsPool._Cur([(pool.auto_runs,)])
                 if "derived:" in sql:
                     return _RowsPool._Cur([(pool.derived,)])
+                if "select id, workspace_id from public.account" in sql:
+                    return _RowsPool._Cur(pool.accounts)
                 return _RowsPool._Cur(pool.rows)
 
             def cursor(self) -> _NoRows:
@@ -1189,9 +1196,13 @@ async def test_dispatch_claim_created_queues_auto_runs_through_the_outbox() -> N
 
 async def test_dispatch_derived_claim_queues_auto_runs_but_no_verdict() -> None:
     """A formula's own claim restates evidence already judged: it re-runs the formulas that read
-    its column, but never re-judges the verdict."""
+    its column, and re-scores each account of the entity (a fit or scale formula changes the
+    score), but never re-judges the verdict."""
     org_id, entity_id, ws, claim_id, record = (str(uuid4()) for _ in range(5))
-    pool = _RoutedPool([(ws,)], [str(uuid4())], derived=True)
+    account_a, account_b, ws_b = (str(uuid4()) for _ in range(3))
+    pool = _RoutedPool(
+        [(ws,)], [str(uuid4())], derived=True, accounts=[(account_a, ws), (account_b, ws_b)]
+    )
     connector = InMemoryConnector()
     await _dispatch_events(
         _pooled_app(connector, pool),
@@ -1214,6 +1225,12 @@ async def test_dispatch_derived_claim_queues_auto_runs_but_no_verdict() -> None:
     assert _jobs(connector, "verdict.compute") == []
     (check_args,) = [a for sql, a in pool.queries if "derived:" in sql]
     assert check_args == (record,)
+    scores = _jobs(connector, "score.compute")
+    assert sorted((j["queueing_lock"], j["args"]["workspace_id"]) for j in scores) == sorted(
+        [(f"score:{account_a}", ws), (f"score:{account_b}", ws_b)]
+    )
+    assert all(j["args"]["org_id"] == org_id for j in scores)
+    assert {j["args"]["account_id"] for j in scores} == {account_a, account_b}
     (auto_args,) = [a for sql, a in pool.queries if "app.queue_auto_runs" in sql]
     assert auto_args == (UUID(claim_id),)
 

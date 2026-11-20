@@ -192,7 +192,7 @@ Roadmap: [2026-11-18-redesign-roadmap.md](2026-11-18-redesign-roadmap.md), row P
   For `stale` and `errored`, "any column" means any predicate of the Brief, or of the workspace when no Brief is
   given.
 - **Cost and budget (T9):**
-  - **Cost per entity** (`app.column_cost_per_entity(predicate)`):
+  - **Cost per entity** (`app.column_cost_per_entity(predicate, workspace)`):
     - `formula` and `manual` cost 0;
     - `extract` costs one extract call per extracted source record of the entity: 3000 input and 500 output
       tokens at the Capability.EXTRACT model's prices from the price table `PgPriceBook` reads. The records per
@@ -512,7 +512,7 @@ Roadmap: [2026-11-18-redesign-roadmap.md](2026-11-18-redesign-roadmap.md), row P
   - P2: `backfill_record(pool, gateway, source_record_id, keys, ctx)`.
 - **Produces, SQL (0041):**
   - `alter type public.event_type add value 'column.run_requested'`;
-  - `app.column_cost_per_entity(p_predicate uuid) returns numeric`;
+  - `app.column_cost_per_entity(p_predicate uuid, p_ws uuid) returns numeric` (priced in the requesting workspace);
   - `app.remaining_budget_usd(p_ws uuid, p_brief uuid) returns numeric`, null when there is no cap;
   - `public.estimate_column_run(p_ws, p_predicate, p_mode, p_brief, p_filter, p_entity_ids)` returns
     `jsonb {count, per_entity_usd, cost_usd, remaining_usd, within_budget}`. It is Viewer+. `within_budget` is

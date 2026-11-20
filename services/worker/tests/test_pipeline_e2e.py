@@ -39,6 +39,7 @@ from psycopg_pool import AsyncConnectionPool
 import api.mcp_server as mcp_server
 import signal_core.modules.m04_identity as m04
 import signal_core.modules.m05_verdict as m05
+import signal_core.modules.m06_research as m06
 import signal_core.modules.m08_scoring as m08
 import signal_core.modules.m13_integrations as m13
 import signal_core.modules.m15_account_card as m15
@@ -1859,6 +1860,55 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         assert card and active_before not in card
         scored = [r[0] for r in await db.admin(m08.CLAIMS_SQL, (entity,))]
         assert active_before in scored
+        # Research is written from sourced claims only, and a new derived claim never makes the
+        # last research document look out of date.
+        research = await db.admin(
+            m06.SOURCE_CLAIMS_SQL, (m06._EXCERPT_CHARS, entity, m06._MAX_SOURCE_CLAIMS)
+        )
+        assert research and "has_programme_and_sites" not in [r[3] for r in research]
+        newest_sourced = await db.one(
+            "select max(c.created_at) from public.claim c join public.source_record sr"
+            " on sr.id = c.source_record_id where c.entity_id = %s"
+            " and sr.connector_id not like 'derived:%%'",
+            (entity,),
+        )
+        assert await db.one(m06.NEWEST_CLAIM_SQL, (entity,)) == newest_sourced
+
+        # N2: a human mark holds while the sourced evidence is unchanged, although the mark
+        # stored the derived claim among the entity's active claims; a new sourced claim ends it.
+        ctx = CallContext(ORG_P3, WS_P3, None, None, "verdict.compute", {})
+        verdict_id, verdict_value = (
+            await db.admin(
+                "select v.id, v.value::text from public.verdict v"
+                " join public.brief b on b.current_version_id = v.brief_version_id"
+                " where v.entity_id = %s and b.id = %s",
+                (entity, BRIEF_P3),
+            )
+        )[0]
+        assert verdict_value == "Confirmed"
+        review = await db.one(
+            "insert into public.verdict_review (org_id, workspace_id, verdict_id, reason,"
+            " verdict_value) values (%s, %s, %s, 'sample', 'Confirmed') returning id",
+            (ORG_P3, WS_P3, verdict_id),
+        )
+        await _as_p3_user(
+            db,
+            "select public.resolve_verdict_review(%s, 'correct', 'Likely', 'one source only')",
+            (review,),
+        )
+        stored = await db.one(
+            "select inputs -> 'live_claim_ids' from public.verdict where id = %s", (verdict_id,)
+        )
+        assert str(active_before) in stored
+        assert await m05.compute_verdict(pool, gateway, entity, WS_P3, ctx) == "Likely"  # type: ignore[arg-type]
+        await db.admin(
+            "select app.create_claim(%s, %s, %s, '\"utilities\"'::jsonb, 'a grid utility',"
+            " null, null, %s, now(), %s, 80::smallint)",
+            (ORG_P3, entity, predicates["industry"], record, CANARY_EXTRACTOR_VERSION),
+        )
+        assert await m05.compute_verdict(pool, gateway, entity, WS_P3, ctx) == "Confirmed"  # type: ignore[arg-type]
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
 
         # A redelivered job for that finished run does nothing.
         last_run = await db.one(
@@ -1917,6 +1967,15 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
                     "inputs": ["drone_programme"],
                     "role": "info",
                 },
+                {
+                    "key": "drone_fleet",
+                    "label": "Drone fleet",
+                    "value_type": "number",
+                    "fill_method": "formula",
+                    "formula": "if(drone_programme, 500, 0)",
+                    "inputs": ["drone_programme"],
+                    "role": "scale",
+                },
             ],
             "evidence_rules": FLYTBASE["evidence_rules"],
         }
@@ -1942,6 +2001,20 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         await _drain(app, connector, pool)
         assert _failed_jobs(connector) == []
         assert await cell(programme_text) == ("derived", '"runs drones"')
+        # N1: the derived scale claim reaches the score with no verdict change (site_count is
+        # gone, so the scale comes from the formula alone: log1p(500) * 10).
+        score = await db.admin(
+            "select s.scale, s.explanation -> 'scale' -> 'claim_ids' from public.score s"
+            " join public.account a on a.id = s.account_id"
+            " where a.entity_id = %s and s.brief_version_id = %s",
+            (entity, v2),
+        )
+        fleet_claim = await db.one(
+            "select c.id from public.claim c join public.predicate p on p.id = c.predicate_id"
+            " where c.entity_id = %s and p.key = 'drone_fleet' and c.status = 'active'",
+            (entity,),
+        )
+        assert score == [(62, [str(fleet_claim)])]
         assert await db.one(sourced_sql, (entity,)) == sourced_before
         assert "extraction" not in gateway.calls[calls_before:]
 
