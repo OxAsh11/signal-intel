@@ -137,12 +137,12 @@ export default async function TodayPage() {
       </Card>
 
       <div className="si-tiles">
-        <MetricTile family="pool" label="Pages read" value={fmt(fetched)} href="/discovery" delta="last 7 days" version="def v1" />
+        <MetricTile family="pool" label="Pages read" value={fmt(fetched)} href="/sources" delta="last 7 days" version="def v1" />
         <MetricTile family="mint" label="Matches" value={fmt(matched)} href={`${base}/accounts`} delta={`${fmt(confirmed)} Confirmed`} version="def v1" />
         <MetricTile family="mint" label="Accounts" value={fmt((stageRows.data ?? []).length)} href={`${base}/accounts`} delta="in this workspace" version="def v1" />
         <MetricTile family="grass" label="Replies to classify" value={fmt(unclassified)} href={`${base}/inbox`} version="def v1" />
         <MetricTile family="grass" label="Open tasks" value={fmt(openTasks)} href={`${base}/meetings`} version="def v1" />
-        <MetricTile family="lava" label="Radars failing" value={fmt(troubledRadars)} href="/discovery" delta="silent or in error" version="def v1" />
+        <MetricTile family="lava" label="Radars failing" value={fmt(troubledRadars)} href="/sources" delta="silent or in error" version="def v1" />
       </div>
 
       <div className="si-cols">
@@ -213,7 +213,7 @@ export default async function TodayPage() {
           </Card>
 
           <Card family="pool" aria-labelledby="radars-h">
-            <FamilyTag family="pool">Discovery</FamilyTag>
+            <FamilyTag family="pool">Sources</FamilyTag>
             <h2 id="radars-h" className="si-h2">Radars</h2>
             {(radarRows.data ?? []).length ? (
               (radarRows.data ?? []).map((r) => (
@@ -222,7 +222,7 @@ export default async function TodayPage() {
             ) : (
               <p className="m-0 text-[13px]">No radars yet. Publishing a Brief creates them from its sources.</p>
             )}
-            <Link href="/discovery" className="text-[13px] text-ink underline">Open Discovery</Link>
+            <Link href="/sources" className="text-[13px] text-ink underline">Open Sources</Link>
           </Card>
 
           <Card family="grass" aria-labelledby="stages-h">
