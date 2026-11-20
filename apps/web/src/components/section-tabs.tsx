@@ -10,13 +10,17 @@ import type { NavLink } from '@/lib/nav';
  */
 export function SectionTabs({ label, items }: { label: string; items: NavLink[] }) {
   const pathname = usePathname();
+  // The hide lives on a wrapper with no si-* class: si-* rules are unlayered and would beat a
+  // Tailwind utility on the same element (`.si-tabs { display: flex }` over `md:hidden`).
   return (
-    <nav aria-label={`${label} pages`} className="si-tabs md:hidden">
-      {items.map((i) => (
-        <Link key={i.key} href={i.href} className="si-tab" aria-current={i.href === pathname ? 'page' : undefined}>
-          {i.label}
-        </Link>
-      ))}
-    </nav>
+    <div className="min-w-0 md:hidden">
+      <nav aria-label={`${label} pages`} className="si-tabs">
+        {items.map((i) => (
+          <Link key={i.key} href={i.href} className="si-tab" aria-current={i.href === pathname ? 'page' : undefined}>
+            {i.label}
+          </Link>
+        ))}
+      </nav>
+    </div>
   );
 }

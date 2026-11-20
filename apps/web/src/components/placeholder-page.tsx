@@ -36,7 +36,7 @@ export async function PlaceholderPage({ item }: { item: NavItem }) {
         <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,260px),1fr))] gap-3">
           {item.children.map((c) => (
             <Card key={c.key} aria-labelledby={`card-${c.key}`}>
-              <h2 id={`card-${c.key}`} className="si-h2 text-[17px]">
+              <h2 id={`card-${c.key}`} className="si-h2">
                 <Link href={c.href} className="text-ink no-underline hover:underline">{c.label}</Link>
               </h2>
               <p className="m-0 text-ink-body">{c.job}</p>
