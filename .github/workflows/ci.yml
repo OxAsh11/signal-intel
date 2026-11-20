@@ -138,5 +138,6 @@ jobs:
           path: |
             apps/web/test-results/brief-*.png
             apps/web/test-results/shell-*.png
+            apps/web/test-results/home-*.png
           if-no-files-found: warn
           retention-days: 14
