@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
-import { expect, test, type BrowserContext, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { NAV } from '../src/lib/nav';
-import { FLYTBASE_DRAFT, newUser, onboard, signIn, sql } from './support';
+import { FLYTBASE_DRAFT, lensCookie, newUser, onboard, signIn, sql } from './support';
 
 const sidebar = (page: Page) => page.getByRole('navigation', { name: 'Main' });
 const aside = (page: Page) => page.getByRole('complementary', { name: 'Sidebar' });
@@ -217,18 +217,6 @@ async function seedBrief(
 async function secondWorkspace(org: string, name = 'Second'): Promise<string> {
   const [{ id }] = await sql<{ id: string }>(`insert into public.workspace (org_id, name) values ($1, $2) returning id`, [org, name]);
   return id;
-}
-
-/**
- * The lens cookie as the app reads it. Next's cookies().set URL-encodes the value, so the browser
- * holds `<ws>%3A<brief>`; the raw value must be exactly that encoding of `<ws>:<brief>`.
- */
-async function lensCookie(context: BrowserContext) {
-  const c = (await context.cookies()).find((x) => x.name === 'si_brief');
-  if (!c) return undefined;
-  const value = decodeURIComponent(c.value);
-  expect(c.value, 'si_brief is stored URL-encoded').toBe(encodeURIComponent(value));
-  return { ...c, value };
 }
 
 test.describe('Brief lens', () => {

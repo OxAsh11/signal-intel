@@ -51,13 +51,13 @@ export async function AccountsToActCard(props: HomeCardProps) {
                   <td>
                     <Link href={r.href} className="font-medium text-ink no-underline hover:underline">{r.name}</Link>
                   </td>
-                  <td>{r.verdict ? <VerdictBadge verdict={r.verdict} /> : <span className="si-meta">not judged</span>}</td>
-                  <td>{r.band ? <BandChip band={r.band} /> : <span className="si-meta">not scored</span>}</td>
+                  <td>{r.verdict ? <VerdictBadge verdict={r.verdict} /> : <span className="text-ink-muted">Not judged</span>}</td>
+                  <td>{r.band ? <BandChip band={r.band} /> : <span className="text-ink-muted">Not scored</span>}</td>
                   <td className="max-w-[40ch]">
                     {r.why_now ? (
                       <q className="font-serif text-[14px] leading-[21px] text-ink">{r.why_now.quote}</q>
                     ) : (
-                      <span className="si-meta">no quoted claim yet</span>
+                      <span className="text-ink-muted">No quoted claim yet</span>
                     )}
                   </td>
                   <td>

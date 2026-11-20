@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { expect, test, type Page } from '@playwright/test';
-import { newUser, onboard, signIn, sql } from './support';
+import { lensCookie, newUser, onboard, signIn, sql } from './support';
 
 const BRIEF = 'Drone inspection, Indian energy';
 const QUOTE = 'Tender: drone survey of 3 solar parks, closes 2 Dec';
@@ -284,8 +284,9 @@ test.describe('Home', () => {
     expect(needsBox && changesBox).toBeTruthy();
     expect(Math.abs(needsBox!.x - changesBox!.x), 'cards share one column').toBeLessThanOrEqual(1);
     expect(changesBox!.y, 'What changed sits below Needs you').toBeGreaterThan(needsBox!.y);
-    await noSidewaysScroll(page, 'Home at 390px');
+    // Screenshot first, so the artifact shows the page even if the overflow check fails.
     await page.screenshot({ path: 'test-results/home-phone.png', fullPage: true });
+    await noSidewaysScroll(page, 'Home at 390px');
   });
 
   test('switching the lens to "All Briefs" shows the workspace in the header', async ({ page, context }) => {
@@ -298,7 +299,7 @@ test.describe('Home', () => {
     await expect(lens(page)).toHaveValue(s.brief);
 
     await lens(page).selectOption('all');
-    await expect.poll(async () => (await context.cookies()).find((c) => c.name === 'si_brief')?.value).toBe(`${w.ws}:all`);
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${w.ws}:all`);
     await expect(header.getByRole('link', { name: 'Default', exact: true })).toHaveAttribute('href', '/briefs');
     await expect(header).toContainText('All Briefs');
     await expect(header.getByRole('link', { name: '1 Pilot or Active Brief' })).toHaveAttribute('href', '/briefs');

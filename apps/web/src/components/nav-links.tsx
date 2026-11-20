@@ -78,9 +78,11 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
   };
 
   return (
+    // relative: the phone row scrolls sideways, and it must be the containing block of the
+    // absolutely positioned sr-only text in its counts, or that text widens the page.
     <nav
       aria-label="Main"
-      className="flex min-w-0 gap-1 overflow-x-auto px-3 pb-3 md:flex-1 md:flex-col md:gap-0.5 md:overflow-x-hidden md:overflow-y-auto md:pb-4"
+      className="relative flex min-w-0 gap-1 overflow-x-auto px-3 pb-3 md:flex-1 md:flex-col md:gap-0.5 md:overflow-x-hidden md:overflow-y-auto md:pb-4"
     >
       {home.map(top)}
       {ORDER.map((g) => (
