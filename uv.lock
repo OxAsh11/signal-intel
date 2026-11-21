@@ -1384,6 +1384,22 @@ wheels = [
 ]
 
 [[package]]
+name = "sarvamai"
+version = "0.1.48"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "httpx" },
+    { name = "pydantic" },
+    { name = "pydantic-core" },
+    { name = "typing-extensions" },
+    { name = "websockets" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/00/b3/ad5597ac688a16e85fdaebcbf7203260d2c45b27a0033279b05f77bd2845/sarvamai-0.1.48.tar.gz", hash = "sha256:ae05863bd7763e5187229b396cf7c9b84962c41bb3041ac4aeb4c7c1533d80eb", size = 286653, upload-time = "2026-11-19T20:26:30.065Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/f0/c4/1858c1f3f7cfec4298bcbc552969a8a7187008fd02e3e1e5132ea8131291/sarvamai-0.1.48-py3-none-any.whl", hash = "sha256:8f991cb66dd5825ba54fb798a9f6781d8dfa02c1391d6876219b4875a856387a", size = 591833, upload-time = "2026-11-19T20:26:28.732Z" },
+]
+
+[[package]]
 name = "shellingham"
 version = "1.5.4"
 source = { registry = "https://pypi.org/simple" }
@@ -1429,6 +1445,7 @@ version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
     { name = "api" },
+    { name = "sarvamai" },
     { name = "signal-core" },
     { name = "worker" },
 ]
@@ -1444,6 +1461,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "api", editable = "services/api" },
+    { name = "sarvamai", specifier = ">=0.1.48" },
     { name = "signal-core", editable = "packages/signal_core" },
     { name = "worker", editable = "services/worker" },
 ]
