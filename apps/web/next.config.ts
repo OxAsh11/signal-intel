@@ -14,6 +14,16 @@ const nextConfig: NextConfig = {
   poweredByHeader: false,
   // CSV radar uploads go through a server action; the default 1 MB would refuse most lists.
   experimental: { serverActions: { bodySizeLimit: '11mb' } },
+  // P4 navigation: old routes fold into the journey's names (Discovery is now Sources; campaigns,
+  // inbox and meetings move under the Email engine and CRM menus).
+  async redirects() {
+    return [
+      { source: '/discovery', destination: '/sources', permanent: true },
+      { source: '/campaigns', destination: '/email/sequences', permanent: true },
+      { source: '/inbox', destination: '/email/inbox', permanent: true },
+      { source: '/meetings', destination: '/crm/meetings', permanent: true },
+    ];
+  },
   turbopack: {
     rules: {
       '*.css': {

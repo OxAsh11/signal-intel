@@ -1,5 +1,6 @@
 import type { Metadata } from 'next';
 import { Suspense } from 'react';
+import { BudgetMeter } from '@/components/budget-meter';
 import { ApiAccess } from './api-access';
 import { MembersAndAccess } from './members';
 import { UsageAndBudgets } from './usage';
@@ -14,6 +15,12 @@ export default function SettingsPage({ searchParams }: PageProps<'/settings'>) {
         <p className="si-lede">
           Members and access, API tokens, integrations and webhooks, AI usage and budgets.
         </p>
+      </div>
+      {/* Phone: the sidebar row has no room for the budget meter, so Settings shows it. */}
+      <div className="self-start md:hidden">
+        <Suspense fallback={null}>
+          <BudgetMeter className="border border-line" />
+        </Suspense>
       </div>
       <Suspense fallback={<p className="m-0 text-ink-muted">Loading members…</p>}>
         <MembersAndAccess />

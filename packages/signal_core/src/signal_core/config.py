@@ -18,7 +18,11 @@ class Settings(BaseSettings):
     database_url_session: SecretStr | None = None
 
     anthropic_api_key: SecretStr | None = None
+    sarvam_api_key: SecretStr | None = None
     voyage_api_key: SecretStr | None = None
+    # Which provider serves the chat capabilities; models below must match it
+    # (anthropic -> claude-*, sarvam -> glm5.3 etc., priced in public.model_price).
+    ai_chat_provider: Literal["anthropic", "sarvam"] = "anthropic"
     ai_model_extract: str = "claude-sonnet-5-5"
     ai_model_judge: str = "claude-sonnet-5-5"
     ai_model_prejudge: str = "claude-haiku-5-5"

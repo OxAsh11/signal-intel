@@ -129,11 +129,15 @@ jobs:
             apps/web/playwright-report
             apps/web/test-results
           retention-days: 7
-      # The Brief page on desktop and phone, to look at on every run (e2e/brief.spec.ts).
+      # The Brief page and the shell on desktop and phone, to look at on every run
+      # (e2e/brief.spec.ts, e2e/nav.spec.ts).
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: brief-screens
-          path: apps/web/test-results/brief-*.png
+          path: |
+            apps/web/test-results/brief-*.png
+            apps/web/test-results/shell-*.png
+            apps/web/test-results/home-*.png
           if-no-files-found: warn
           retention-days: 14
