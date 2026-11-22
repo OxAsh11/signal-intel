@@ -27,7 +27,14 @@ async function ReviewCount() {
   if (!ctx?.workspace || !supabase) return null;
   const ws = ctx.workspace.id;
   const { data, error } = await supabase.rpc('sidebar_counts', { p_ws: ws });
-  if (error) console.error(`sidebar counts failed for workspace ${ws}: ${error.message}`);
+  if (error) {
+    console.error(`sidebar counts failed for workspace ${ws}: ${error.message}`);
+    return (
+      <span title="Couldn't load" className="font-mono text-[12px] text-ink-muted">
+        —
+      </span>
+    );
+  }
   return <NavCount n={Number((data as { review?: number } | null)?.review ?? 0)} />;
 }
 

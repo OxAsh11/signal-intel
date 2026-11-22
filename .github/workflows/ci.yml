@@ -139,5 +139,6 @@ jobs:
             apps/web/test-results/brief-*.png
             apps/web/test-results/shell-*.png
             apps/web/test-results/home-*.png
+            apps/web/test-results/screens-*.png
           if-no-files-found: warn
           retention-days: 14

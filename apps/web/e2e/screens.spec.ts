@@ -10,6 +10,9 @@ const WIDTHS = [
   { width: 390, height: 844 },
 ];
 
+// Per-route screenshots (uploaded by CI as the brief-screens artifact) at desktop and phone.
+const SHOT_WIDTHS = new Set([1440, 390]);
+
 test.describe('every screen', () => {
   test.beforeEach(async ({ page, context }) => {
     const user = await newUser('screens');
@@ -34,6 +37,10 @@ test.describe('every screen', () => {
         await expect(page.getByText('Application error'), `${s} has no error page`).toHaveCount(0);
         const overflow = await page.evaluate(() => document.documentElement.scrollWidth - window.innerWidth);
         expect(overflow, `${s} scrolls sideways at ${viewport.width}px`).toBeLessThanOrEqual(1);
+        if (SHOT_WIDTHS.has(viewport.width)) {
+          const slug = s.replace(/^\//, '').replace(/[^a-z0-9]+/gi, '-') || 'home';
+          await page.screenshot({ path: `test-results/screens-${slug}-${viewport.width}.png`, fullPage: true });
+        }
       }
       expect(errors, 'browser errors').toEqual([]);
     });

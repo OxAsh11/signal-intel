@@ -36,7 +36,13 @@ export async function NeedsYouCard(props: HomeCardProps) {
     <Card family="mustard" aria-labelledby="home-needs">
       <div className="flex items-center justify-between gap-2">
         <h2 id="home-needs" className="si-h2">Needs you</h2>
-        <FamilyTag family="mustard">{total === 0 ? 'Nothing waiting' : `${fmt(total)} waiting`}</FamilyTag>
+        {total === 0 ? (
+          <FamilyTag family="mustard">Nothing waiting</FamilyTag>
+        ) : (
+          <Link href="/review" className="no-underline hover:no-underline">
+            <FamilyTag family="mustard">{fmt(total)} waiting</FamilyTag>
+          </Link>
+        )}
       </div>
       <ul className="m-0 list-none p-0">
         {rows.map((r, i) => (
