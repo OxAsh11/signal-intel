@@ -6,9 +6,11 @@ import { createClient } from '@/lib/supabase/server';
 import {
   classifyOverdueReply,
   createNewAction,
+  dismissWrongAction,
   matchMeeting,
   mergeAction,
   resolveVerdictReview,
+  restoreWrongAction,
   skipAction,
 } from './review-actions';
 
@@ -29,6 +31,20 @@ type IdentityRow = {
   created_at: string;
   mention: One<{ raw_name: string | null; raw_domain: string | null; raw_country: string | null; entity_type: string | null }>;
   entity: One<{ display_name: string | null }>;
+};
+type WrongClaimRow = {
+  id: string;
+  reason: string | null;
+  created_at: string;
+  claim: One<{
+    id: string;
+    value: unknown;
+    quote: string | null;
+    observed_at: string;
+    entity: One<{ display_name: string | null }>;
+    predicate: One<{ label: string | null; key: string }>;
+    source: One<{ url: string | null }>;
+  }>;
 };
 type VerdictReviewRow = {
   id: string;
@@ -170,7 +186,7 @@ export default async function ReviewPage() {
   const canTriage = isAdmin || atLeast(ctx.workspaceRole, 'Operator'); // replies and meetings
   const cutoff = await overdueCutoff();
 
-  const [identityRes, verdictRes, replyRes, meetingRes] = await Promise.all([
+  const [identityRes, wrongRes, verdictRes, replyRes, meetingRes] = await Promise.all([
     supabase
       .from('review_item')
       .select(
@@ -179,8 +195,23 @@ export default async function ReviewPage() {
          entity:candidate_entity ( display_name )`,
       )
       .eq('workspace_id', ws)
+      .eq('type', 'identity')
       .eq('status', 'pending')
       .order('match_confidence', { ascending: false })
+      .limit(50),
+    supabase
+      .from('review_item')
+      .select(
+        `id, reason, created_at,
+         claim:claim_id ( id, value, quote, observed_at,
+           entity:entity_id ( display_name ),
+           predicate:predicate_id ( label, key ),
+           source:source_record_id ( url ) )`,
+      )
+      .eq('workspace_id', ws)
+      .eq('type', 'claim_wrong')
+      .eq('status', 'pending')
+      .order('created_at')
       .limit(50),
     supabase
       .from('verdict_review')
@@ -214,8 +245,9 @@ export default async function ReviewPage() {
       .limit(50),
   ]);
 
-  const failed = [identityRes, verdictRes, replyRes, meetingRes].find((r) => r.error);
+  const failed = [identityRes, wrongRes, verdictRes, replyRes, meetingRes].find((r) => r.error);
   const identity = (identityRes.data ?? []) as unknown as IdentityRow[];
+  const wrong = (wrongRes.data ?? []) as unknown as WrongClaimRow[];
   const verdictReviews = (verdictRes.data ?? []) as unknown as VerdictReviewRow[];
   const replies = (replyRes.data ?? []) as unknown as ReplyRow[];
   const meetings = (meetingRes.data ?? []) as unknown as MeetingRow[];
@@ -242,7 +274,7 @@ export default async function ReviewPage() {
 
   const conflicts = verdictReviews.filter((r) => r.reason === 'conflict');
   const samples = verdictReviews.filter((r) => r.reason === 'sample');
-  const total = identity.length + verdictReviews.length + replies.length + meetings.length;
+  const total = identity.length + wrong.length + verdictReviews.length + replies.length + meetings.length;
 
   const verdictCard = (r: VerdictReviewRow) => {
     const v = one(r.verdict);
@@ -338,6 +370,60 @@ export default async function ReviewPage() {
                   <form action={skipAction.bind(null, item.id)}>
                     <Button type="submit" variant="quiet" size="sm">
                       Skip
+                    </Button>
+                  </form>
+                </div>
+              ) : null}
+            </Card>
+          );
+        })}
+      </Section>
+
+      <Section
+        title="Values marked wrong"
+        count={wrong.length}
+        hint="Someone marked these values wrong, so they no longer count. Dismiss to keep them out, or restore a value that was right after all."
+      >
+        {wrong.map((item) => {
+          const c = one(item.claim);
+          const column = one(c?.predicate ?? null);
+          const url = one(c?.source ?? null)?.url ?? undefined;
+          let host = 'stored source';
+          try {
+            if (url) host = new URL(url).hostname.replace(/^www\./, '');
+          } catch {}
+          return (
+            <Card key={item.id}>
+              <div className="flex flex-col gap-1">
+                <span className="text-[14px] font-medium">
+                  Marked wrong: {column?.label ?? column?.key ?? 'Column'} = {c ? shown(c.value) : '—'} on{' '}
+                  {one(c?.entity ?? null)?.display_name ?? 'Unknown account'}
+                </span>
+                <span className="text-[13px] text-ink-muted">
+                  Reason: {item.reason ?? '—'} · {day(item.created_at)}
+                </span>
+              </div>
+              {c ? (
+                <EvidenceQuote
+                  claim={`${column?.label ?? column?.key ?? 'Claim'} = ${shown(c.value)}`}
+                  sourceType="marked wrong"
+                  sourceName={host}
+                  sourceHref={url}
+                  observed={day(c.observed_at)}
+                >
+                  {c.quote ? <mark>{c.quote}</mark> : 'No quote: structured source'}
+                </EvidenceQuote>
+              ) : null}
+              {canDecide ? (
+                <div className="flex flex-wrap items-end gap-2">
+                  <form action={dismissWrongAction.bind(null, item.id)}>
+                    <Button type="submit" variant="primary" size="sm">
+                      Dismiss
+                    </Button>
+                  </form>
+                  <form action={restoreWrongAction.bind(null, item.id)}>
+                    <Button type="submit" variant="quiet" size="sm">
+                      Restore
                     </Button>
                   </form>
                 </div>
