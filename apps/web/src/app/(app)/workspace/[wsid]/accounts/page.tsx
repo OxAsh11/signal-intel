@@ -5,6 +5,8 @@ import { getBriefLens } from '@/lib/brief-lens';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import { AddColumn } from './_table/add-column';
+import { BOARD_LIMIT, Board, ByCountry, LayoutSwitch } from './_table/board';
+import { UUID, viewColumnIds } from './_table/server';
 import { Cards } from './_table/cards';
 import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton } from './_table/states';
 import { CellPanel } from './_table/panel';
@@ -14,6 +16,7 @@ import { AccountsTable } from './_table/table';
 import type { TableData } from './_table/types';
 import {
   PAGE_SIZE,
+  layoutOf,
   decodeFilter,
   formatSort,
   nextSort,
@@ -28,8 +31,7 @@ import {
 
 export const metadata: Metadata = { title: 'Accounts' };
 
-type SavedView = { id: string | null; preset: string | null; filter: unknown; sort: unknown; columns: unknown };
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+type SavedView = { id: string | null; preset: string | null; filter: unknown; sort: unknown; columns: unknown; layout?: string | null };
 const nf = new Intl.NumberFormat('en');
 const isEmptyFilter = (f: unknown) => f == null || (typeof f === 'object' && Object.keys(f as object).length === 0);
 
@@ -120,7 +122,7 @@ async function ViewBarSection({ ws, sp }: { ws: string; sp: Record<string, strin
 }
 
 async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string | string[] | undefined> }) {
-  const q = readQuery(sp);
+  let q = readQuery(sp);
   const here = tableHref(ws, q, { page: q.page });
   // Clear filter: no `f`, no view filter, no page; the sort stays unless it is the unreadable part.
   const clear = (dropSort: boolean) => tableHref(ws, q, { f: null, view: null, page: 1, ...(dropSort ? { sort: null } : {}) });
@@ -150,15 +152,26 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
   const columnIds = view ? await viewColumnIds(supabase, ws, view.columns) : null;
   const filtered = !isEmptyFilter(filter);
 
-  const { data, error } = await supabase.rpc('account_table', {
-    p_ws: ws,
-    p_brief: lens.briefId,
-    p_filter: filter,
-    p_sort: sortAst(sorts),
-    p_columns: columnIds,
-    p_limit: PAGE_SIZE,
-    p_offset: (q.page - 1) * PAGE_SIZE,
-  });
+  // A saved view's own layout opens unless the URL names one.
+  if (!q.layout && view?.layout) q = { ...q, layout: view.layout };
+  const layout = layoutOf(q);
+  const call = (limit: number, offset: number) =>
+    supabase.rpc('account_table', { p_ws: ws, p_brief: lens.briefId, p_filter: filter, p_sort: sortAst(sorts), p_columns: columnIds, p_limit: limit, p_offset: offset });
+  const res = await call(layout === 'table' ? PAGE_SIZE : 200, layout === 'table' ? (q.page - 1) * PAGE_SIZE : 0);
+  const data = res.data;
+  let error = res.error;
+  if (!error && layout !== 'table') {
+    // The board and By country show every account (up to BOARD_LIMIT), 200 rows a page.
+    const first = data as TableData | null;
+    for (let n = first?.rows.length ?? 0; first && n < Math.min(first.total, BOARD_LIMIT); n += 200) {
+      const next = await call(200, n);
+      if (next.error) {
+        error = next.error;
+        break;
+      }
+      first.rows.push(...((next.data as TableData | null)?.rows ?? []));
+    }
+  }
   if (error) {
     if (error.code === '22023') return <BadFilter clearHref={clear(false)} detail={error.message} />;
     console.error(`accounts: account_table failed for workspace ${ws}: ${error.message}`);
@@ -177,7 +190,7 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
     ]);
     return <NoAccounts radars={radars} active={active} records={records} />;
   }
-  if (table.rows.length === 0) return <PastLastPage href={tableHref(ws, q, { page: 1 })} />;
+  if (table.rows.length === 0 && layout === 'table') return <PastLastPage href={tableHref(ws, q, { page: 1 })} />;
 
   const sortHrefs: Record<string, string> = {};
   for (const key of ['name', 'verdict', 'priority', ...table.columns.map((c) => c.key)]) {
@@ -190,52 +203,42 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
   const userName = ctx?.user.name ?? ctx?.user.email ?? 'you';
   const pages = Math.ceil(table.total / PAGE_SIZE);
   const from = (q.page - 1) * PAGE_SIZE + 1;
+  const exportQs = new URLSearchParams();
+  for (const k of ['brief', 'view', 'f', 'sort'] as const) if (q[k]) exportQs.set(k, q[k] as string);
+  const exportHref = `/workspace/${ws}/accounts/export${exportQs.size ? `?${exportQs.toString()}` : ''}`;
   return (
     <>
-      {canEdit ? (
-        <div className="flex justify-end" data-table-tools="">
-          <AddColumn ws={ws} briefId={lens.briefId} filter={filtered ? filter : null} rows={table.rows} columns={table.columns} />
-        </div>
+      <LayoutSwitch ws={ws} q={q} exportHref={exportHref} />
+      {layout === 'board' ? <Board ws={ws} q={q} rows={table.rows} columns={table.columns} total={table.total} /> : null}
+      {layout === 'country' ? <ByCountry ws={ws} rows={table.rows} columns={table.columns} total={table.total} /> : null}
+      {layout === 'table' ? (
+        <>
+          {canEdit ? (
+            <div className="flex justify-end" data-table-tools="">
+              <AddColumn ws={ws} briefId={lens.briefId} filter={filtered ? filter : null} rows={table.rows} columns={table.columns} />
+            </div>
+          ) : null}
+          <AccountsTable
+            ws={ws}
+            rows={table.rows}
+            columns={table.columns}
+            sorts={sorts}
+            sortHrefs={sortHrefs}
+            canEdit={canEdit}
+            briefId={lens.briefId}
+            filter={filtered ? filter : null}
+          />
+          <CellPanel ws={ws} briefId={lens.briefId} canEdit={canEdit} userName={userName} />
+          <Cards ws={ws} rows={table.rows} columns={table.columns} />
+          <Pager ws={ws} q={q} pages={pages} from={from} to={from + table.rows.length - 1} total={table.total} />
+        </>
       ) : null}
-      <AccountsTable
-        ws={ws}
-        rows={table.rows}
-        columns={table.columns}
-        sorts={sorts}
-        sortHrefs={sortHrefs}
-        canEdit={canEdit}
-        briefId={lens.briefId}
-        filter={filtered ? filter : null}
-      />
-      <CellPanel ws={ws} briefId={lens.briefId} canEdit={canEdit} userName={userName} />
-      <Cards ws={ws} rows={table.rows} columns={table.columns} />
-      <Pager ws={ws} q={q} pages={pages} from={from} to={from + table.rows.length - 1} total={table.total} />
     </>
   );
 }
 
 const radarCount = (supabase: NonNullable<Awaited<ReturnType<typeof createClient>>>, ws: string) =>
   supabase.from('radar').select('id', { count: 'exact', head: true }).eq('workspace_id', ws);
-
-/** A saved view's predicate columns, as ids (a ref may be an id or a key). Null: the lens Brief's columns. */
-async function viewColumnIds(supabase: NonNullable<Awaited<ReturnType<typeof createClient>>>, ws: string, columns: unknown): Promise<string[] | null> {
-  if (!Array.isArray(columns)) return null;
-  const refs = columns
-    .filter((c): c is { kind: string; ref: string } => c !== null && typeof c === 'object' && (c as { kind?: unknown }).kind === 'predicate' && typeof (c as { ref?: unknown }).ref === 'string')
-    .map((c) => c.ref);
-  if (refs.length === 0) return null;
-  const keys = refs.filter((r) => !UUID.test(r));
-  const byKey = new Map<string, string>();
-  if (keys.length) {
-    const { data } = await supabase.from('predicate').select('id, key, workspace_id').in('key', keys).or(`workspace_id.eq.${ws},workspace_id.is.null`);
-    // A workspace column wins over a global one of the same key.
-    for (const p of (data ?? []) as { id: string; key: string; workspace_id: string | null }[]) {
-      if (p.workspace_id || !byKey.has(p.key)) byKey.set(p.key, p.id);
-    }
-  }
-  const ids = refs.map((r) => (UUID.test(r) ? r : byKey.get(r))).filter((x): x is string => !!x);
-  return ids.length ? ids : null;
-}
 
 function Pager({ ws, q, pages, from, to, total }: { ws: string; q: TableQuery; pages: number; from: number; to: number; total: number }) {
   return (

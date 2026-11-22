@@ -6,7 +6,7 @@ import { useState, useTransition } from 'react';
 import { cx } from '@signal/ui';
 import { deleteView, pinView, saveView } from '@/app/actions/views';
 import { FilterBuilder, parseItems, type FilterColumn } from './filter-builder';
-import { tableHref, type SortAst, type TableQuery } from './url';
+import { layoutOf, tableHref, type SortAst, type TableQuery } from './url';
 
 export type ViewRow = { id: string | null; preset: string | null; name: string; visibility: string };
 
@@ -85,7 +85,7 @@ export function ViewBar({
         filter: filtered ? filter : null,
         columns: columnKeys.map((ref) => ({ kind: 'predicate' as const, ref })),
         sort,
-        layout: q.layout === 'board' ? 'board' : q.layout === 'country' ? 'map' : 'table',
+        layout: layoutOf(q) === 'board' ? 'board' : layoutOf(q) === 'country' ? 'map' : 'table',
       });
       if (!res.ok) return setError(res.error);
       setSaving(false);

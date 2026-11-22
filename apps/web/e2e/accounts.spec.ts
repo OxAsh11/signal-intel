@@ -854,3 +854,161 @@ test.describe('Filters, views, pins and search', () => {
     await expect(page.getByRole('option')).toHaveCount(1); // 100 Solar Co is not a match: % is not a wildcard
   });
 });
+
+test.describe('Board, By country and export', () => {
+  let userId = '';
+  const open = async (page: Page, ws: string, query: string) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/workspace/${ws}/accounts?${query}`);
+  };
+  const lane = (page: Page, name: string) => page.locator(`[data-lane="${name}"]`);
+  const csv = async (page: Page, ws: string, query: string) => {
+    const res = await page.request.get(`/workspace/${ws}/accounts/export?${query}`);
+    expect(res.status()).toBe(200);
+    return res.text();
+  };
+  /** RFC 4180 parse (quoted fields may hold commas, quotes and newlines). */
+  const parse = (text: string): string[][] => {
+    const rows: string[][] = [];
+    let row: string[] = [];
+    let f = '';
+    let q = false;
+    for (let i = 0; i < text.length; i++) {
+      const c = text[i];
+      if (q) {
+        if (c === '"' && text[i + 1] === '"') {
+          f += '"';
+          i++;
+        } else if (c === '"') q = false;
+        else f += c;
+      } else if (c === '"') q = true;
+      else if (c === ',') {
+        row.push(f);
+        f = '';
+      } else if (c === '\r' && text[i + 1] === '\n') {
+        row.push(f);
+        rows.push(row);
+        row = [];
+        f = '';
+        i++;
+      } else f += c;
+    }
+    return rows;
+  };
+
+  test.beforeEach(async ({ page, context }) => {
+    const user = await newUser('board');
+    userId = user.id;
+    await signIn(context, user.email);
+    await onboard(page, 'Board Org');
+  });
+
+  test('Board by stage: every stage has a column with a count, and the seeded cards sit in the right ones', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await sql(
+      `begin; select set_config('app.writer', 'derivation', true);
+       update public.account a set stage = 'Engaged' from public.entity e where e.id = a.entity_id and e.display_name = 'Bravo Power' and a.workspace_id = '${w.ws}';
+       commit;`,
+    );
+    await open(page, w.ws, `brief=${s.brief}&layout=board`);
+    for (const stage of ['Untouched', 'Queued', 'Contacted', 'Engaged', 'Qualified', 'Meeting', 'Handed off', 'Dormant', 'Disqualified']) {
+      await expect(lane(page, stage)).toBeVisible();
+    }
+    await expect(lane(page, 'Untouched').locator('[data-count]')).toHaveText(String(ROWS.length - 1));
+    await expect(lane(page, 'Engaged').locator('[data-count]')).toHaveText('1');
+    await expect(lane(page, 'Engaged').locator('[data-row="Bravo Power"]')).toBeVisible();
+    await expect(lane(page, 'Untouched').locator('[data-row="Alpha Grid"]')).toBeVisible();
+    await page.screenshot({ path: 'test-results/accounts-board.png', fullPage: true });
+  });
+
+  test('Board by verdict works the same way', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await open(page, w.ws, `brief=${s.brief}&layout=board&group=verdict`);
+    await expect(lane(page, 'Confirmed').locator('[data-row="Alpha Grid"]')).toBeVisible();
+    await expect(lane(page, 'Confirmed').locator('[data-count]')).toHaveText('1');
+    await expect(lane(page, 'none').locator('[data-count]')).toHaveText(String(ROWS.length - 1));
+    for (const v of ['Likely', 'Unverified', 'Contradicted']) await expect(lane(page, v)).toBeVisible();
+  });
+
+  test('By country groups the seeded accounts (layout=map, as saved views store it, opens the same)', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    for (const layout of ['country', 'map']) {
+      await open(page, w.ws, `brief=${s.brief}&layout=${layout}`);
+      await expect(lane(page, 'NL').locator('[data-row="Alpha Grid"]')).toBeVisible();
+      await expect(lane(page, 'NL').locator('[data-count]')).toHaveText('1');
+      await expect(lane(page, 'none').locator('[data-count]')).toHaveText(String(ROWS.length - 1));
+    }
+    await page.screenshot({ path: 'test-results/accounts-country.png', fullPage: true });
+  });
+
+  test('Export: the header is the visible columns and the row count matches the view', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    const rows = parse(await csv(page, w.ws, `brief=${s.brief}`));
+    expect(rows[0]).toEqual(['Account', 'Country', 'Verdict', 'Score', 'Band', 'Stage', 'Owner', 'Last signal', 'Sites', 'Double', 'Note']);
+    expect(rows).toHaveLength(ROWS.length + 1);
+    const alpha = rows.find((r) => r[0] === 'Alpha Grid');
+    expect(alpha?.slice(1, 6)).toEqual(['NL', 'Confirmed', '90', 'High', 'Untouched']);
+    expect(alpha?.[8]).toBe('12');
+    const filtered = parse(await csv(page, w.ws, `brief=${s.brief}&f=${enc({ field: { system: 'name' }, op: 'contains', value: 'grid' })}`));
+    expect(filtered.length).toBeLessThan(ROWS.length + 1);
+  });
+
+  test('CSV injection: =HYPERLINK is neutralised with a leading quote; a comma and newline are quoted', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await sql(`
+      begin;
+      select set_config('app.writer', 'derivation', true);
+      insert into public.account (org_id, workspace_id, entity_id)
+      select '${w.org}', '${w.ws}', app.create_entity('${w.org}', 'company', n, 'tenant')
+        from unnest(array['=HYPERLINK("x")', E'Comma, Co\\nSecond line', '+cmd', '@sum', '-1']) n;
+      select set_config('app.writer', '', true);
+      commit;
+    `);
+    const text = await csv(page, w.ws, `brief=${s.brief}`);
+    expect(text).toContain(`"'=HYPERLINK(""x"")"`);
+    expect(text).toContain(`"Comma, Co\nSecond line"`);
+    const names = parse(text).map((r) => r[0]);
+    expect(names).toEqual(expect.arrayContaining([`'=HYPERLINK("x")`, "'+cmd", "'@sum", "'-1", 'Comma, Co\nSecond line']));
+  });
+
+  test('Evidence: &evidence=1 adds a source URL column per column', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    const rows = parse(await csv(page, w.ws, `brief=${s.brief}&evidence=1`));
+    expect(rows[0].slice(8)).toEqual(['Sites', 'Sites source', 'Double', 'Double source', 'Note', 'Note source']);
+    const alpha = rows.find((r) => r[0] === 'Alpha Grid');
+    expect(alpha?.[9]).toMatch(/^https:\/\/acc\.example\//);
+    expect(alpha?.[11]).toBe(''); // derived: no source page
+  });
+
+  test('a bad filter is a 400, and the Export button on the page points at the route', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    expect((await page.request.get(`/workspace/${w.ws}/accounts/export?brief=${s.brief}&f=%25%25%25`)).status()).toBe(400);
+    await open(page, w.ws, `brief=${s.brief}&layout=board`);
+    await expect(page.locator('[data-export]')).toHaveAttribute('href', new RegExp(`/workspace/${w.ws}/accounts/export\\?brief=${s.brief}`));
+  });
+
+  test('a workspace of 300 accounts exports in under 10 s', async ({ page }) => {
+    test.setTimeout(120_000);
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await sql(`
+      begin;
+      select set_config('app.writer', 'derivation', true);
+      insert into public.account (org_id, workspace_id, entity_id)
+      select '${w.org}', '${w.ws}', app.create_entity('${w.org}', 'company', 'Bulk ' || lpad(n::text, 4, '0'), 'tenant') from generate_series(1, 300) n;
+      select set_config('app.writer', '', true);
+      commit;
+    `);
+    const t0 = Date.now();
+    const rows = parse(await csv(page, w.ws, `brief=${s.brief}`));
+    expect(Date.now() - t0).toBeLessThan(10_000);
+    expect(rows).toHaveLength(ROWS.length + 300 + 1);
+  });
+});

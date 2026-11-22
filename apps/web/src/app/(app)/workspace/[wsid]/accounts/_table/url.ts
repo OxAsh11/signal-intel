@@ -6,6 +6,11 @@
  */
 
 export const PAGE_SIZE = 50;
+
+export type Layout = 'table' | 'board' | 'country';
+/** The layout in the URL; Task 6 saves By country as 'map', so both spellings open it. */
+export const layoutOf = (q: Pick<TableQuery, 'layout'>): Layout => (q.layout === 'board' ? 'board' : q.layout === 'country' || q.layout === 'map' ? 'country' : 'table');
+export const groupOf = (q: Pick<TableQuery, 'group'>): 'stage' | 'verdict' => (q.group === 'verdict' ? 'verdict' : 'stage');
 export const SYSTEM_SORTS = ['name', 'verdict', 'priority', 'created_at'] as const;
 const MAX_F_LENGTH = 16_384;
 const MAX_SORTS = 5;
