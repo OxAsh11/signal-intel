@@ -26,7 +26,10 @@ export async function BudgetMeter({ className }: { className?: string }) {
   const spent = Number(m.spent_usd ?? 0);
   const cap = m.cap_usd == null ? null : Number(m.cap_usd);
   const pct = m.pct == null ? null : Number(m.pct);
-  const level = pct == null ? 'none' : pct >= 100 ? 'over' : pct >= 80 ? 'warn' : 'ok';
+  // The colour comes from the unrounded ratio, not the one-decimal pct: 79.96% rounds to 80.0
+  // but is not yet at 80%.
+  const ratio = cap == null ? null : spent / cap; // cap_usd > 0 (budget check)
+  const level = ratio == null ? 'none' : ratio >= 1 ? 'over' : ratio >= 0.8 ? 'warn' : 'ok';
   const family = level === 'over' ? 'si-fam-lava' : level === 'warn' ? 'si-fam-mustard' : null;
 
   return (

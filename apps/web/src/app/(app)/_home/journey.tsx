@@ -44,6 +44,7 @@ export async function Journey(props: HomeCardProps) {
                 href={s.href}
                 data-step={s.key}
                 data-state={state}
+                aria-current={state === 'now' ? 'step' : undefined}
                 className={cx(
                   'flex w-full min-w-0 items-start gap-2 rounded-[6px] px-3 py-2 text-[13px] leading-[18px] no-underline hover:no-underline',
                   STATE[state].cls,

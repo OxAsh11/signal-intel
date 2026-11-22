@@ -86,8 +86,11 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
     >
       {home.map(top)}
       {ORDER.map((g) => (
-        <div key={g} className="contents md:flex md:flex-col md:gap-0.5">
-          <span className="si-label hidden px-2.5 pt-4 pb-1 md:block">{GROUP_LABELS[g]}</span>
+        // A named group, so a screen reader announces "Find, group" before its items.
+        <div key={g} role="group" aria-labelledby={`nav-group-${g}`} className="contents md:flex md:flex-col md:gap-0.5">
+          <span id={`nav-group-${g}`} className="si-label hidden px-2.5 pt-4 pb-1 md:block">
+            {GROUP_LABELS[g]}
+          </span>
           {nav.filter((i) => i.group === g).map(top)}
         </div>
       ))}

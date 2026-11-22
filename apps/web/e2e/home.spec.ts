@@ -9,6 +9,7 @@ const main = (page: Page) => page.locator('main');
 const region = (page: Page, name: string | RegExp) =>
   main(page).getByRole('region', typeof name === 'string' ? { name, exact: true } : { name });
 const lens = (page: Page) => page.getByRole('combobox', { name: 'Brief lens' });
+const applyLens = (page: Page) => page.getByRole('button', { name: 'Apply Brief lens' });
 
 /** The workspace the onboarded user landed in. */
 async function workspaceOf(userId: string): Promise<{ ws: string; org: string }> {
@@ -197,6 +198,8 @@ test.describe('Home', () => {
       await expect(journey.locator(`[data-step="${key}"]`), key).toHaveAttribute('data-state', 'done');
     }
     await expect(journey.locator('[data-step="contacts"]')).toHaveAttribute('data-state', 'now');
+    await expect(journey.locator('[data-step="contacts"]')).toHaveAttribute('aria-current', 'step');
+    await expect(journey.locator('[aria-current="step"]')).toHaveCount(1);
     await expect(journey.locator('[data-step="contacts"]')).toHaveAttribute('href', '/accounts?view=ready_to_contact');
     await expect(journey.locator('[data-step="first_email"]')).toHaveAttribute('data-state', 'todo');
     await expect(journey.locator('[data-step="first_email"]')).toContainText('Comes with the Email engine');
@@ -223,7 +226,8 @@ test.describe('Home', () => {
     await expect(needs.locator('[data-need="review"]')).toHaveAttribute('href', '/review');
     await expect(needs.locator('[data-need="replies"]')).toHaveText(/1 reply to classify/);
     await expect(needs.locator('[data-need="replies"]')).toHaveAttribute('href', `/workspace/${w.ws}/inbox`);
-    await expect(needs.locator('[data-need="stale"]')).toHaveText(/1 account stale · re-run ≈ (< )?\$\d+\.\d{2}/);
+    // Accounts in the count; the cells a re-run reaches in the estimate (Acme: one extract cell).
+    await expect(needs.locator('[data-need="stale"]')).toHaveText(/1 account stale · re-run 1 cell ≈ (< )?\$\d+\.\d{2}/);
     await expect(needs.locator('[data-need="stale"]')).toHaveAttribute('href', '/accounts?view=stale');
     await expect(needs.locator('[data-need="errored"]')).toHaveText(/1 account with errored cells/);
     await expect(needs.locator('[data-need="errored"]')).toHaveAttribute('href', '/accounts?view=errored');
@@ -242,11 +246,16 @@ test.describe('Home', () => {
 
     // What changed: the verdict change with its quote, the Brief version, the new accounts.
     const changes = region(page, 'What changed');
-    // Acme's first Likely (three days ago) is its own line; the change is Likely → Confirmed.
+    // The change is Likely → Confirmed. First verdicts are grouped per Brief per UTC day: Acme's
+    // (three days ago) and Bharat's (two days ago) fall on different days, so two lines of one.
     const verdictLine = changes.locator('[data-change="verdict"]').filter({ hasText: 'Likely → Confirmed' });
     await expect(verdictLine).toContainText(`Acme Energy: Likely → Confirmed · "${QUOTE}"`);
     await expect(verdictLine.getByRole('link', { name: 'Acme Energy' })).toHaveAttribute('href', `/workspace/${w.ws}/accounts/${s.acme}`);
-    await expect(changes.locator('[data-change="verdict"]').filter({ hasText: 'Bharat Grid' })).toContainText('Bharat Grid: Likely, first verdict');
+    await expect(changes.locator('[data-change="verdict"]')).toHaveCount(1);
+    const firsts = changes.locator('[data-change="first_verdicts"]');
+    await expect(firsts).toHaveCount(2);
+    await expect(firsts.first()).toContainText(`1 first verdict under ${BRIEF}`);
+    await expect(firsts.first().getByRole('link', { name: '1 first verdict' })).toHaveAttribute('href', `/accounts?brief=${s.brief}`);
     await expect(changes.getByRole('link', { name: `${BRIEF} v2` })).toHaveAttribute('href', `/briefs/${s.brief}`);
     await expect(changes.getByRole('link', { name: '2 new accounts' })).toHaveAttribute('href', `/accounts?radar=${s.news}`);
 
@@ -264,8 +273,9 @@ test.describe('Home', () => {
     await expect(crm.locator('[data-tasks]')).toHaveText('1 task due today');
     await expect(crm.locator('[data-tasks]')).toHaveAttribute('href', `/workspace/${w.ws}/meetings`);
 
-    // Sources: the radar in error is listed first, though it sorts after News by name.
+    // Sources: the radar in error is listed first, though it sorts after News by name. Pool: discovery.
     const sources = region(page, 'Sources');
+    await expect(sources).toHaveClass(/si-fam-pool/);
     await expect(sources.locator('[data-radar]')).toHaveCount(2);
     await expect(sources.locator('[data-radar]').first()).toHaveAttribute('data-radar', 'Tenders radar');
     await expect(sources.locator('[data-radar]').first()).toContainText('Incident');
@@ -299,6 +309,7 @@ test.describe('Home', () => {
     await expect(lens(page)).toHaveValue(s.brief);
 
     await lens(page).selectOption('all');
+    await applyLens(page).click();
     await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${w.ws}:all`);
     await expect(header.getByRole('link', { name: 'Default', exact: true })).toHaveAttribute('href', '/briefs');
     await expect(header).toContainText('All Briefs');
@@ -306,6 +317,32 @@ test.describe('Home', () => {
     await expect(header).not.toContainText('Brief v2');
     // The cards follow the lens too: the same Brief is the only one, so the numbers hold.
     await expect(region(page, 'Key numbers').locator('a.si-metric').filter({ hasText: 'Confirmed' }).locator('.si-metric-num')).toHaveText('1');
+  });
+
+  test('a failed Brief read says Home could not load: no onboarding, no lens', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    await seedPopulated(w);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await sql('revoke select on table public.brief from authenticated');
+    try {
+      await page.goto('/');
+      await expect(page.getByRole('heading', { level: 1, name: 'Home', exact: true })).toBeVisible();
+      const failed = main(page).locator('[data-home-error]');
+      await expect(failed).toContainText('Home could not load.');
+      await expect(failed.getByRole('link', { name: 'Retry' })).toHaveAttribute('href', '/');
+      // Not mistaken for an empty workspace.
+      await expect(region(page, 'Describe who you sell to')).toHaveCount(0);
+      await expect(main(page).getByText('Describe who you sell to')).toHaveCount(0);
+      // The sidebar renders, without a lens selector that would claim there are no Briefs.
+      await expect(page.getByRole('navigation', { name: 'Main' }).getByRole('link', { name: 'Home', exact: true })).toBeVisible();
+      await expect(lens(page)).toHaveCount(0);
+      await page.screenshot({ path: 'test-results/home-desktop-brief-read-error.png', fullPage: true });
+    } finally {
+      await sql('grant select on table public.brief to authenticated');
+    }
+    await page.reload();
+    await expect(lens(page)).toBeVisible();
+    await expect(main(page).locator('[data-home-error]')).toHaveCount(0);
   });
 
   test('a card whose RPC fails says so with Retry, and the rest of Home renders', async ({ page }) => {

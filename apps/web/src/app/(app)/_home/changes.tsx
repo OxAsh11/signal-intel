@@ -4,7 +4,8 @@ import { CardError } from './card-error';
 import { type HomeCardProps, day, fmt, loadCard, plural } from './shared';
 
 type Item =
-  | { kind: 'verdict'; at: string; name: string; from: string | null; to: string; quote: string | null; href: string | null }
+  | { kind: 'verdict'; at: string; name: string; from: string; to: string; quote: string | null; href: string | null }
+  | { kind: 'first_verdicts'; at: string; brief_id: string; brief_name: string; day: string; count: number; href: string }
   | { kind: 'brief_version'; at: string; brief_id: string; brief_name: string; version: number; stale_cells: number; href: string }
   | { kind: 'new_accounts'; at: string; radar_id: string; radar_name: string; count: number; href: string };
 type Changes = { items: Item[] };
@@ -29,11 +30,21 @@ function line(item: Item): ReactNode {
       );
       return (
         <>
-          {name}: {item.from ? `${item.from} → ${item.to}` : `${item.to}, first verdict`}
+          {name}: {item.from} → {item.to}
           {item.quote ? <span className="text-ink-muted"> · &quot;{clip(item.quote)}&quot;</span> : null}
         </>
       );
     }
+    case 'first_verdicts':
+      // One line per Brief per day, however many accounts its first run judged.
+      return (
+        <>
+          <Link href={item.href} className="font-medium text-ink no-underline hover:underline">
+            {fmt(item.count)} first {plural(item.count, 'verdict', 'verdicts')}
+          </Link>{' '}
+          under {item.brief_name}
+        </>
+      );
     case 'brief_version':
       return (
         <>
@@ -58,7 +69,10 @@ function line(item: Item): ReactNode {
   }
 }
 
-/** The last 7 days, newest first: verdict changes with their quote, Brief versions, new accounts by radar. */
+/**
+ * The last 7 days, newest first: verdict changes with their quote, first verdicts (one line per
+ * Brief per day), Brief versions, new accounts by radar.
+ */
 export async function ChangesCard(props: HomeCardProps) {
   const c = await loadCard<Changes>('home_changes', props);
   if (!c) return <CardError id="home-changes" title="What changed" retry={props.retry} />;

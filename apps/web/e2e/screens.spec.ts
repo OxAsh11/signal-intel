@@ -2,9 +2,11 @@ import { expect, test } from '@playwright/test';
 import { allRoutes } from '../src/lib/nav';
 import { newUser, onboard, signIn } from './support';
 
-// The widths the product must fit without sideways scrolling: desktop and phone.
+// The widths the product must fit without sideways scrolling: desktop, a small laptop or tablet
+// (1024, below Home's two-column breakpoint) and phone.
 const WIDTHS = [
   { width: 1440, height: 900 },
+  { width: 1024, height: 768 },
   { width: 390, height: 844 },
 ];
 

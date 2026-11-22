@@ -16,7 +16,7 @@ export function CardError({ id, title, retry, family }: { id: string; title: str
 /** The fallback while a card's RPC is in flight. */
 export function CardSkeleton({ title, lines = 3 }: { title: string; lines?: number }) {
   return (
-    <div className="si-card" aria-busy="true" aria-label={`${title}, loading`}>
+    <div className="si-card" role="status" aria-busy="true" aria-label={`${title}, loading`}>
       <span className="si-label">{title}</span>
       {Array.from({ length: lines }, (_, i) => (
         <span key={i} className="block h-3 animate-pulse rounded-[2px] bg-surface-sunken" style={{ width: `${88 - i * 14}%` }} />

@@ -7,7 +7,7 @@ type Count = { count: number; href: string };
 type NeedsYou = {
   review: Count;
   replies_to_classify: Count;
-  stale: Count & { estimate_usd: number | string | null };
+  stale: Count & { cells: number | null; estimate_usd: number | string | null };
   errored: Count;
 };
 
@@ -15,8 +15,16 @@ type NeedsYou = {
 export async function NeedsYouCard(props: HomeCardProps) {
   const n = await loadCard<NeedsYou>('home_needs_you', props);
   if (!n) return <CardError id="home-needs" title="Needs you" family="mustard" retry={props.retry} />;
+  // The count is accounts; the re-run is the cells of those accounts a run can reach (see the RPC).
+  const s = n.stale;
   const staleNote =
-    n.stale.count === 0 ? null : n.stale.estimate_usd == null ? ' · estimate unavailable' : ` · re-run ≈ ${usd(n.stale.estimate_usd)}`;
+    s.count === 0
+      ? null
+      : s.estimate_usd == null || s.cells == null
+        ? ' · estimate unavailable'
+        : Number(s.cells) === 0
+          ? ' · nothing to re-run now'
+          : ` · re-run ${fmt(s.cells)} ${plural(s.cells, 'cell', 'cells')} ≈ ${usd(s.estimate_usd)}`;
   const rows = [
     { key: 'review', c: n.review, text: plural(n.review.count, 'decision in Review', 'decisions in Review'), to: 'Review' },
     { key: 'replies', c: n.replies_to_classify, text: plural(n.replies_to_classify.count, 'reply to classify', 'replies to classify'), to: 'Email engine › Inbox' },
@@ -32,7 +40,7 @@ export async function NeedsYouCard(props: HomeCardProps) {
       </div>
       <ul className="m-0 list-none p-0">
         {rows.map((r, i) => (
-          <li key={r.key} className={i ? 'border-t border-[rgba(31,32,35,.08)]' : undefined}>
+          <li key={r.key} className={i ? 'border-t border-line' : undefined}>
             <Link
               href={r.c.href}
               data-need={r.key}
