@@ -6,8 +6,11 @@
 --     Archived, is treated as null (never an error).
 --   * Where a card counts accounts, it goes through P3's public.view_entities, with the P3 preset
 --     filters read from public.list_views; there "all Briefs" means the current versions of the
---     Pilot and Active Briefs, as P3 defines it. Elsewhere (radars, Brief versions, verdict
---     changes) "all Briefs" means every Brief of the workspace that is not Archived.
+--     Pilot and Active Briefs, as P3 defines it. For radars (the Sources card, the header's
+--     sources running, new accounts by radar) "all Briefs" means the Briefs with a published
+--     version that are Pilot, Active or Paused (app.home_lens_radar_briefs), so a Draft's radars
+--     never show. Elsewhere (Brief versions, verdict changes) "all Briefs" means every Brief of the
+--     workspace that is not Archived.
 --   * Counts are never null (0). Hrefs are relative paths on the P4 routes; links to screens
 --     that only exist per workspace today (inbox, meetings and tasks, the account page) use
 --     /workspace/<ws>/....
@@ -51,6 +54,19 @@ as $$
   select case when p_brief is not null then array[p_brief]
               else coalesce((select array_agg(b.id) from public.brief b
                               where b.workspace_id = p_ws and b.state <> 'Archived'), '{}') end
+$$;
+
+-- The Briefs whose radars a lens covers: the given one, else the Briefs with a published version
+-- that are Pilot, Active or Paused (p_live: only Pilot and Active, for "sources running" beside
+-- the header's count of Pilot and Active Briefs).
+create function app.home_lens_radar_briefs(p_ws uuid, p_brief uuid, p_live boolean default false) returns uuid[]
+  language sql stable security definer set search_path = ''
+as $$
+  select case when p_brief is not null then array[p_brief]
+              else coalesce((select array_agg(b.id) from public.brief b
+                              where b.workspace_id = p_ws and b.current_version_id is not null
+                                and b.state = any(case when p_live then array['Pilot', 'Active']
+                                                       else array['Pilot', 'Active', 'Paused'] end::public.brief_state[])), '{}') end
 $$;
 
 -- The Brief versions verdicts and scores are read under (as P3's view_brief_ctx): the given
@@ -144,7 +160,8 @@ $$;
 --  brief: null (lens all) | {id, name, state, version: int | null (no published version),
 --                            live_since: timestamptz | null (first publish), href: '/briefs/<id>'},
 --  brief_count: int (Pilot and Active Briefs of the workspace),
---  sources_running: int (active radars in the lens),
+--  sources_running: int (active radars of the lens Brief; for all, of the published Pilot and
+--                   Active Briefs the count beside it names),
 --  href: '/briefs/<id>' | '/briefs'}
 create function public.home_header(p_ws uuid, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
@@ -163,7 +180,7 @@ begin
     'brief_count', (select count(*)::int from public.brief b where b.workspace_id = p_ws and b.state in ('Pilot', 'Active')),
     'sources_running', (select count(*)::int from public.radar r
                          where r.workspace_id = p_ws and r.status = 'active'
-                           and r.brief_id = any(app.home_lens_briefs(p_ws, v_brief))),
+                           and r.brief_id = any(app.home_lens_radar_briefs(p_ws, v_brief, true))),
     'href', case when v_brief is null then '/briefs' else '/briefs/' || v_brief end);
 end $$;
 
@@ -236,14 +253,22 @@ end $$;
 -- ── 6. Needs you ─────────────────────────────────────────────────────────────
 -- {review: {count, href: '/review'}                        (pending review items + verdict reviews)
 --  replies_to_classify: {count, href: '/workspace/<ws>/inbox'} (replies with no reply_class yet)
---  stale: {count, estimate_usd, href: '/accounts?view=stale'}
+--  stale: {count, cells: int | null, estimate_usd: number | null, href: '/accounts?view=stale'}
 --  errored: {count, href: '/accounts?view=errored'}}
--- stale / errored count the accounts the P3 presets match under the lens. estimate_usd is the sum
--- of estimate_column_run(mode 'stale').cost_usd over the lens's columns (the Brief's columns, else
--- every workspace column and the global ones it does not shadow, as the {"run": "*"} leaf scopes
--- them). Columns that never finished a run with an inputs hash cannot be stale and are skipped;
--- so are fill methods with no run price yet (provider, research). When a column cannot be priced
--- (e.g. the extract model has no price: P0002), estimate_usd is null and the counts still return.
+-- stale / errored count ACCOUNTS: the workspace's active company accounts with at least one cell
+-- in that state among the lens's columns (the P3 presets through view_entities: the Brief's
+-- columns, else every workspace column and the global ones it does not shadow, as the
+-- {"run": "*"} leaf scopes them). The run state of a cell does not depend on a Brief version, so
+-- the lens only picks the columns.
+-- stale.cells and stale.estimate_usd describe what re-running those same accounts would do, over
+-- the same columns and the same accounts: the sum over the columns of
+-- estimate_column_run(mode 'stale', the lens) .count (cells) and .cost_usd. That counts CELLS,
+-- not accounts (one account can be stale on several columns), and leaves out the stale cells a
+-- re-run cannot reach: cells with a run already queued or running, and columns that cannot be
+-- run (fill methods other than extract and formula, and columns that never finished a run with
+-- an inputs hash, which cannot be stale). When a column cannot be priced (e.g. the extract model
+-- has no price: P0002), cells and estimate_usd are both null and the counts still return. The
+-- card reads "N accounts stale · re-run M cells ≈ $X".
 create function public.home_needs_you(p_ws uuid, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
 as $$
@@ -251,6 +276,8 @@ declare
   v_brief  uuid := app.home_lens(p_ws, p_brief);
   v_cols   uuid[];
   v_est    numeric := 0;
+  v_cells  int := 0;
+  v_run    jsonb;
   v_pid    uuid;
   v_failed boolean := false;
 begin
@@ -260,18 +287,21 @@ begin
                                 or (p.workspace_id is null and not exists (select 1 from public.predicate w
                                                                             where w.workspace_id = p_ws and w.key = p.key))) end;
   for v_pid in select p.id from public.predicate p
-                where p.id = any(v_cols) and p.fill_method in ('extract', 'formula', 'manual')
+                where p.id = any(v_cols) and p.fill_method in ('extract', 'formula')
                   and exists (select 1 from public.predicate_run pr
                                where pr.workspace_id = p_ws and pr.predicate_id = p.id and pr.finished_at is not null
                                  and pr.inputs_hash is not null and pr.status <> 'cancelled') loop
     begin
-      v_est := v_est + (public.estimate_column_run(p_ws, v_pid, 'stale', v_brief) ->> 'cost_usd')::numeric;
+      v_run := public.estimate_column_run(p_ws, v_pid, 'stale', v_brief);
+      v_est := v_est + (v_run ->> 'cost_usd')::numeric;
+      v_cells := v_cells + (v_run ->> 'count')::int;
     exception when sqlstate 'P0002' or sqlstate '22023' then
       v_failed := true;
     end;
   end loop;
   if v_failed then
     v_est := null;
+    v_cells := null;
   end if;
   return jsonb_build_object(
     'review', jsonb_build_object('count', app.home_review_count(p_ws), 'href', '/review'),
@@ -280,7 +310,7 @@ begin
           where a.workspace_id = p_ws and a.kind = 'reply_received' and (a.payload ->> 'reply_class') is null),
         'href', '/workspace/' || p_ws || '/inbox'),
     'stale', jsonb_build_object('count', app.home_count(p_ws, v_brief, app.home_preset(p_ws, v_brief, 'stale')),
-                                'estimate_usd', v_est, 'href', '/accounts?view=stale'),
+                                'cells', v_cells, 'estimate_usd', v_est, 'href', '/accounts?view=stale'),
     'errored', jsonb_build_object('count', app.home_count(p_ws, v_brief, app.home_preset(p_ws, v_brief, 'errored')),
                                   'href', '/accounts?view=errored'));
 end $$;
@@ -331,12 +361,15 @@ end $$;
 
 -- ── 8. What changed (last 7 days) ────────────────────────────────────────────
 -- {items: [...]} at most 10, newest first (by at), each one of:
---  {kind: 'verdict', at, entity_id, account_id | null, name, from: text | null, to: text,
+--  {kind: 'verdict', at, entity_id, account_id | null, name, from: text, to: text,
 --   quote: text | null (the newest quoted claim the verdict cites), href: '/workspace/<ws>/accounts/<id>' | null}
 --     A verdict.changed event of the last 7 days compared with the one event before it of the same
 --     entity under the same Brief (any version of it), so a re-judgement under a republished
---     version that keeps the value is not a change. No item when the value is unchanged. A first
---     verdict has from null; a first Unverified is not news and is left out.
+--     version that keeps the value is not a change. No item when the value is unchanged.
+--  {kind: 'first_verdicts', at (the newest of them), brief_id, brief_name, day: date (UTC),
+--   count: int (accounts), href: '/accounts?brief=<brief_id>'}
+--     The events with no event before them (first verdicts), one item per Brief per UTC day, so a
+--     pilot's first run cannot fill the card. A first Unverified is not news and is left out.
 --  {kind: 'brief_version', at (published_at), brief_id, brief_name, version, stale_cells: int,
 --   href: '/briefs/<id>'}
 --     stale_cells: the cells that are stale now of the columns whose config_hash this version
@@ -345,7 +378,8 @@ end $$;
 --     that changed no column counts 0, whatever else is stale.
 --  {kind: 'new_accounts', at (newest account), radar_id, radar_name, count: int,
 --   href: '/accounts?radar=<radar_id>'}
---     accounts created in the last 7 days that a record of the radar mentions (count > 0 only).
+--     accounts created in the last 7 days that a record of the radar mentions (count > 0 only),
+--     over the lens's radars (app.home_lens_radar_briefs).
 create function public.home_changes(p_ws uuid, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
 as $$
@@ -356,13 +390,10 @@ declare
 begin
   return jsonb_build_object('items', coalesce((
     select jsonb_agg(x.item order by x.at desc, x.kind, x.tie)
-      from (select * from (
-        -- Verdict changes: only the events since v_since, each with the single event before it.
-        select ev.at, 'verdict' as kind, ev.oid::text as tie,
-               jsonb_build_object('kind', 'verdict', 'at', ev.at, 'entity_id', ev.entity_id, 'account_id', a.id,
-                                  'name', e.display_name, 'from', pv.val, 'to', ev.val,
-                                  'quote', app.home_quote(ev.entity_id, vd.claim_ids, false) ->> 'quote',
-                                  'href', case when a.id is not null then '/workspace/' || p_ws || '/accounts/' || a.id end) as item
+      from (with vc as (
+        -- Verdict events since v_since, each with the value of the single event before it of the
+        -- same entity under the same Brief (prev null: a first verdict).
+        select ev.oid, ev.at, ev.val, ev.vid, ev.entity_id, ev.brief_id, pv.val as prev
           from (select o.id as oid, o.created_at as at, o.payload ->> 'value' as val, o.aggregate_id as vid,
                        (o.payload ->> 'entity_id')::uuid as entity_id, bv.brief_id
                   from public.outbox o
@@ -379,11 +410,30 @@ begin
                    and (o2.created_at < ev.at or (o2.created_at = ev.at and o2.id < ev.oid))
                  order by o2.created_at desc, o2.id desc
                  limit 1) pv on true
-          join public.entity e on e.id = ev.entity_id
-          left join public.verdict vd on vd.id = ev.vid
-          left join public.account a on a.workspace_id = p_ws and a.entity_id = ev.entity_id
-         where pv.val is distinct from ev.val
-           and not (pv.val is null and ev.val = 'Unverified')
+      )
+      select * from (
+        -- Verdict changes: a value that differs from the one before it.
+        select vc.at, 'verdict' as kind, vc.oid::text as tie,
+               jsonb_build_object('kind', 'verdict', 'at', vc.at, 'entity_id', vc.entity_id, 'account_id', a.id,
+                                  'name', e.display_name, 'from', vc.prev, 'to', vc.val,
+                                  'quote', app.home_quote(vc.entity_id, vd.claim_ids, false) ->> 'quote',
+                                  'href', case when a.id is not null then '/workspace/' || p_ws || '/accounts/' || a.id end) as item
+          from vc
+          join public.entity e on e.id = vc.entity_id
+          left join public.verdict vd on vd.id = vc.vid
+          left join public.account a on a.workspace_id = p_ws and a.entity_id = vc.entity_id
+         where vc.prev is not null and vc.prev <> vc.val
+        union all
+        -- First verdicts, one item per Brief per UTC day (a pilot's first run judges many accounts
+        -- at once and must not push everything else out). A first Unverified is not news.
+        select max(vc.at), 'first_verdicts', vc.brief_id::text || ':' || (vc.at at time zone 'utc')::date,
+               jsonb_build_object('kind', 'first_verdicts', 'at', max(vc.at), 'brief_id', vc.brief_id, 'brief_name', b.name,
+                                  'day', (vc.at at time zone 'utc')::date, 'count', count(distinct vc.entity_id)::int,
+                                  'href', '/accounts?brief=' || vc.brief_id)
+          from vc
+          join public.brief b on b.id = vc.brief_id
+         where vc.prev is null and vc.val <> 'Unverified'
+         group by vc.brief_id, b.name, (vc.at at time zone 'utc')::date
         union all
         -- Brief versions published, with the stale cells of the columns each one changed.
         select bv.published_at, 'brief_version', bv.id::text,
@@ -412,7 +462,7 @@ begin
                   join public.source_record sr on sr.id = m.source_record_id
                   join public.radar r on r.id = sr.radar_id
                  where a.workspace_id = p_ws and a.created_at >= v_since
-                   and r.workspace_id = p_ws and r.brief_id = any(v_briefs)
+                   and r.workspace_id = p_ws and r.brief_id = any(app.home_lens_radar_briefs(p_ws, v_brief))
                  group by r.id, r.name) n
       ) u order by u.at desc, u.kind, u.tie limit 10) x), '[]'::jsonb));
 end $$;
@@ -442,8 +492,9 @@ end $$;
 -- ── 10. Sources card ─────────────────────────────────────────────────────────
 -- {radars: [{id, name, type (connector_type), health: 'incident' | 'silent' | 'ok' | 'paused' (status
 --            error / silent / active / paused), records_7d: int (source records of the radar in the
---            last 7 days), href: '/sources'}]   the lens's radars: incident, then silent, then ok,
---                                               then paused, then by name
+--            last 7 days), href: '/sources'}]   the lens's radars (for all: those of the published
+--                                               Pilot, Active and Paused Briefs): incident, then
+--                                               silent, then ok, then paused, then by name
 --  href: '/sources'}
 create function public.home_sources(p_ws uuid, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
@@ -463,7 +514,7 @@ begin
              order by case r.status when 'error' then 0 when 'silent' then 1 when 'active' then 2 else 3 end,
                       lower(r.name), r.id)
         from public.radar r
-       where r.workspace_id = p_ws and r.brief_id = any(app.home_lens_briefs(p_ws, v_brief))),
+       where r.workspace_id = p_ws and r.brief_id = any(app.home_lens_radar_briefs(p_ws, v_brief))),
       '[]'::jsonb),
     'href', '/sources');
 end $$;
@@ -490,7 +541,8 @@ end $$;
 
 -- ── 12. Grants ───────────────────────────────────────────────────────────────
 revoke execute on function
-  app.home_lens(uuid, uuid), app.home_lens_briefs(uuid, uuid), app.home_lens_versions(uuid, uuid),
+  app.home_lens(uuid, uuid), app.home_lens_briefs(uuid, uuid), app.home_lens_radar_briefs(uuid, uuid, boolean),
+  app.home_lens_versions(uuid, uuid),
   app.home_count(uuid, uuid, jsonb), app.home_preset(uuid, uuid, text), app.home_quote(uuid, uuid[], boolean),
   app.home_spend(uuid), app.home_review_count(uuid), app.home_stale_cells(uuid, uuid[])
   from public, anon, authenticated;

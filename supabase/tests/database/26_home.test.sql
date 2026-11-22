@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(92);
+select plan(99);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Alpha (A owner, K Viewer) holds the data. Beta (B owner) holds a foreign Brief. Gamma (C owner)
@@ -155,9 +155,14 @@ select (select v from ids where k = 'org'), (select v from ids where k = 'ws'), 
 select set_config('app.writer', '', true);
 
 -- Verdict history (verdict.changed events). Inside the last 7 days: E1 Confirmed -> Likely ->
--- Confirmed (after Likely three weeks ago), E4 Likely -> Unverified -> Likely, E5 / E6 first
--- verdicts, E7 a first Unverified (not a change). Across the republish: E2 Likely under v1, then
--- Confirmed under v2 (a change); E3 Likely under v1, then Likely under v2 (no change).
+-- Confirmed (after Likely three weeks ago), E4 Likely (first) -> Unverified -> Likely, E5 / E6
+-- first verdicts on the same UTC day (03:00 and 05:00 two days ago, so they group whatever the
+-- time now), E7 a first Unverified (not news), E8 a first Likely then Confirmed, the oldest two
+-- events. Across the republish: E2 Likely under v1, then Confirmed under v2 (a change); E3 Likely
+-- under v1, then Likely under v2 (no change).
+create function pg_temp.d2(h int) returns interval language sql as $$
+  select now() - ((date_trunc('day', now() at time zone 'utc') at time zone 'utc') - interval '2 days' + make_interval(hours => h))
+$$;
 insert into public.outbox (event, org_id, workspace_id, aggregate_type, aggregate_id, payload, created_at)
 select 'verdict.changed', (select v from ids where k = 'org'), (select v from ids where k = 'ws'), 'verdict', (select v from ids where k = vk),
        jsonb_build_object('verdict_id', (select v from ids where k = vk), 'entity_id', (select v from ids where k = 'e' || substr(vk, 2)),
@@ -166,7 +171,8 @@ select 'verdict.changed', (select v from ids where k = 'org'), (select v from id
   from (values ('v1', 'Likely', interval '20 days'), ('v1', 'Confirmed', interval '6 days'), ('v1', 'Likely', interval '5 days'),
                ('v1', 'Confirmed', interval '1 day'),
                ('v4', 'Likely', interval '4 days'), ('v4', 'Unverified', interval '84 hours'), ('v4', 'Likely', interval '3 days'),
-               ('v5', 'Likely', interval '50 hours'), ('v6', 'Likely', interval '40 hours'),
+               ('v5', 'Likely', pg_temp.d2(3)), ('v6', 'Likely', pg_temp.d2(5)),
+               ('v8', 'Likely', interval '160 hours'), ('v8', 'Confirmed', interval '150 hours'),
                ('v7', 'Unverified', interval '30 hours'),
                ('w2', 'Likely', interval '9 days'), ('v2', 'Confirmed', interval '36 hours'),
                ('w3', 'Likely', interval '9 days'), ('v3', 'Likely', interval '60 hours')) v(vk, val, age);
@@ -292,9 +298,13 @@ select is(public.home_needs_you(pg_temp.w(), pg_temp.b()) - 'stale',
   '20. review decisions, replies to classify, errored accounts');
 select is(public.home_needs_you(pg_temp.w(), pg_temp.b()) -> 'stale',
   jsonb_build_object('count', 1, 'href', '/accounts?view=stale',
+                     'cells', (select sum((public.estimate_column_run(pg_temp.w(), pg_temp.id(c), 'stale', pg_temp.b()) ->> 'count')::int)
+                                 from unnest(array['p_sites', 'p_dbl', 'p_tri']) c),
                      'estimate_usd', (select sum((public.estimate_column_run(pg_temp.w(), pg_temp.id(c), 'stale', pg_temp.b()) ->> 'cost_usd')::numeric)
                                         from unnest(array['p_sites', 'p_dbl', 'p_tri']) c)),
-  '21. one stale account; the estimate is the sum of estimate_column_run(stale).cost_usd over the columns');
+  '21. one stale account; cells and estimate are the sums of estimate_column_run(stale) over the same columns');
+select is((public.home_needs_you(pg_temp.w(), pg_temp.b()) #>> '{stale,cells}')::int, 3,
+  '21b. the one stale account has three stale cells: the estimate prices cells, the count is accounts');
 select is((public.home_needs_you(pg_temp.w(), pg_temp.b()) #>> '{stale,estimate_usd}')::numeric, 0.01::numeric, '22. which is one extract call');
 select is(public.home_needs_you(pg_temp.w(), null) -> 'stale', public.home_needs_you(pg_temp.w(), pg_temp.b()) -> 'stale',
   '23. all: the same stale count and estimate over every column');
@@ -326,7 +336,7 @@ select is(public.home_accounts_to_act(pg_temp.w(), null) -> 'accounts', public.h
 
 -- ── What changed ─────────────────────────────────────────────────────────────
 create function pg_temp.ch(b uuid) returns jsonb language sql as $$ select public.home_changes(pg_temp.w(), b) -> 'items' $$;
-select is(jsonb_array_length(pg_temp.ch(pg_temp.b())), 10, '34. at most 10 items (11 happened)');
+select is(jsonb_array_length(pg_temp.ch(pg_temp.b())), 10, '34. at most 10 items (12 happened)');
 select ok((select bool_and((x ->> 'at')::timestamptz >= now() - interval '7 days') from jsonb_array_elements(pg_temp.ch(pg_temp.b())) x),
   '35. only the last 7 days');
 select ok(not exists (select 1 from (select (x ->> 'at')::timestamptz a, lag((x ->> 'at')::timestamptz) over (order by o) p
@@ -334,11 +344,18 @@ select ok(not exists (select 1 from (select (x ->> 'at')::timestamptz a, lag((x 
                        where s.a > s.p),
   '36. newest first');
 select is((select string_agg(distinct x ->> 'kind', ',') from jsonb_array_elements(pg_temp.ch(pg_temp.b())) x),
-  'brief_version,new_accounts,verdict', '37. covers each kind');
+  'brief_version,first_verdicts,new_accounts,verdict', '37. covers each kind');
 select is((select string_agg(coalesce(x ->> 'from', '-') || '>' || (x ->> 'to') || ':' || (x ->> 'name'), ',' order by o)
              from jsonb_array_elements(pg_temp.ch(pg_temp.b())) with ordinality t(x, o) where x ->> 'kind' = 'verdict'),
-  'Likely>Confirmed:HM E1,Likely>Confirmed:HM E2,-' || '>Likely:HM E6,-' || '>Likely:HM E5,Unverified>Likely:HM E4,Likely>Unverified:HM E4,-' || '>Likely:HM E4,Confirmed>Likely:HM E1',
-  '38. verdict changes newest first: a first Unverified is not news, the oldest change falls past the limit');
+  'Likely>Confirmed:HM E1,Likely>Confirmed:HM E2,Unverified>Likely:HM E4,Likely>Unverified:HM E4,Confirmed>Likely:HM E1,Likely>Confirmed:HM E1',
+  '38. verdict changes newest first, each with a from: first verdicts are grouped apart, E8 falls past the limit');
+select is((select string_agg((x ->> 'brief_name') || ':' || (x ->> 'count'), ',' order by o)
+             from jsonb_array_elements(pg_temp.ch(pg_temp.b())) with ordinality t(x, o) where x ->> 'kind' = 'first_verdicts'),
+  'Drone docks:2,Drone docks:1', '38d. first verdicts are one item per Brief per UTC day (E5 + E6, then E4); a first Unverified is left out');
+select is((select x from jsonb_array_elements(pg_temp.ch(pg_temp.b())) x where x ->> 'kind' = 'first_verdicts' limit 1),
+  jsonb_build_object('kind', 'first_verdicts', 'at', now() - pg_temp.d2(5), 'brief_id', pg_temp.b(), 'brief_name', 'Drone docks',
+                     'day', ((now() - pg_temp.d2(5)) at time zone 'utc')::date, 'count', 2, 'href', '/accounts?brief=' || pg_temp.b()),
+  '38e. a first-verdicts item: the newest of them, the UTC day, the count and the Brief''s accounts');
 select is((select x from jsonb_array_elements(pg_temp.ch(pg_temp.b())) x where x ->> 'name' = 'HM E2'),
   jsonb_build_object('kind', 'verdict', 'at', now() - interval '36 hours', 'entity_id', pg_temp.id('e2'), 'account_id', pg_temp.id('a2'),
                      'name', 'HM E2', 'from', 'Likely', 'to', 'Confirmed', 'quote', null,
@@ -363,9 +380,11 @@ select is(pg_temp.ch(pg_temp.id('b2')),
   jsonb_build_array(jsonb_build_object('kind', 'brief_version', 'at', now() - interval '1 day', 'brief_id', pg_temp.id('b2'),
                                        'brief_name', 'Draft one', 'version', 1, 'stale_cells', 0, 'href', '/briefs/' || pg_temp.id('b2'))),
   '42. a version that changes no column counts 0, though its columns have stale cells');
-select is((select string_agg(coalesce(x ->> 'name', x ->> 'brief_name', x ->> 'radar_name'), ',' order by o)
-             from jsonb_array_elements(pg_temp.ch(null)) with ordinality t(x, o)),
-  'News radar,Draft one,HM E1,HM E2,HM E6,Drone docks,HM E5,HM E4,HM E4,HM E4',
+select is((select string_agg((x ->> 'kind') || ':' || coalesce(x ->> 'name', x ->> 'brief_name', x ->> 'radar_name'), ','
+                              order by (x ->> 'kind') || ':' || coalesce(x ->> 'name', x ->> 'brief_name', x ->> 'radar_name') collate "C")
+             from jsonb_array_elements(pg_temp.ch(null)) x),
+  'brief_version:Draft one,brief_version:Drone docks,first_verdicts:Drone docks,first_verdicts:Drone docks,new_accounts:News radar,'
+  || 'verdict:HM E1,verdict:HM E1,verdict:HM E2,verdict:HM E4,verdict:HM E4',
   '43. all: every non-Archived Brief''s changes, still at most 10');
 
 -- ── CRM ──────────────────────────────────────────────────────────────────────
@@ -405,11 +424,35 @@ reset role;
 update public.ai_capability_model set model = 'hm-unpriced' where capability = 'extract';
 set local role authenticated;
 select is(public.home_needs_you(pg_temp.w(), pg_temp.b()) -> 'stale',
-  '{"count": 1, "estimate_usd": null, "href": "/accounts?view=stale"}'::jsonb, '59b. no price: estimate_usd null, count intact');
+  '{"count": 1, "cells": null, "estimate_usd": null, "href": "/accounts?view=stale"}'::jsonb, '59b. no price: cells and estimate_usd null, count intact');
 select is(public.home_needs_you(pg_temp.w(), pg_temp.b()) #>> '{errored,count}', '1', '59c. no price: the other rows intact');
 reset role;
 update public.ai_capability_model set model = 'claude-sonnet-5-5' where capability = 'extract';
+
+-- ── Radars under "All Briefs" (M2) ───────────────────────────────────────────
+-- An active radar on the Draft Brief (B2), and a Paused Brief with a published version whose radar
+-- is still active. All Briefs lists the Paused Brief's radar, never the Draft's; "sources running"
+-- counts only the Pilot and Active Briefs the header's count names.
+insert into ids values ('b_rest', gen_random_uuid()), ('bv_rest', gen_random_uuid());
+insert into public.brief (id, org_id, workspace_id, name, state, intake_status)
+values (pg_temp.id('b_rest'), pg_temp.id('org'), pg_temp.w(), 'Resting', 'Draft', 'done');
+insert into public.brief_version (id, brief_id, org_id, workspace_id, version, config, rubric, weights, published_at)
+values (pg_temp.id('bv_rest'), pg_temp.id('b_rest'), pg_temp.id('org'), pg_temp.w(), 1, '{}', '{}', '{}', now() - interval '30 days');
+update public.brief set state = 'Paused', current_version_id = pg_temp.id('bv_rest') where id = pg_temp.id('b_rest');
+insert into public.radar (org_id, workspace_id, brief_id, connector_type, name, status)
+values (pg_temp.id('org'), pg_temp.w(), pg_temp.id('b2'), 'news', 'Draft radar', 'active'),
+       (pg_temp.id('org'), pg_temp.w(), pg_temp.id('b_rest'), 'news', 'Resting radar', 'active');
 set local role authenticated;
+select is((select string_agg(x ->> 'name', ',' order by o) from jsonb_array_elements(public.home_sources(pg_temp.w(), null) -> 'radars') with ordinality t(x, o)),
+  'Jobs radar,Tender radar,News radar,Resting radar,Paused radar',
+  '59d. all: the radars of published Pilot, Active and Paused Briefs, not a Draft''s');
+select is((select string_agg(x ->> 'name', ',') from jsonb_array_elements(public.home_sources(pg_temp.w(), pg_temp.id('b2')) -> 'radars') x),
+  'Draft radar', '59e. a Draft Brief as the lens still shows its own radars');
+select is(public.home_header(pg_temp.w(), null) - 'workspace_name' - 'href' - 'lens' - 'brief',
+  '{"brief_count": 1, "sources_running": 1}'::jsonb,
+  '59f. all: sources running are the active radars of the Pilot and Active Briefs counted beside them');
+select is(public.home_header(pg_temp.w(), pg_temp.id('b_rest')) -> 'sources_running', '1'::jsonb,
+  '59g. the Paused Brief as the lens: its own active radar');
 
 -- ── Empty workspace (Review Focus 3) ─────────────────────────────────────────
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000026a4","role":"authenticated"}', true);
@@ -432,7 +475,7 @@ select is(public.home_needs_you(pg_temp.c(), null),
   jsonb_build_object(
     'review', jsonb_build_object('count', 0, 'href', '/review'),
     'replies_to_classify', jsonb_build_object('count', 0, 'href', '/workspace/' || pg_temp.c() || '/inbox'),
-    'stale', jsonb_build_object('count', 0, 'estimate_usd', 0, 'href', '/accounts?view=stale'),
+    'stale', jsonb_build_object('count', 0, 'cells', 0, 'estimate_usd', 0, 'href', '/accounts?view=stale'),
     'errored', jsonb_build_object('count', 0, 'href', '/accounts?view=errored')),
   '64. empty: needs you is zeros');
 select is(public.home_accounts_to_act(pg_temp.c(), null), '{"accounts": [], "total": 0, "href": "/accounts?view=ready_to_contact"}'::jsonb,
