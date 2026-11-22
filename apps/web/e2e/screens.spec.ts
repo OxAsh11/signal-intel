@@ -1,11 +1,12 @@
 import { expect, test } from '@playwright/test';
-import { SCREENS } from '../src/lib/screens';
+import { allRoutes } from '../src/lib/nav';
 import { newUser, onboard, signIn } from './support';
 
-// The widths the product must fit without sideways scrolling: large desktop, laptop, phone.
+// The widths the product must fit without sideways scrolling: desktop, a small laptop or tablet
+// (1024, below Home's two-column breakpoint) and phone.
 const WIDTHS = [
-  { width: 1920, height: 1080 },
-  { width: 1366, height: 768 },
+  { width: 1440, height: 900 },
+  { width: 1024, height: 768 },
   { width: 390, height: 844 },
 ];
 
@@ -20,9 +21,12 @@ test.describe('every screen', () => {
     test(`loads without errors and fits ${viewport.width}px`, async ({ page }) => {
       await page.setViewportSize(viewport);
       const errors: string[] = [];
-      page.on('pageerror', (e) => errors.push(e.message));
+      page.on('pageerror', (e) => errors.push(`${page.url()}: ${e.message}`));
+      page.on('console', (m) => {
+        if (m.type() === 'error') errors.push(`${page.url()}: ${m.text()}`);
+      });
 
-      for (const s of [...SCREENS.map((x) => x.href), '/briefs/new']) {
+      for (const s of [...allRoutes(), '/briefs/new']) {
         const res = await page.goto(s);
         expect(res?.status(), `${s} status`).toBeLessThan(400);
         await expect(page, `${s} stays signed in`).not.toHaveURL(/\/(login|onboarding)/);

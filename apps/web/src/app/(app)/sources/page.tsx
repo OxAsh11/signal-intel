@@ -6,7 +6,7 @@ import { createClient } from '@/lib/supabase/server';
 import { getOrgContext } from '@/lib/org';
 import { isNotSetUp, radarTypeLabel, yieldLabel } from '@/lib/radars';
 
-export const metadata: Metadata = { title: 'Discovery' };
+export const metadata: Metadata = { title: 'Sources' };
 
 type Radar = {
   id: string;
@@ -26,10 +26,10 @@ const HEALTH: Record<string, HealthStatus> = { active: 'ok', silent: 'silent', e
 const nf = new Intl.NumberFormat('en');
 
 /**
- * Discovery (pool family): from pages fetched to companies matched, then each radar's volume,
+ * Sources, formerly Discovery (pool family): from pages fetched to companies matched, then each radar's volume,
  * pre-filtered share and yield. Nothing is dropped silently: every step is counted.
  */
-export default async function DiscoveryPage() {
+export default async function SourcesPage() {
   const [ctx, supabase] = await Promise.all([getOrgContext(), createClient()]);
   if (!ctx?.workspace || !supabase) return null;
   const ws = ctx.workspace.id;
@@ -61,10 +61,10 @@ export default async function DiscoveryPage() {
   return (
     <>
       <div className="flex flex-col gap-2">
-        <span className="si-eyebrow">Discovery</span>
-        <h1 className="si-h1">
+        <h1 className="si-h1">Sources</h1>
+        <p className="m-0 text-[20px] leading-7 font-medium text-ink">
           {total ? `From ${nf.format(total)} pages to ${nf.format(matched)} matches` : 'Where your Briefs are looking'}
-        </h1>
+        </p>
         <p className="si-lede">
           Each step is cheaper than the next and keeps only what matters, so the AI reads a small share. Nothing is dropped
           silently: every filtered page is counted. Radars are created from a Brief&apos;s sources.
@@ -72,7 +72,7 @@ export default async function DiscoveryPage() {
       </div>
 
       <Card family="pool" kind="feature" aria-labelledby="funnel-h">
-        <FamilyTag family="pool">Discovery · funnel</FamilyTag>
+        <FamilyTag family="pool">Sources · funnel</FamilyTag>
         <h2 id="funnel-h" className="si-h2 text-[20px]">What happened to every page</h2>
         <div className="grid grid-cols-[minmax(140px,240px)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3">
           {steps.map(([label, n, note]) => (
@@ -91,9 +91,9 @@ export default async function DiscoveryPage() {
       </Card>
 
       <div className="si-tiles">
-        <MetricTile family="pool" label="Waiting to be read" value={nf.format(pending)} href="/discovery" version="def v1" />
-        <MetricTile family="pool" label="Not relevant" value={nf.format(irrelevant)} href="/discovery" delta="kept, never deleted" version="def v1" />
-        <MetricTile family="lava" label="Failed" value={nf.format(failed)} href="/discovery" delta="retried automatically" version="def v1" />
+        <MetricTile family="pool" label="Waiting to be read" value={nf.format(pending)} href="/sources" version="def v1" />
+        <MetricTile family="pool" label="Not relevant" value={nf.format(irrelevant)} href="/sources" delta="kept, never deleted" version="def v1" />
+        <MetricTile family="lava" label="Failed" value={nf.format(failed)} href="/sources" delta="retried automatically" version="def v1" />
       </div>
 
       <Card family="pool" className="si-flush" aria-labelledby="radars-h">

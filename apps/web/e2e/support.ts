@@ -5,7 +5,7 @@
  * Never point these at a shared database: the suite creates users and organisations.
  */
 import { randomUUID } from 'node:crypto';
-import type { BrowserContext, Page } from '@playwright/test';
+import { expect, type BrowserContext, type Page } from '@playwright/test';
 import { createClient } from '@supabase/supabase-js';
 import { Client } from 'pg';
 
@@ -119,3 +119,15 @@ export const FLYTBASE_DRAFT = {
 
 export const FLYTBASE_DESCRIPTION =
   'We sell FlytBase, an enterprise drone autonomy platform for docked drones and remote BVLOS operations. Find operators of large sites (energy, mining, ports) about to automate drone inspection or security: tenders, pilots, BVLOS approvals, drone programme hires.';
+
+/**
+ * The si_brief lens cookie, decoded. Next URL-encodes cookie values on write (`:` becomes `%3A`)
+ * and decodes them on read, so the raw value must be the encoded form of what the app set.
+ */
+export async function lensCookie(context: BrowserContext) {
+  const c = (await context.cookies()).find((x) => x.name === 'si_brief');
+  if (!c) return undefined;
+  const value = decodeURIComponent(c.value);
+  expect(c.value, 'si_brief is stored URL-encoded').toBe(encodeURIComponent(value));
+  return { ...c, value };
+}

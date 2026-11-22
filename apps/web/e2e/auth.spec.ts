@@ -8,7 +8,7 @@ test('a signed-out visitor is sent to the sign-in page and keeps where they were
   await expect(page.getByRole('button', { name: 'Email me a sign-in link' })).toBeVisible();
 });
 
-test('a new user creates their organisation and lands on Today', async ({ page, context }) => {
+test('a new user creates their organisation and lands on Home', async ({ page, context }) => {
   const user = await newUser('onboard');
   await signIn(context, user.email);
 

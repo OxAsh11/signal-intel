@@ -2,7 +2,12 @@
 name = "signal-intel"
 version = "0.1.0"
 requires-python = ">=3.13,<3.14"
-dependencies = ["signal-core", "worker", "api"]
+dependencies = [
+    "signal-core",
+    "worker",
+    "api",
+    "sarvamai>=0.1.48",
+]
 
 [tool.uv]
 package = false
