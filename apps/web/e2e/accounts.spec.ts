@@ -662,3 +662,195 @@ test.describe('Accounts table', () => {
     });
   });
 });
+
+test.describe('Filters, views, pins and search', () => {
+  let userId = '';
+  const aside = (page: Page) => page.getByRole('complementary', { name: 'Sidebar' });
+  const viewsNav = (page: Page) => page.getByRole('navigation', { name: 'Views' });
+  const saveForm = (page: Page) => page.getByRole('form', { name: 'Save view' });
+  const openTable = async (page: Page, ws: string, query: string) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/workspace/${ws}/accounts?${query}`);
+    await expect(table(page)).toHaveAttribute('data-ready', '');
+  };
+  const rowNames = (page: Page) => table(page).locator('tbody tr').evaluateAll((trs) => trs.map((t) => t.getAttribute('data-row')));
+
+  test.beforeEach(async ({ page, context }) => {
+    const user = await newUser('filters');
+    userId = user.id;
+    await signIn(context, user.email);
+    await onboard(page, 'Filters Org');
+  });
+
+  test('chips: Verdict is Confirmed, Likely plus a column is not empty narrows the rows, and f round-trips on reload', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await openTable(page, w.ws, `brief=${s.brief}`);
+    await expect(table(page).locator('tbody tr')).toHaveCount(ROWS.length);
+
+    await page.getByRole('button', { name: /^Filters/ }).click();
+    const builder = page.locator('[data-filter-builder]');
+    await builder.getByRole('button', { name: 'Add filter' }).click();
+    await builder.getByLabel('Filter field').nth(0).selectOption({ label: 'Verdict' });
+    await builder.getByRole('checkbox', { name: 'Confirmed' }).check();
+    await builder.getByRole('checkbox', { name: 'Likely' }).check();
+    await builder.getByRole('button', { name: 'Add filter' }).click();
+    await builder.getByLabel('Filter field').nth(1).selectOption({ label: 'Sites' });
+    await builder.getByLabel('Filter operator').nth(1).selectOption({ label: 'is not empty' });
+    await page.screenshot({ path: 'test-results/accounts-filter-builder.png', fullPage: true });
+    await builder.getByRole('button', { name: 'Apply filter' }).click();
+
+    await expect(table(page).locator('tbody tr')).toHaveCount(1);
+    await expect(table(page).locator('tr[data-row="Alpha Grid"]')).toBeVisible();
+    const f = new URL(page.url()).searchParams.get('f');
+    expect(f).toBeTruthy();
+    expect(JSON.parse(Buffer.from(f as string, 'base64url').toString())).toEqual({
+      all: [
+        { field: { system: 'verdict' }, op: 'one_of', value: ['Confirmed', 'Likely'] },
+        { field: { column: s.sites }, op: 'is_not_empty' },
+      ],
+    });
+
+    // The URL is the state: a reload shows the same rows and the same chips.
+    await page.reload();
+    await expect(table(page)).toHaveAttribute('data-ready', '');
+    await expect(table(page).locator('tbody tr')).toHaveCount(1);
+    await expect(page.locator('[data-filter-builder]').getByLabel('Filter field')).toHaveCount(2);
+    await expect(page.locator('[data-filter-builder]').getByRole('checkbox', { name: 'Likely' })).toBeChecked();
+
+    // Clear filter returns every row.
+    await page.locator('[data-filter-builder]').getByRole('button', { name: 'Clear filter' }).click();
+    await expect(table(page).locator('tbody tr')).toHaveCount(ROWS.length);
+    expect(new URL(page.url()).searchParams.has('f')).toBe(false);
+  });
+
+  test('an "any of" group matches when one of its chips does', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await openTable(page, w.ws, `brief=${s.brief}`);
+    await page.getByRole('button', { name: /^Filters/ }).click();
+    const builder = page.locator('[data-filter-builder]');
+    await builder.getByRole('button', { name: /^Add .any of. group$/ }).click();
+    await builder.getByLabel('Filter field').nth(0).selectOption({ label: 'Name' });
+    await builder.getByLabel('Filter value').nth(0).fill('grid');
+    await builder.getByRole('button', { name: 'Add to group' }).click();
+    await builder.getByLabel('Filter field').nth(1).selectOption({ label: 'Name' });
+    await builder.getByLabel('Filter value').nth(1).fill('hydro');
+    await builder.getByRole('button', { name: 'Apply filter' }).click();
+    await expect.poll(() => rowNames(page)).toEqual(['Alpha Grid', 'Delta Hydro']);
+  });
+
+  test('Save view (personal) shows in the view bar; Pin shows it under Accounts with its count; Unpin removes it', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await openTable(page, w.ws, `brief=${s.brief}&f=${enc({ field: { system: 'name' }, op: 'contains', value: 'grid' })}`);
+
+    await page.getByRole('button', { name: 'Save view' }).click();
+    await saveForm(page).getByLabel('View name').fill('Grid only');
+    await saveForm(page).getByRole('radio', { name: 'Personal' }).check();
+    await saveForm(page).getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page).toHaveURL(/view=[0-9a-f-]{36}/);
+    await expect(viewsNav(page).getByRole('link', { name: 'Grid only' })).toBeVisible();
+    await expect(table(page).locator('tbody tr')).toHaveCount(1);
+    const [saved] = await sql<{ visibility: string }>(`select visibility from public.saved_view where workspace_id = $1 and name = 'Grid only'`, [w.ws]);
+    expect(saved.visibility).toBe('personal');
+
+    await expect(aside(page).locator('[data-pinned-view]')).toHaveCount(0);
+    await page.getByRole('button', { name: 'Pin to sidebar' }).click();
+    const pinned = aside(page).locator('[data-pinned-view]', { hasText: 'Grid only' });
+    await expect(pinned).toBeVisible();
+    await expect(pinned).toHaveText(/Grid only\s*1$/);
+    await expect(pinned).toHaveAttribute('href', /\/accounts\?view=[0-9a-f-]{36}/);
+
+    await page.getByRole('button', { name: 'Unpin from sidebar' }).click();
+    await expect(aside(page).locator('[data-pinned-view]')).toHaveCount(0);
+  });
+
+  test('a Viewer saves and pins a personal view but is not offered a workspace one (Review Focus 5)', async ({ browser }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    const viewer = await newUser('filters-viewer');
+    const [member] = await sql<{ id: string }>('insert into public.member (org_id, user_id, email) values ($1, $2, $3) returning id', [w.org, viewer.id, viewer.email]);
+    await sql(`insert into public.role_assignment (org_id, member_id, workspace_id, role) values ($1, $2, $3, 'Viewer')`, [w.org, member.id, w.ws]);
+    const ctx = await browser.newContext();
+    await signIn(ctx, viewer.email);
+    const vp = await ctx.newPage();
+    await openTable(vp, w.ws, `brief=${s.brief}`);
+    await vp.getByRole('button', { name: 'Save view' }).click();
+    await expect(saveForm(vp).getByRole('radio', { name: 'Personal' })).toBeVisible();
+    await expect(saveForm(vp).getByRole('radio', { name: 'Workspace' })).toHaveCount(0);
+    await saveForm(vp).getByLabel('View name').fill('My errors');
+    await saveForm(vp).getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(vp).toHaveURL(/view=[0-9a-f-]{36}/);
+    await vp.getByRole('button', { name: 'Pin to sidebar' }).click();
+    await expect(aside(vp).locator('[data-pinned-view]', { hasText: 'My errors' })).toBeVisible();
+    await ctx.close();
+  });
+
+  test('an Editor is offered Personal and Workspace, and a workspace view is saved as one', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await openTable(page, w.ws, `brief=${s.brief}`);
+    await page.getByRole('button', { name: 'Save view' }).click();
+    await expect(saveForm(page).getByRole('radio', { name: 'Personal' })).toBeVisible();
+    await saveForm(page).getByRole('radio', { name: 'Workspace' }).check();
+    await saveForm(page).getByLabel('View name').fill('Team view');
+    await saveForm(page).getByRole('button', { name: 'Save', exact: true }).click();
+    await expect(page).toHaveURL(/view=[0-9a-f-]{36}/);
+    const [row] = await sql<{ visibility: string }>(`select visibility from public.saved_view where workspace_id = $1 and name = 'Team view'`, [w.ws]);
+    expect(row.visibility).toBe('workspace');
+  });
+
+  test('each preset loads its filter', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await openTable(page, w.ws, `brief=${s.brief}`);
+    const go = async (name: string, preset: string) => {
+      await viewsNav(page).getByRole('link', { name, exact: true }).click();
+      await expect(page).toHaveURL(new RegExp(`view=${preset}`));
+      await expect(page.locator('[data-table-state="error"], [data-table-state="bad-filter"]')).toHaveCount(0);
+    };
+    await go('Ready to contact', 'ready_to_contact');
+    await expect(table(page).locator('tbody tr')).toHaveCount(1);
+    await expect(table(page).locator('tr[data-row="Alpha Grid"]')).toBeVisible();
+    await go('Needs evidence', 'needs_evidence');
+    await expect(page.locator('[data-table-state="no-match"]')).toBeVisible();
+    await go('Stale', 'stale');
+    await expect(table(page).locator('tr[data-row="Bravo Power"]')).toBeVisible();
+    await go('Errored', 'errored');
+    await expect(table(page).locator('tr[data-row="Charlie Wind"]')).toBeVisible();
+    await go('By verdict', 'by_verdict');
+    await expect(table(page).locator('tbody tr')).toHaveCount(ROWS.length);
+    // A preset's filter shows as chips.
+    await go('Ready to contact', 'ready_to_contact');
+    await page.getByRole('button', { name: /^Filters/ }).click();
+    await expect(page.locator('[data-filter-builder]').getByLabel('Filter field')).toHaveCount(2);
+  });
+
+  test('search: Ctrl+K focuses it, a seeded name shows, Enter opens it; % matches literally', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    await sql(`
+      begin;
+      select set_config('app.writer', 'derivation', true);
+      insert into public.account (org_id, workspace_id, entity_id)
+      select '${w.org}', '${w.ws}', app.create_entity('${w.org}', 'company', n, 'tenant') from unnest(array['100% Solar Co', '100 Solar Co']) n;
+      select set_config('app.writer', '', true);
+      commit;
+    `);
+    await openTable(page, w.ws, `brief=${s.brief}`);
+    const box = page.getByRole('combobox', { name: 'Search accounts' });
+    await page.keyboard.press('Control+K');
+    await expect(box).toBeFocused();
+    await box.fill('grid');
+    await expect(page.getByRole('option', { name: /Alpha Grid/ })).toBeVisible();
+    await box.press('Enter');
+    await page.waitForURL(new RegExp(`/workspace/${w.ws}/accounts/[0-9a-f-]{36}`));
+
+    await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+    await expect(table(page)).toHaveAttribute('data-ready', '');
+    await box.fill('0% S');
+    await expect(page.getByRole('option', { name: /100% Solar Co/ })).toBeVisible();
+    await expect(page.getByRole('option')).toHaveCount(1); // 100 Solar Co is not a match: % is not a wildcard
+  });
+});

@@ -237,6 +237,30 @@ async function secondWorkspace(org: string, name = 'Second'): Promise<string> {
   return id;
 }
 
+test.describe('pinned views', () => {
+  test('a pinned view is listed under Accounts with its count and links to ?view=', async ({ page, context }) => {
+    const user = await newUser('nav-pins');
+    await signIn(context, user.email);
+    await onboard(page, 'Pinned Nav');
+    const { ws } = await workspaceOf(user.id);
+    await sql(
+      `insert into public.view_pin (member_id, workspace_id, view_ref, position)
+       select m.id, $2, v.ref, v.pos from public.member m, (values ('by_verdict', 1), ('errored', 2)) v(ref, pos) where m.user_id = $1`,
+      [user.id, ws],
+    );
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const pinned = aside(page).locator('[data-pinned-view]');
+    await expect(pinned).toHaveCount(2);
+    await expect(pinned.nth(0)).toHaveText(/By verdict\s*0/);
+    await expect(pinned.nth(0)).toHaveAttribute('href', `/workspace/${ws}/accounts?view=by_verdict`);
+    await expect(pinned.nth(1)).toContainText('Errored');
+    // They sit under Accounts, before Work's next item.
+    const labels = await aside(page).getByRole('group', { name: 'Work' }).getByRole('link').allInnerTexts();
+    expect(labels.findIndex((t) => t.startsWith('By verdict'))).toBe(labels.findIndex((t) => t.startsWith('Accounts')) + 1);
+  });
+});
+
 test.describe('Brief lens', () => {
   let userId = '';
 

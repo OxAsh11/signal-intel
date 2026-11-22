@@ -8,6 +8,8 @@ import { AddColumn } from './_table/add-column';
 import { Cards } from './_table/cards';
 import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton } from './_table/states';
 import { CellPanel } from './_table/panel';
+import type { FilterColumn } from './_table/filter-builder';
+import { ViewBar, type ViewRow } from './_table/view-bar';
 import { AccountsTable } from './_table/table';
 import type { TableData } from './_table/types';
 import {
@@ -41,10 +43,79 @@ export default async function AccountsPage({ params, searchParams }: PageProps<'
   return (
     <div className="flex flex-col gap-4">
       <h1 className="si-h1">Accounts</h1>
+      <Suspense fallback={null}>
+        <ViewBarSection ws={wsid} sp={sp} />
+      </Suspense>
       <Suspense fallback={<TableSkeleton />}>
         <TableSection ws={wsid} sp={sp} />
       </Suspense>
     </div>
+  );
+}
+
+/**
+ * The view bar and filter builder. It sits above the table's own states, so a filter that matches
+ * nothing (or cannot be read) can still be changed. It reads the same effective filter and sort the
+ * table does: the URL's, else the view's own.
+ */
+async function ViewBarSection({ ws, sp }: { ws: string; sp: Record<string, string | string[] | undefined> }) {
+  const q = readQuery(sp);
+  const supabase = await createClient();
+  if (!supabase) return null;
+  const lens = await getBriefLens(sp);
+  const ctx = await getOrgContext();
+
+  const { data: viewData } = await supabase.rpc('list_views', { p_ws: ws, p_brief: lens.briefId });
+  const all = (viewData ?? []) as (SavedView & { name: string; visibility: string })[];
+  const views: ViewRow[] = all.map((v) => ({ id: v.id, preset: v.preset, name: v.name, visibility: v.visibility }));
+  const view = q.view ? (all.find((v) => v.preset === q.view || v.id === q.view) ?? null) : null;
+
+  let filter: Record<string, unknown> | null = null;
+  if (q.f !== undefined) {
+    const d = decodeFilter(q.f);
+    filter = d.ok ? d.ast : null;
+  } else if (view && !isEmptyFilter(view.filter)) filter = view.filter as Record<string, unknown>;
+  const urlSort = parseSort(q.sort);
+  const sorts: SortKey[] = q.sort ? (urlSort ?? []) : sortKeysFromAst(view?.sort);
+
+  // The columns the table shows (a view's own, else the lens Brief's), then every workspace column, for the field picker.
+  const shown = await supabase.rpc('account_table', {
+    p_ws: ws,
+    p_brief: lens.briefId,
+    p_filter: {},
+    p_sort: [],
+    p_columns: view ? await viewColumnIds(supabase, ws, view.columns) : null,
+    p_limit: 1,
+    p_offset: 0,
+  });
+  const shownCols = ((shown.data as TableData | null)?.columns ?? []) as { id: string; key: string }[];
+  const ids = shownCols.map((c) => c.id).filter((id) => UUID.test(id));
+  const { data: preds } = await supabase
+    .from('predicate')
+    .select('key, label, value_type, allowed_values')
+    .or(`workspace_id.eq.${ws}${ids.length ? `,id.in.(${ids.join(',')})` : ''}`)
+    .order('label');
+  const columns: FilterColumn[] = ((preds ?? []) as { key: string; label: string; value_type: string; allowed_values: unknown }[]).map((p) => ({
+    key: p.key,
+    label: p.label,
+    value_type: p.value_type,
+    allowed_values: Array.isArray(p.allowed_values) ? p.allowed_values.filter((x): x is string => typeof x === 'string') : [],
+  }));
+
+  const { data: pins } = await supabase.from('view_pin').select('view_ref').eq('workspace_id', ws);
+  return (
+    <ViewBar
+      ws={ws}
+      q={q}
+      views={views}
+      pinned={((pins ?? []) as { view_ref: string }[]).map((p) => p.view_ref)}
+      canWorkspace={atLeast(ctx?.workspaceRole, 'Editor')}
+      columns={columns}
+      filter={filter}
+      sort={sortAst(sorts)}
+      columnKeys={shownCols.map((c) => c.key)}
+      briefId={lens.briefId}
+    />
   );
 }
 
