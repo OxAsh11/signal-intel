@@ -99,8 +99,9 @@ export function AccountsTable({
     }
   }
 
+  // data-ready: React has taken the table over, so keys and clicks are handled (the e2e waits for it).
   return (
-    <div data-table="" className="max-md:hidden">
+    <div data-table="" ref={(el) => el?.setAttribute('data-ready', '')} className="max-md:hidden">
       {selected.size > 0 ? (
         <div className="mb-2 flex items-center gap-3 rounded-md border border-line bg-surface-sunken px-4 py-2 text-[13px]" role="region" aria-label="Selected accounts">
           <span className="font-medium text-ink">{selected.size} selected</span>

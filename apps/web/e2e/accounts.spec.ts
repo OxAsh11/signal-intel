@@ -216,6 +216,7 @@ test.describe('Accounts table', () => {
     const s = await seed(w);
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+    await expect(table(page)).toHaveAttribute('data-ready', '');
     await page.evaluate(() => {
       (window as unknown as { __opened: unknown[] }).__opened = [];
       window.addEventListener('si:open-cell', (e) => (window as unknown as { __opened: unknown[] }).__opened.push((e as CustomEvent).detail));
@@ -276,11 +277,16 @@ test.describe('Accounts table', () => {
     const w = await workspaceOf(userId);
     const s = await seed(w);
     const base = `/workspace/${w.ws}/accounts?brief=${s.brief}`;
+    // Over the server's limits (depth 8, 50 conditions) yet small enough for a URL (the platform answers 431 beyond ~8 KB).
+    let deep: unknown = { field: { system: 'name' }, op: 'contains', value: 'x' };
+    for (let i = 0; i < 60; i++) deep = { all: [deep] };
+    const wide = { all: Array.from({ length: 60 }, () => ({ field: { system: 'name' }, op: 'contains', value: 'x' })) };
     const bad = [
       'garbage!!',
       enc('not json at all'),
       enc('[1, 2, 3]'),
-      'A'.repeat(20_000),
+      enc(deep),
+      enc(wide),
       enc({ field: { column: 'no_such_column' }, op: 'is_true' }),
       enc({ field: { system: 'name' }, op: "contains'; drop table public.account; --", value: 'x' }),
       enc({ field: { system: 'nope' }, op: 'one_of', value: ['x'] }),
