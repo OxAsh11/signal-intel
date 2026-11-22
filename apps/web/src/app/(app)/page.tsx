@@ -55,6 +55,19 @@ export default async function HomePage({ searchParams }: PageProps<'/'>) {
   const [lens, briefs] = await Promise.all([getBriefLens(params), lensBriefs(ws)]);
   const card: HomeCardProps = { ws, brief: lens.briefId, retry: selfHref(params) };
 
+  // A failed Brief read is not an empty workspace: say so, never fall back to onboarding.
+  if (!briefs || lens.source === 'error') {
+    return (
+      <>
+        <h1 className="si-h1">Home</h1>
+        <p className="m-0 text-ink-body" role="alert" data-home-error="">
+          Home could not load.{' '}
+          <a href={card.retry} className="text-ink underline">Retry</a>
+        </p>
+      </>
+    );
+  }
+
   if (briefs.length === 0) {
     return (
       <>

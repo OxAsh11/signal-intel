@@ -31,11 +31,16 @@ async function ReviewCount() {
   return <NavCount n={Number((data as { review?: number } | null)?.review ?? 0)} />;
 }
 
-/** The Brief lens for the current workspace: the cookie or the latest Brief (the URL is read client-side). */
+/**
+ * The Brief lens for the current workspace: the cookie or the latest Brief (the URL is read
+ * client-side). Renders nothing when the Briefs cannot be read, rather than a selector that
+ * claims there are none.
+ */
 async function SidebarLens() {
   const ctx = await getOrgContext();
   if (!ctx?.workspace) return null;
   const [lens, briefs] = await Promise.all([getBriefLens(), lensBriefs(ctx.workspace.id)]);
+  if (!briefs || lens.source === 'error') return null;
   return (
     <BriefLens
       briefs={briefs.map(({ id, name, state }) => ({ id, name, state }))}

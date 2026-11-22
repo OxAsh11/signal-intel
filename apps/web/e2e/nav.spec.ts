@@ -6,6 +6,15 @@ import { FLYTBASE_DRAFT, lensCookie, newUser, onboard, signIn, sql } from './sup
 const sidebar = (page: Page) => page.getByRole('navigation', { name: 'Main' });
 const aside = (page: Page) => page.getByRole('complementary', { name: 'Sidebar' });
 const lens = (page: Page) => page.getByRole('combobox', { name: 'Brief lens' });
+const applyLens = (page: Page) => page.getByRole('button', { name: 'Apply Brief lens' });
+/** Chooses in the lens the keyboard way: selecting moves the choice, Apply submits it. */
+async function chooseLens(page: Page, value: string) {
+  await lens(page).selectOption(value);
+  await applyLens(page).click();
+}
+/** The next Server Action request's response (the lens submits one). */
+const lensAction = (page: Page) =>
+  page.waitForResponse((r) => r.request().method() === 'POST' && r.request().headers()['next-action'] !== undefined);
 const TOP_LABELS = NAV.map((i) => i.label);
 const SUB_LABELS = NAV.flatMap((i) => (i.children ?? []).map((c) => [i.label, c.label] as const));
 
@@ -36,6 +45,9 @@ test.describe('journey navigation', () => {
     await page.goto('/');
     const nav = sidebar(page);
     await expect(nav.locator('span.si-label')).toHaveText(['Find', 'Work', 'Engage', 'Measure']);
+    // Each group is a named group for assistive tech, holding its own items.
+    await expect(nav.getByRole('group', { name: 'Find', exact: true }).getByRole('link', { name: 'Briefs', exact: true })).toBeVisible();
+    await expect(nav.getByRole('group', { name: 'Work', exact: true }).getByRole('link', { name: 'Review', exact: true })).toBeVisible();
     for (const label of TOP_LABELS) {
       await expect(nav.getByRole('link', { name: label, exact: true }), label).toBeVisible();
     }
@@ -69,6 +81,12 @@ test.describe('journey navigation', () => {
       await expect(page, from).toHaveURL(new RegExp(`${to}$`));
       await expect(page.getByRole('heading', { level: 1, name: heading, exact: true }), from).toBeVisible();
     }
+    // /accounts sends the query on to the workspace's table (P5 honours the filters).
+    const { ws } = await workspaceOf(userId);
+    await page.goto('/accounts?view=stale&verdict=Confirmed&brief=all');
+    await expect(page).toHaveURL(new RegExp(`/workspace/${ws}/accounts\\?view=stale&verdict=Confirmed&brief=all$`));
+    await page.goto('/accounts');
+    await expect(page).toHaveURL(new RegExp(`/workspace/${ws}/accounts$`));
     // Sources is today's Discovery page, moved: its funnel is there.
     await page.goto('/discovery');
     await expect(page.getByRole('heading', { name: 'What happened to every page' })).toBeVisible();
@@ -261,7 +279,7 @@ test.describe('Brief lens', () => {
     await page.goto('/');
     await expect(lens(page)).toHaveValue(latest);
 
-    await lens(page).selectOption('all');
+    await chooseLens(page, 'all');
     await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
     const cookie = (await lensCookie(context))!;
     expect(cookie.httpOnly).toBe(true);
@@ -331,8 +349,6 @@ test.describe('Brief lens', () => {
       offsite.push(route.request().url());
       return route.abort();
     });
-    const lensAction = () =>
-      page.waitForResponse((r) => r.request().method() === 'POST' && r.request().headers()['next-action'] !== undefined);
     const tampered = [
       '/\t/evil.example',
       '//evil.example/x',
@@ -349,9 +365,11 @@ test.describe('Brief lens', () => {
       ]);
       await page.goto(`/briefs?brief=${other}`);
       await expect(lens(page)).toHaveValue(other);
-      await page.locator('input[name="next"]').evaluate((el: HTMLInputElement, v) => (el.value = v), next);
-      const action = lensAction();
+      // Select first (it re-renders the form), then tamper, then submit.
       await lens(page).selectOption('all');
+      await page.locator('input[name="next"]').evaluate((el: HTMLInputElement, v) => (el.value = v), next);
+      const action = lensAction(page);
+      await applyLens(page).click();
       const res = await action;
       expect(res.headers()['x-action-redirect'], label).toBeUndefined();
       await expect.poll(async () => (await lensCookie(context))?.value, label).toBe(`${ws.ws}:all`);
@@ -367,14 +385,76 @@ test.describe('Brief lens', () => {
     ]);
     await page.goto(`/briefs?brief=${other}`);
     await expect(lens(page)).toHaveValue(other);
-    const action = lensAction();
-    await lens(page).selectOption('all');
+    const action = lensAction(page);
+    await chooseLens(page, 'all');
     // Control for the checks above: a real redirect does show in the action's response.
     expect((await action).headers()['x-action-redirect']).toMatch(/^\/briefs(;|$)/);
     await expect(page).toHaveURL(/\/briefs$/);
     await expect(lens(page)).toHaveValue('all');
     await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
     expect(offsite).toEqual([]);
+  });
+
+  test('from the keyboard, moving through the lens applies nothing until Enter or Apply', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    await seedBrief(ws, 'Ports Brief', 'Active', 5);
+    const latest = await seedBrief(ws, 'Mines Brief', 'Active', 1);
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(latest);
+    const posts: string[] = [];
+    page.on('request', (r) => {
+      if (r.method() === 'POST' && r.headers()['next-action'] !== undefined) posts.push(r.url());
+    });
+
+    // Arrowing changes the selection (Windows and Linux fire a change per key): nothing is sent.
+    await lens(page).focus();
+    await page.keyboard.press('ArrowUp');
+    await page.keyboard.press('ArrowUp');
+    await page.waitForTimeout(1000);
+    expect(posts, 'arrow keys submit nothing').toEqual([]);
+    expect(await lensCookie(context)).toBeUndefined();
+    await expect(lens(page)).toBeFocused();
+
+    // The Apply button is next in the tab order, and Enter on the select applies too.
+    await page.keyboard.press('Tab');
+    await expect(applyLens(page)).toBeFocused();
+    await lens(page).focus();
+    const chosen = await lens(page).inputValue();
+    await page.keyboard.press('Enter');
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:${chosen}`);
+    expect(posts).toHaveLength(1);
+  });
+
+  test('a pointer choice applies in one step', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    const latest = await seedBrief(ws, 'Mines Brief', 'Active', 1);
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(latest);
+    // A click opens the native list (not scriptable); the pointerdown it starts with marks the
+    // change that follows as a pointer choice.
+    await lens(page).dispatchEvent('pointerdown');
+    await lens(page).selectOption('all');
+    await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${ws.ws}:all`);
+    await expect(lens(page)).toHaveValue('all');
+  });
+
+  test('a choice the server refuses shows the server value again', async ({ page, context }) => {
+    const ws = await workspaceOf(userId);
+    const older = await seedBrief(ws, 'Harbour Brief', 'Active', 30);
+    const latest = await seedBrief(ws, 'Quarry Brief', 'Active', 1);
+    await page.goto('/');
+    await expect(lens(page)).toHaveValue(latest);
+
+    await lens(page).selectOption(older);
+    // Archived in the meantime (another tab, another user): the action refuses it.
+    await sql(`update public.brief set state = 'Archived' where id = $1`, [older]);
+    const action = lensAction(page);
+    await applyLens(page).click();
+    await action;
+    await expect(lens(page)).toHaveValue(latest);
+    await expect(lens(page).locator('option:checked')).toHaveText('Quarry Brief');
+    await expect(lens(page).locator('option')).toHaveText(['All Briefs', 'Quarry Brief']);
+    expect(await lensCookie(context)).toBeUndefined();
   });
 
   test('a user in two workspaces gets a lens resolved within each one', async ({ page, context }) => {
@@ -386,7 +466,7 @@ test.describe('Brief lens', () => {
 
     await page.goto('/');
     await expect(lens(page)).toHaveValue(alpha);
-    await lens(page).selectOption('all');
+    await chooseLens(page, 'all');
     await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${a.ws}:all`);
 
     // In B the cookie set in A is ignored: B resolves to its own latest Brief.
@@ -395,7 +475,7 @@ test.describe('Brief lens', () => {
     await expect(lens(page).locator('option')).toHaveText(['All Briefs', 'Bravo Brief · Pilot']);
     expect((await lensCookie(context))?.value).toBe(`${a.ws}:all`);
 
-    await lens(page).selectOption('all');
+    await chooseLens(page, 'all');
     await expect.poll(async () => (await lensCookie(context))?.value).toBe(`${b}:all`);
 
     // And back in A, B's choice does not apply.
@@ -451,6 +531,27 @@ test.describe('budget meter', () => {
     await expect(over).toBeVisible();
     await expect(over).toHaveClass(/si-fam-lava/);
     await expect(over).toHaveAttribute('data-level', 'over');
+  });
+
+  test('the colour follows the exact share of the cap: 79.96% is not yet mustard', async ({ page }) => {
+    const ws = await workspaceOf(userId);
+    await sql(`insert into public.budget (org_id, workspace_id, period, cap_usd) values ($1, $2, 'month', 100)`, [ws.org, ws.ws]);
+    await spend(ws, 79.96);
+    // The rounded pct the RPC returns is 80.0.
+    const [{ pct }] = await sql<{ pct: string }>(`select (app.home_spend($1) ->> 'pct') as pct`, [ws.ws]);
+    expect(Number(pct)).toBe(80);
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/');
+    const meter = aside(page).getByRole('link', { name: /\$79\.96 \/ \$100\.00/ });
+    await expect(meter).toBeVisible();
+    await expect(meter).toHaveAttribute('data-level', 'ok');
+    await expect(meter).not.toHaveClass(/si-fam-/);
+
+    await spend(ws, 0.04);
+    await page.reload();
+    const at80 = aside(page).getByRole('link', { name: /\$80\.00 \/ \$100\.00/ });
+    await expect(at80).toHaveAttribute('data-level', 'warn');
+    await expect(at80).toHaveClass(/si-fam-mustard/);
   });
 
   test('with no monthly cap it shows the spend and "no cap"', async ({ page }) => {

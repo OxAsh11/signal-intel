@@ -8,16 +8,20 @@ import { getOrgContext } from '@/lib/org';
 
 /**
  * Sets the Brief lens for the current workspace: `brief` is a Brief id or `all`. A Brief that is
- * not a non-archived Brief of this workspace is ignored. `next`, when given, is the page to land
- * on (the current one without a `?brief=` that would override the choice); otherwise the current
- * page re-renders in place.
+ * not a non-archived Brief of this workspace (or a failed read of the Briefs) is refused: the
+ * cookie is left as it was, the page re-renders in place and `{ ok: false }` tells the selector
+ * to show the server's value again. Accepted, `next`, when given, is the page to land on (the
+ * current one without a `?brief=` that would override the choice); otherwise the current page
+ * re-renders in place.
  */
-export async function setBriefLens(form: FormData): Promise<void> {
+export async function setBriefLens(form: FormData): Promise<{ ok: boolean }> {
   const ctx = await getOrgContext();
   const ws = ctx?.workspace?.id;
   const brief = String(form.get('brief') ?? '').trim();
+  let ok = false;
   if (ws && brief) {
-    const ok = brief === 'all' || (await lensBriefs(ws)).some((b) => b.id === brief);
+    const briefs = brief === 'all' ? [] : await lensBriefs(ws);
+    ok = brief === 'all' || (briefs?.some((b) => b.id === brief) ?? false);
     if (ok) {
       (await cookies()).set(LENS_COOKIE, `${ws}:${brief}`, {
         httpOnly: true,
@@ -27,9 +31,14 @@ export async function setBriefLens(form: FormData): Promise<void> {
       });
     }
   }
+  if (!ok) {
+    refresh();
+    return { ok: false };
+  }
   const next = sameSitePath(String(form.get('next') ?? ''));
   if (next) redirect(next);
   refresh();
+  return { ok: true };
 }
 
 /**

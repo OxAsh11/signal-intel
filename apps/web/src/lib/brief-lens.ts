@@ -17,16 +17,19 @@ export type LensBrief = { id: string; name: string; state: LensState; publishedA
 export type BriefLens = {
   briefId: string | null;
   briefName: string | null;
-  source: 'url' | 'cookie' | 'latest' | 'all';
+  /** 'error': the Briefs could not be read, so nothing was resolved (briefId is null). */
+  source: 'url' | 'cookie' | 'latest' | 'all' | 'error';
 };
 
 /**
  * The workspace's non-archived Briefs, by name, with when their current version was published
  * (null for a Draft that never was). Read under RLS, so only a workspace the caller can see.
+ * Null when the read fails: callers must not take a failed read for "no Briefs" (Home would
+ * show onboarding and the lens would drop to all).
  */
-export const lensBriefs = cache(async (ws: string): Promise<LensBrief[]> => {
+export const lensBriefs = cache(async (ws: string): Promise<LensBrief[] | null> => {
   const supabase = await createClient();
-  if (!supabase) return [];
+  if (!supabase) return null;
   const { data, error } = await supabase
     .from('brief')
     .select('id, name, state, current_version_id')
@@ -35,14 +38,17 @@ export const lensBriefs = cache(async (ws: string): Promise<LensBrief[]> => {
     .order('name');
   if (error) {
     console.error(`brief lens: briefs failed for workspace ${ws}: ${error.message}`);
-    return [];
+    return null;
   }
   const rows = (data ?? []) as { id: string; name: string; state: LensState; current_version_id: string | null }[];
   const versionIds = rows.map((r) => r.current_version_id).filter((v): v is string => v != null);
   const published = new Map<string, string>();
   if (versionIds.length) {
     const { data: versions, error: vErr } = await supabase.from('brief_version').select('id, published_at').in('id', versionIds);
-    if (vErr) console.error(`brief lens: versions failed for workspace ${ws}: ${vErr.message}`);
+    if (vErr) {
+      console.error(`brief lens: versions failed for workspace ${ws}: ${vErr.message}`);
+      return null;
+    }
     for (const v of (versions ?? []) as { id: string; published_at: string }[]) published.set(v.id, v.published_at);
   }
   return rows.map((r) => ({
@@ -69,7 +75,8 @@ const first = (v: string | string[] | undefined) => (Array.isArray(v) ? v[0] : v
  *   2. the `si_brief` cookie, if it was set in this workspace and that Brief is still in it;
  *   3. the most recently published Pilot or Active Brief;
  *   4. `all`.
- * A value that names an archived, deleted or other workspace's Brief is skipped silently.
+ * A value that names an archived, deleted or other workspace's Brief is skipped silently. When
+ * the Briefs cannot be read the source is 'error' and callers say so instead of guessing.
  * Reads cookies and the session, so callers render inside <Suspense>.
  */
 export async function getBriefLens(
@@ -79,6 +86,7 @@ export async function getBriefLens(
   const ws = ctx?.workspace?.id;
   if (!ws) return { briefId: null, briefName: null, source: 'all' };
   const briefs = await lensBriefs(ws);
+  if (!briefs) return { briefId: null, briefName: null, source: 'error' };
   const pick = (value: string | null | undefined): Omit<BriefLens, 'source'> | null => {
     if (!value) return null;
     if (value === 'all') return { briefId: null, briefName: null };
