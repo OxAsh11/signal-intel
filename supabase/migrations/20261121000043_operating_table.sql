@@ -32,7 +32,9 @@ create index if not exists review_item_claim_idx on public.review_item (claim_id
 -- ── 2. Derived source records: formula (P3) and manual ───────────────────────
 -- As 0039, for kind formula or manual: one source_record per workspace and kind (connector
 -- 'derived:<kind>', extraction_status 'irrelevant'), and an extractor_version (<kind>,
--- <kind>-v1, none, 1). Readers that count evidence leave both out by connector 'derived:%'.
+-- <kind>-v1, none, 1). Only derived:formula claims restate other evidence, so readers that count
+-- evidence (verdict, corroboration, research, the card, Home quotes, last signal) leave out
+-- connector 'derived:formula' alone; a person's derived:manual value is evidence.
 create or replace function app.derived_source_record(p_ws uuid, p_kind text) returns uuid
   language plpgsql security definer set search_path = ''
 as $$
@@ -160,8 +162,9 @@ as $$
   select v.name, v.filter from public.list_views(p_ws, null) v where v.id is null and v.preset = p_ref
   union all
   select sv.name, sv.filter from public.saved_view sv
-   where p_ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-     and sv.id = p_ref::uuid and sv.workspace_id = p_ws
+   where sv.id = case when p_ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+                      then p_ref::uuid end
+     and sv.workspace_id = p_ws
      and (sv.visibility = 'workspace' or sv.created_by = p_member)
    limit 1
 $$;
@@ -174,8 +177,9 @@ $$;
 --          verdict: text | null (the best verdict under the lens), band: text | null,
 --          priority: number | null (the highest-priority score under the lens),
 --          stage: text, owner: null | {member_id, name (display name, else email)},
---          last_signal: timestamptz | null (the newest observed_at of a sourced claim that is not
---                       retracted; derived claims, connector 'derived:%', never count),
+--          last_signal: timestamptz | null (the newest observed_at of a claim that is not
+--                       retracted; formula claims, connector 'derived:formula', never count;
+--                       manual values do),
 --          cells: {<predicate_id>: {state (the nine P3 states), value: jsonb | null,
 --                                   confidence: int | null, claim_id: uuid | null,
 --                                   run_id: uuid | null (the latest run), error: text | null}}}]
@@ -250,7 +254,7 @@ begin
                          then jsonb_build_object('member_id', om.id, 'name', coalesce(nullif(btrim(om.display_name), ''), om.email)) end,
            'last_signal', (select max(c.observed_at) from public.claim c
                              join public.source_record sr on sr.id = c.source_record_id
-                            where c.entity_id = e.id and c.status <> 'retracted' and sr.connector_id not like 'derived:%'),
+                            where c.entity_id = e.id and c.status <> 'retracted' and sr.connector_id <> 'derived:formula'),
            'cells', coalesce(v_cells -> e.id::text, '{}'::jsonb))
          order by u.n), '[]'::jsonb)
     into v_rows
@@ -394,7 +398,9 @@ end $$;
 -- confidence 100, observed now, quote 'Entered by <display name, else email>', through
 -- app.create_claim (which emits claim.created; the same value again reuses the active claim).
 -- It supersedes the cell's earlier manual claims; sourced claims stay as they are (the newest
--- claim is the cell's value). Audited as claim.manual_value_set on the claim.
+-- claim is the cell's value). Entering a value that was marked wrong is a person's explicit
+-- choice: app.create_claim hands back the retracted manual claim, which is made active again
+-- (claim.created emitted). Audited as claim.manual_value_set on the claim.
 create or replace function public.set_manual_value(p_ws uuid, p_entity uuid, p_predicate uuid, p_value jsonb) returns uuid
   language plpgsql security definer set search_path = ''
 as $$
@@ -432,6 +438,11 @@ begin
    where capability = 'manual' and prompt_version = 'manual-v1' and model = 'none' and parser_version = '1';
   v_id := app.create_claim(v_org, p_entity, p_predicate, p_value, 'Entered by ' || coalesce(v_name, 'a member'), null, null,
                            v_sr, now(), v_ev, 100::smallint);
+  if (select status from public.claim where id = v_id) = 'retracted' then
+    update public.claim set status = 'active' where id = v_id;
+    perform app.emit('claim.created'::public.event_type, v_org, null, 'claim', v_id,
+                     jsonb_build_object('entity_id', p_entity, 'predicate_id', p_predicate, 'source_record_id', v_sr));
+  end if;
   update public.claim set status = 'superseded', superseded_by = v_id
    where entity_id = p_entity and predicate_id = p_predicate and source_record_id = v_sr
      and status = 'active' and id <> v_id;
@@ -527,7 +538,8 @@ end $$;
 -- [{ref (preset name or saved view id), name,
 --   count: int | null (the view's matches under the lens, the total of public.view_entities;
 --          null when its filter no longer compiles),
---   href: '/accounts?view=<ref>'}]  the caller's pins in pin order. A pin whose saved view was
+--   href: '/workspace/<ws>/accounts?view=<ref>' (+ '&brief=<id>' when the lens is a Brief)}]
+--  the caller's pins in pin order. A pin whose saved view was
 -- deleted (or is no longer visible) is left out. p_brief is the lens (app.home_lens).
 create or replace function public.pinned_views(p_ws uuid, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
@@ -551,35 +563,38 @@ begin
       v_count := null;
     end;
     v_out := v_out || jsonb_build_array(jsonb_build_object('ref', r.view_ref, 'name', v.name, 'count', v_count,
-                                                           'href', '/accounts?view=' || r.view_ref));
+                                                           'href', '/workspace/' || p_ws || '/accounts?view=' || r.view_ref
+                                                                   || coalesce('&brief=' || v_brief, '')));
   end loop;
   return v_out;
 end $$;
 
 -- ── 10. Search (Viewer+) ─────────────────────────────────────────────────────
--- [{account_id, name, domain: text | null, href: '/workspace/<ws>/accounts/<account_id>'}]
+-- [{account_id, name, domain: text | null,
+--   href: '/workspace/<ws>/accounts/<account_id>' (+ '?brief=<id>' when p_brief is a lens Brief,
+--         app.home_lens)}]
 -- At most 8 of the workspace's active company accounts whose name or a domain alias contains
 -- p_q (trimmed, case-insensitive, % and _ taken literally); names that start with it first, then
 -- by name. Fewer than 2 characters: [].
-create or replace function public.search_accounts(p_ws uuid, p_q text) returns jsonb
+drop function if exists public.search_accounts(uuid, text);
+create or replace function public.search_accounts(p_ws uuid, p_q text, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
 as $$
 declare
   v_org uuid;
   v_q   text := left(lower(btrim(coalesce(p_q, ''))), 200);
   v_esc text;
+  v_brief uuid;
 begin
+  v_brief := app.home_lens(p_ws, p_brief);
   select org_id into v_org from public.workspace where id = p_ws;
-  if v_org is null or not app.has_workspace_role(p_ws, 'Viewer') then
-    raise exception 'permission denied' using errcode = '42501';
-  end if;
   if length(v_q) < 2 then
     return '[]'::jsonb;
   end if;
   v_esc := replace(replace(replace(v_q, '\', '\\'), '%', '\%'), '_', '\_');
   return coalesce((
     select jsonb_agg(jsonb_build_object('account_id', x.aid, 'name', x.name, 'domain', x.domain,
-                                        'href', '/workspace/' || p_ws || '/accounts/' || x.aid)
+                                        'href', '/workspace/' || p_ws || '/accounts/' || x.aid || coalesce('?brief=' || v_brief, ''))
                      order by x.rank, lower(x.name), x.eid)
       from (select a.id as aid, e.id as eid, e.display_name as name,
                    (select al.value_normalised from public.entity_alias al
@@ -630,7 +645,347 @@ begin
   end if;
 end $$;
 
--- ── 12. Grants ───────────────────────────────────────────────────────────────
+-- ── 12. Claims, cell state and evidence ──────────────────────────────────────
+-- 12a. A person's "wrong" holds (as 0037, plus one rule): when a retracted claim with the same
+-- (entity, predicate, source record, value) was marked wrong (a claim_wrong review item that was
+-- not restored), the same fact found again is not written: no new claim, no claim.created; the
+-- retracted claim's id is returned. A retraction by the system (a formula's no_data, 0041) blocks
+-- nothing.
+create index if not exists claim_retracted_idx
+  on public.claim (entity_id, predicate_id, source_record_id) where status = 'retracted';
+
+create or replace function app.create_claim(
+  p_org uuid,
+  p_entity uuid,
+  p_predicate uuid,
+  p_value jsonb,
+  p_quote text,
+  p_quote_original text,
+  p_quote_language text,
+  p_source_record uuid,
+  p_observed_at timestamptz,
+  p_extractor_version uuid,
+  p_confidence smallint
+) returns uuid
+language plpgsql security definer set search_path = '' as $$
+declare v_id uuid;
+begin
+  select id into v_id from public.claim
+  where entity_id = p_entity and predicate_id = p_predicate
+    and source_record_id = p_source_record and value = p_value
+    and status = 'active'
+  order by created_at
+  limit 1;
+
+  if v_id is not null then
+    perform set_config('app.claim_dedupe', 'true', true);
+    update public.claim
+    set confidence = greatest(confidence, p_confidence),
+        quote = coalesce(quote, p_quote)
+    where id = v_id;
+    perform set_config('app.claim_dedupe', 'false', true);
+    return v_id;
+  end if;
+
+  select c.id into v_id from public.claim c
+  where c.entity_id = p_entity and c.predicate_id = p_predicate
+    and c.source_record_id = p_source_record and c.value = p_value
+    and c.status = 'retracted'
+    and exists (select 1 from public.review_item ri
+                 where ri.type = 'claim_wrong' and ri.claim_id = c.id and ri.status <> 'restored')
+  order by c.created_at desc
+  limit 1;
+  if v_id is not null then
+    return v_id;
+  end if;
+
+  insert into public.claim (org_id, entity_id, predicate_id, value, quote, quote_original, quote_language,
+    source_record_id, observed_at, extractor_version_id, confidence)
+  values (p_org, p_entity, p_predicate, p_value, p_quote, p_quote_original, p_quote_language,
+    p_source_record, p_observed_at, p_extractor_version, p_confidence)
+  returning id into v_id;
+
+  perform app.emit('claim.created', p_org, null, 'claim', v_id,
+    jsonb_build_object('entity_id', p_entity, 'predicate_id', p_predicate,
+                       'source_record_id', p_source_record));
+  return v_id;
+end $$;
+
+-- 12b. A person's value written after the latest run shows (as 0039, plus one rule): when the
+-- cell has an active manual claim (connector 'derived:manual') created after its latest run
+-- (after the run finished; after it was queued when it has not finished), the run's queued /
+-- running / error / skipped state no longer masks it, so a manual edit on an errored or skipped
+-- cell shows its value. Only a person's edit overrides a run: a sourced claim found after a failed
+-- run leaves the run's state visible (and the P3 cells keep their states). Otherwise the P3 order is unchanged:
+-- queued / running, error, skipped, then stale, derived, value, no_data, empty.
+create or replace function app.cell_state(p_entity uuid, p_predicate uuid) returns text
+  language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_last  text;
+  v_at    timestamptz;
+  v_newer boolean;
+  v_hash  text;
+  v_fill  text;
+begin
+  select status, coalesce(finished_at, queued_at) into v_last, v_at from public.predicate_run
+   where entity_id = p_entity and predicate_id = p_predicate
+   order by queued_at desc, id desc limit 1;
+  v_newer := exists (select 1 from public.claim c join public.source_record sr on sr.id = c.source_record_id
+                      where c.entity_id = p_entity and c.predicate_id = p_predicate and c.status = 'active'
+                        and sr.connector_id = 'derived:manual' and c.created_at > v_at);
+  if not v_newer then
+    if v_last in ('queued', 'running') then
+      return v_last;
+    elsif v_last = 'error' then
+      return 'error';
+    elsif v_last = 'condition_not_met' then
+      return 'skipped';
+    end if;
+  end if;
+  if exists (select 1 from public.claim
+              where entity_id = p_entity and predicate_id = p_predicate and status = 'active') then
+    select inputs_hash into v_hash from public.predicate_run
+     where entity_id = p_entity and predicate_id = p_predicate
+       and finished_at is not null and inputs_hash is not null and status <> 'cancelled'
+     order by queued_at desc, id desc limit 1;
+    if v_hash is not null and v_hash is distinct from app.run_inputs_hash(p_entity, p_predicate) then
+      return 'stale';
+    end if;
+    select fill_method into v_fill from public.predicate where id = p_predicate;
+    return case when v_fill = 'formula' then 'derived' else 'value' end;
+  end if;
+  if v_last = 'no_data' then
+    return 'no_data';
+  end if;
+  return 'empty';
+end $$;
+
+-- The set-based twin of app.cell_state (as 0040, with the same newer-claim rule), so filters,
+-- presets and run targets agree with the cells.
+create or replace function app.filter_run_sql(p_source text, p_states text[]) returns text
+  language sql immutable set search_path = ''
+as $$
+  select format(
+    'exists (select 1 from (%s) fp left join lateral (select pr.status, coalesce(pr.finished_at, pr.queued_at) as at'
+    ' from public.predicate_run pr'
+    ' where pr.entity_id = e.id and pr.predicate_id = fp.pid order by pr.queued_at desc, pr.id desc limit 1) lr on true'
+    ' where %s)',
+    p_source,
+    case when p_states <@ array['queued', 'running', 'error', 'skipped'] then
+      format('lr.status = any(%L::text[]) and not exists (select 1 from public.claim fn join public.source_record fs on fs.id = fn.source_record_id'
+             ' where fn.entity_id = e.id and fn.predicate_id = fp.pid and fn.status = ''active'''
+             ' and fs.connector_id = ''derived:manual'' and fn.created_at > lr.at)',
+             array_replace(p_states, 'skipped', 'condition_not_met'))
+    else format(
+      '(case when lr.status in (''queued'', ''running'', ''error'', ''condition_not_met'')'
+      ' and not exists (select 1 from public.claim fn join public.source_record fs on fs.id = fn.source_record_id'
+      ' where fn.entity_id = e.id and fn.predicate_id = fp.pid and fn.status = ''active'''
+      ' and fs.connector_id = ''derived:manual'' and fn.created_at > lr.at)'
+      ' then (case when lr.status = ''condition_not_met'' then ''skipped'' else lr.status end)'
+      ' when exists (select 1 from public.claim fc where fc.entity_id = e.id and fc.predicate_id = fp.pid'
+      ' and fc.status = ''active'') then %s'
+      ' when lr.status = ''no_data'' then ''no_data'''
+      ' else ''empty'' end) = any(%L::text[])',
+      case when p_states && array['stale', 'derived', 'value'] then
+        '(case when (select fr.inputs_hash is distinct from app.run_inputs_hash(e.id, fp.pid)'
+        ' from public.predicate_run fr where fr.entity_id = e.id and fr.predicate_id = fp.pid'
+        ' and fr.finished_at is not null and fr.inputs_hash is not null and fr.status <> ''cancelled'''
+        ' order by fr.queued_at desc, fr.id desc limit 1) then ''stale'''
+        ' when fp.fill = ''formula'' then ''derived'' else ''value'' end)'
+      else '''value''' end,
+      p_states) end)
+$$;
+
+-- 12c. Home's quotes (as 0042): only formula claims (connector 'derived:formula') are not
+-- evidence; a person's manual value is.
+create or replace function app.home_quote(p_entity uuid, p_cited uuid[], p_fallback boolean) returns jsonb
+  language sql stable security definer set search_path = ''
+as $$
+  select jsonb_build_object('claim_id', c.id, 'quote', c.quote, 'observed_at', c.observed_at)
+    from public.claim c
+    join public.source_record sr on sr.id = c.source_record_id
+   where c.entity_id = p_entity
+     and c.quote is not null and btrim(c.quote) <> ''
+     and sr.connector_id <> 'derived:formula'
+     and ((c.id = any(coalesce(p_cited, '{}')) and c.status <> 'retracted') or (p_fallback and c.status = 'active'))
+   order by (c.id = any(coalesce(p_cited, '{}'))) desc, c.observed_at desc, c.id desc
+   limit 1
+$$;
+
+-- 12d. Auto-run when a person marks a claim wrong (as 0041, for an active claim, or a retracted one
+-- with a claim_wrong review item that was not restored): on claim.retracted the formula columns
+-- that read its column re-run on its entity, so a derived value never outlives the evidence it
+-- was computed from. Any other retracted claim (the system's) still queues nothing.
+create or replace function app.queue_auto_runs(p_claim uuid) returns uuid[]
+  language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_runs uuid[] := '{}';
+  v_new  jsonb;
+  w      record;
+begin
+  -- Abandoned runs no longer block the cells.
+  perform app.close_abandoned_runs(f.id, array[c.entity_id])
+     from public.claim c
+     join public.predicate f on f.fill_method = 'formula' and f.auto_run and c.predicate_id = any(f.input_predicate_ids)
+    where c.id = p_claim
+      and (c.status = 'active'
+           or (c.status = 'retracted' and exists (select 1 from public.review_item ri
+                                                   where ri.type = 'claim_wrong' and ri.claim_id = c.id
+                                                     and ri.status <> 'restored')));
+
+  with ins as (
+    insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version)
+    select f.org_id, f.workspace_id, c.entity_id, f.id, f.version
+      from public.claim c
+      join public.predicate f on f.fill_method = 'formula' and f.auto_run and f.workspace_id is not null
+                             and c.predicate_id = any(f.input_predicate_ids) and f.org_id = c.org_id
+     where c.id = p_claim
+      and (c.status = 'active'
+           or (c.status = 'retracted' and exists (select 1 from public.review_item ri
+                                                   where ri.type = 'claim_wrong' and ri.claim_id = c.id
+                                                     and ri.status <> 'restored')))
+       and exists (select 1 from public.account a where a.entity_id = c.entity_id and a.workspace_id = f.workspace_id)
+     order by f.key collate "C"
+    on conflict (entity_id, predicate_id) where status in ('queued', 'running') do nothing
+    returning id, org_id, workspace_id)
+  select coalesce(jsonb_agg(jsonb_build_object('id', id, 'org_id', org_id, 'workspace_id', workspace_id)), '[]')
+    into v_new from ins;
+  for w in select (n ->> 'org_id')::uuid as org_id, (n ->> 'workspace_id')::uuid as workspace_id,
+                  array_agg((n ->> 'id')::uuid order by n ->> 'id') as ids
+             from jsonb_array_elements(v_new) n group by 1, 2 order by 2 loop
+    perform app.emit('column.run_requested'::public.event_type, w.org_id, w.workspace_id, 'claim', p_claim,
+                     jsonb_build_object('run_ids', to_jsonb(w.ids)));
+    v_runs := v_runs || w.ids;
+  end loop;
+  return v_runs;
+end $$;
+
+-- ── 13. Review decisions for both kinds of item ──────────────────────────────
+-- public.resolve_review_item(p_id, p_action, p_new_entity_name) keeps its signature.
+--   identity items:    merge | skip | create_new (as 0034; restore is refused, 22023).
+--   claim_wrong items: skip    = Dismiss: the claim stays retracted (status 'skipped').
+--                      restore = the claim was right after all: it is active again,
+--                                claim.created is emitted so verdicts, scores and formulas
+--                                recompute, and the item is 'restored' (so its fact can be
+--                                written again, app.create_claim).
+--                      merge / create_new are refused (22023).
+-- Editor+ (42501). The identity feedback label is written for identity items only; a
+-- claim_wrong decision is audited (claim.restored / claim.wrong_dismissed).
+alter table public.review_item drop constraint if exists review_item_status_check;
+alter table public.review_item add constraint review_item_status_check
+  check (status in ('pending', 'merged', 'skipped', 'created_new', 'restored'));
+
+create or replace function app.resolve_review_item(
+  p_id uuid,
+  p_action text,
+  p_new_entity_name text default null
+) returns void
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_item        public.review_item;
+  v_new_entity  uuid;
+  v_entity_type public.entity_type;
+  v_prov_entity uuid;
+  v_member_id   uuid;
+  v_claim       public.claim;
+begin
+  if p_action is null or p_action not in ('merge', 'skip', 'create_new', 'restore') then
+    raise exception 'invalid action: %', p_action using errcode = '22023';
+  end if;
+
+  select * into v_item from public.review_item where id = p_id;
+  if not found then
+    raise exception 'review_item not found' using errcode = 'P0002';
+  end if;
+  if v_item.status <> 'pending' then
+    raise exception 'review_item already resolved' using errcode = '23514';
+  end if;
+  if not app.has_workspace_role(v_item.workspace_id, 'Editor') then
+    raise exception 'insufficient role' using errcode = '42501';
+  end if;
+  v_member_id := app.current_member_id(v_item.org_id);
+
+  -- A claim marked wrong.
+  if v_item.type = 'claim_wrong' then
+    if p_action not in ('skip', 'restore') then
+      raise exception 'a wrong-claim item is dismissed (skip) or restored, not %', p_action using errcode = '22023';
+    end if;
+    if p_action = 'restore' then
+      select * into v_claim from public.claim where id = v_item.claim_id for update;
+      if v_claim.status = 'retracted' then
+        update public.claim set status = 'active' where id = v_claim.id;
+        perform app.emit('claim.created'::public.event_type, v_item.org_id, null, 'claim', v_claim.id,
+                         jsonb_build_object('entity_id', v_claim.entity_id, 'predicate_id', v_claim.predicate_id,
+                                            'source_record_id', v_claim.source_record_id));
+      end if;
+    end if;
+    update public.review_item
+       set status = case p_action when 'restore' then 'restored' else 'skipped' end,
+           resolved_by = v_member_id, resolved_at = now()
+     where id = p_id;
+    perform app.audit(v_item.org_id, v_item.workspace_id,
+                      case p_action when 'restore' then 'claim.restored' else 'claim.wrong_dismissed' end,
+                      'claim', v_item.claim_id, null, jsonb_build_object('review_item_id', p_id));
+    return;
+  end if;
+
+  -- An identity decision (as 0034).
+  if p_action = 'restore' then
+    raise exception 'an identity item is merged, skipped or created new, not restored' using errcode = '22023';
+  end if;
+  if p_action = 'merge' then
+    if v_item.candidate_entity is null then
+      raise exception 'review_item has no candidate entity for merge' using errcode = '22023';
+    end if;
+    if (select org_id from public.entity where id = v_item.candidate_entity) <> v_item.org_id then
+      raise exception 'candidate entity belongs to a different organisation' using errcode = '23514';
+    end if;
+  end if;
+
+  select entity_id into v_prov_entity from public.mention where id = v_item.mention_id;
+
+  if p_action = 'merge' then
+    if v_prov_entity is not null and v_prov_entity <> v_item.candidate_entity then
+      perform app.merge_entities(v_item.candidate_entity, v_prov_entity, v_member_id);
+    end if;
+    perform app.resolve_mention(v_item.mention_id, v_item.candidate_entity, 'manual_merge', 100::smallint);
+    perform app.create_account(v_item.org_id, v_item.workspace_id, v_item.candidate_entity);
+
+  elsif p_action = 'create_new' then
+    select entity_type into v_entity_type from public.mention where id = v_item.mention_id;
+    v_new_entity := app.create_entity(v_item.org_id, v_entity_type,
+      coalesce(p_new_entity_name, (select raw_name from public.mention where id = v_item.mention_id)));
+    if v_prov_entity is not null and v_prov_entity <> v_new_entity then
+      perform app.merge_entities(v_new_entity, v_prov_entity, v_member_id);
+    end if;
+    perform app.resolve_mention(v_item.mention_id, v_new_entity, 'manual_create', 100::smallint);
+    perform app.create_account(v_item.org_id, v_item.workspace_id, v_new_entity);
+  end if;
+
+  update public.review_item
+  set status = case p_action
+                 when 'merge'      then 'merged'
+                 when 'skip'       then 'skipped'
+                 when 'create_new' then 'created_new'
+               end,
+      resolved_by = v_member_id,
+      resolved_at = now()
+  where id = p_id;
+
+  -- PRD Part 8.1: an identity decision is a human label. Merging into the suggested company
+  -- confirms the match; creating a new company rejects it; skipping says nothing.
+  if p_action <> 'skip' and v_member_id is not null then
+    insert into public.feedback (org_id, workspace_id, member_id, target_type, target_id, action, reason)
+    values (v_item.org_id, v_item.workspace_id, v_member_id, 'identity_match', p_id,
+            case p_action when 'merge' then 'confirm' else 'reject' end,
+            case p_action when 'merge' then 'same company' else 'different company' end);
+  end if;
+end;
+$$;
+
+-- ── 14. Grants ───────────────────────────────────────────────────────────────
 revoke execute on function
   app.table_brief_columns(uuid, uuid), app.table_column_json(uuid), app.manual_value_error(uuid, uuid, jsonb),
   app.view_ref(uuid, uuid, text)
@@ -639,12 +994,12 @@ revoke execute on function
 revoke execute on function
   public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int), public.cell_detail(uuid, uuid, uuid),
   public.set_manual_value(uuid, uuid, uuid, jsonb), public.mark_claim_wrong(uuid, uuid, text),
-  public.pin_view(uuid, text, boolean), public.pinned_views(uuid, uuid), public.search_accounts(uuid, text),
+  public.pin_view(uuid, text, boolean), public.pinned_views(uuid, uuid), public.search_accounts(uuid, text, uuid),
   public.set_auto_run(uuid, uuid, boolean)
   from public, anon;
 grant execute on function
   public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int), public.cell_detail(uuid, uuid, uuid),
   public.set_manual_value(uuid, uuid, uuid, jsonb), public.mark_claim_wrong(uuid, uuid, text),
-  public.pin_view(uuid, text, boolean), public.pinned_views(uuid, uuid), public.search_accounts(uuid, text),
+  public.pin_view(uuid, text, boolean), public.pinned_views(uuid, uuid), public.search_accounts(uuid, text, uuid),
   public.set_auto_run(uuid, uuid, boolean)
   to authenticated;

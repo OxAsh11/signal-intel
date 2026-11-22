@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(110);
+select plan(138);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Alpha: A owner (Ann Owner), K Viewer. Beta: B owner, with its own account and claim. X is
@@ -177,6 +177,10 @@ select is(pg_temp.t() #> array['rows', '2', 'cells', pg_temp.id('p_sites')::text
 select is(pg_temp.t() #>> array['rows', '2', 'cells', pg_temp.id('p_dbl')::text, 'state'], 'queued', '12. a queued cell');
 select is((select count(*)::int from jsonb_array_elements(pg_temp.t() -> 'rows') r, jsonb_object_keys(r -> 'cells') k), 6,
   '13. cells for this page only: rows × columns');
+select is((select jsonb_agg(jsonb_build_object('e', r -> 'entity_id', 'n', (select count(*) from jsonb_object_keys(r -> 'cells'))) order by o)
+             from jsonb_array_elements(pg_temp.t(l => 2) -> 'rows') with ordinality x(r, o)),
+  jsonb_build_array(jsonb_build_object('e', pg_temp.id('e1'), 'n', 2), jsonb_build_object('e', pg_temp.id('e2'), 'n', 2)),
+  '13b. Review Focus 4: with limit 2, cells for the 2 page rows only (2 columns each)');
 
 -- Paging.
 select is((select jsonb_agg(r ->> 'name') from jsonb_array_elements(pg_temp.t(l => 2) -> 'rows') r), '["OT Alpha 100%", "OT Beta_one"]'::jsonb, '14. limit 2');
@@ -260,13 +264,16 @@ select lives_ok(format('select public.pin_view(%L::uuid, ''stale'', true)', pg_t
 select lives_ok(format('select public.pin_view(%L::uuid, ''errored'', true)', pg_temp.w()), '51. pin another preset');
 select is(public.pinned_views(pg_temp.w(), pg_temp.b()),
   jsonb_build_array(
-    jsonb_build_object('ref', 'stale', 'name', 'Stale', 'count', 1, 'href', '/accounts?view=stale'),
-    jsonb_build_object('ref', pg_temp.id('sv')::text, 'name', 'OT names', 'count', 3, 'href', '/accounts?view=' || pg_temp.id('sv')),
-    jsonb_build_object('ref', 'errored', 'name', 'Errored', 'count', 1, 'href', '/accounts?view=errored')),
+    jsonb_build_object('ref', 'stale', 'name', 'Stale', 'count', 1, 'href', '/workspace/' || pg_temp.w() || '/accounts?view=stale&brief=' || pg_temp.b()),
+    jsonb_build_object('ref', pg_temp.id('sv')::text, 'name', 'OT names', 'count', 3,
+                       'href', '/workspace/' || pg_temp.w() || '/accounts?view=' || pg_temp.id('sv') || '&brief=' || pg_temp.b()),
+    jsonb_build_object('ref', 'errored', 'name', 'Errored', 'count', 1, 'href', '/workspace/' || pg_temp.w() || '/accounts?view=errored&brief=' || pg_temp.b())),
   '52. pinned views in pin order, with live counts under the lens');
 select lives_ok(format('select public.pin_view(%L::uuid, %L, false)', pg_temp.w(), pg_temp.id('sv')), '53. unpin');
 select is((select jsonb_agg(p ->> 'ref') from jsonb_array_elements(public.pinned_views(pg_temp.w(), null)) p), '["stale", "errored"]'::jsonb,
   '54. unpinned; all Briefs as the lens');
+select is(public.pinned_views(pg_temp.w(), null) -> 0 ->> 'href', '/workspace/' || pg_temp.w() || '/accounts?view=stale',
+  '54b. all Briefs: the canonical href carries no brief');
 select throws_ok(format('select public.pin_view(%L::uuid, ''nope'', true)', pg_temp.w()), '22023', null, '55. an unknown preset is refused');
 select throws_ok(format('select public.pin_view(%L::uuid, %L, true)', pg_temp.w(), pg_temp.id('sv_priv')), '22023', null,
   '56. someone else''s personal view is refused');
@@ -283,6 +290,10 @@ select is(public.search_accounts(pg_temp.w(), 'alpha'),
   jsonb_build_array(jsonb_build_object('account_id', pg_temp.id('a1'), 'name', 'OT Alpha 100%', 'domain', 'alpha.example',
                                        'href', '/workspace/' || pg_temp.w() || '/accounts/' || pg_temp.id('a1'))),
   '60. by name, case-insensitive');
+select is(public.search_accounts(pg_temp.w(), 'alpha', pg_temp.b()) -> 0 ->> 'href',
+  '/workspace/' || pg_temp.w() || '/accounts/' || pg_temp.id('a1') || '?brief=' || pg_temp.b(), '60b. a lens Brief rides along on the href');
+select is(public.search_accounts(pg_temp.w(), 'alpha', pg_temp.id('bf')) -> 0 ->> 'href',
+  '/workspace/' || pg_temp.w() || '/accounts/' || pg_temp.id('a1'), '60c. a foreign Brief is no lens');
 select is((select jsonb_agg(r ->> 'name') from jsonb_array_elements(public.search_accounts(pg_temp.w(), '  BETA-OT ')) r), '["OT Beta_one"]'::jsonb,
   '61. by domain, trimmed');
 select is((select jsonb_agg(r ->> 'name') from jsonb_array_elements(public.search_accounts(pg_temp.w(), '0%')) r), '["OT Alpha 100%"]'::jsonb,
@@ -347,6 +358,26 @@ select is(pg_temp.cd('e2', 'p_sites') #>> '{claims,2,superseded_at}', (select to
 select is(pg_temp.t() #> array['rows', '1', 'cells', pg_temp.id('p_sites')::text, 'value'], '8'::jsonb, '84. the table shows the manual value');
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000027a2","role":"authenticated"}', true);
 select is(pg_temp.cd('e2', 'p_sites') ->> 'fill_label', 'Entered by Ann Owner', '85. to another member it names who entered it');
+select is(pg_temp.t() #>> '{rows,1,last_signal}', (select to_jsonb(now()) #>> '{}'), '85b. a manual value is a signal (R5)');
+reset role;
+select is(app.home_quote(pg_temp.id('e2'), null, true) ->> 'quote', 'Entered by Ann Owner', '85c. and evidence for Home''s quotes (R5)');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000027a1","role":"authenticated"}', true);
+-- I1: a manual value on the errored cell shows; filters agree with the cell.
+insert into ids select 'm3', pg_temp.mv('e3', 'p_sites', '3');
+select is((pg_temp.t() #> array['rows', '2', 'cells', pg_temp.id('p_sites')::text]) - 'run_id',
+  jsonb_build_object('state', 'value', 'value', 3, 'confidence', 100, 'claim_id', pg_temp.id('m3'), 'error', 'boom'),
+  '85e. a manual edit after the errored run shows its value (the run''s error stays readable)');
+select is(pg_temp.t(f => '{"field": {"run": "ot_sites"}, "op": "one_of", "value": ["error"]}') -> 'total', '0'::jsonb,
+  '85f. the run-state filter (fast path) agrees: no errored ot_sites cell');
+select is((select jsonb_agg(r ->> 'name') from jsonb_array_elements(pg_temp.t(f => '{"field": {"run": "ot_sites"}, "op": "one_of", "value": ["value", "empty"]}') -> 'rows') r), '["OT Alpha 100%", "OT Gamma"]'::jsonb,
+  '85g. the run-state filter (full path) agrees: E3 is a value');
+select is(pg_temp.t(f => '{"field": {"run": "ot_double"}, "op": "one_of", "value": ["queued"]}') -> 'total', '1'::jsonb,
+  '85h. a queued cell with no newer claim is still queued');
+reset role;
+select is((select count(*)::int from public.account a where a.workspace_id = pg_temp.w()
+              and app.cell_state(a.entity_id, pg_temp.id('p_sites')) = 'error'), 0, '85i. cell_state agrees');
+set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000027a1","role":"authenticated"}', true);
 
 -- ── mark_claim_wrong (A) ─────────────────────────────────────────────────────
@@ -371,6 +402,49 @@ set local role authenticated;
 select throws_ok(format('select public.mark_claim_wrong(%L::uuid, %L::uuid, ''again'')', pg_temp.w(), pg_temp.id('c1_sites')),
   '55000', null, '91. a retracted claim cannot be marked again');
 select is(pg_temp.t() #>> array['rows', '0', 'cells', pg_temp.id('p_sites')::text, 'state'], 'empty', '92. the cell no longer shows it');
+reset role;
+-- I2: the same fact found again is not written back.
+select is(pg_temp.claim('org', 'e1', 'p_sites', '12', 'E1 runs twelve sites', 's1', interval '0 days'), pg_temp.id('c1_sites'),
+  '92b. re-extracting a claim marked wrong returns the retracted claim');
+select is((select count(*)::int from public.claim where entity_id = pg_temp.id('e1') and predicate_id = pg_temp.id('p_sites')), 1,
+  '92c. no new claim');
+select is((select count(*)::int from public.outbox where event = 'claim.created'
+            and payload ->> 'entity_id' = pg_temp.id('e1')::text and payload ->> 'predicate_id' = pg_temp.id('p_sites')::text), 1,
+  '92d. and no new claim.created');
+select is((select status::text from public.claim where id = pg_temp.id('c1_sites')), 'retracted', '92e. the wrong holds');
+-- A system retraction (no claim_wrong item) blocks nothing.
+update public.claim set status = 'retracted' where id = pg_temp.id('c1_dbl');
+select isnt(pg_temp.claim('org', 'e1', 'p_dbl', '24', null, 'sd', interval '0 days'), pg_temp.id('c1_dbl'), '92f. a system retraction does not block a new claim');
+-- R7: resolving claim_wrong items.
+set local role authenticated;
+select throws_ok(format('select public.resolve_review_item(%L::uuid, ''merge'')', pg_temp.id('ri')), '22023', null, '92g. a wrong-claim item cannot be merged');
+select throws_ok(format('select public.resolve_review_item(%L::uuid, ''create_new'')', pg_temp.id('ri')), '22023', null, '92h. nor created new');
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000027a2","role":"authenticated"}', true);
+select throws_ok(format('select public.resolve_review_item(%L::uuid, ''restore'')', pg_temp.id('ri')), '42501', null, '92i. a Viewer cannot restore');
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000027a1","role":"authenticated"}', true);
+select lives_ok(format('select public.resolve_review_item(%L::uuid, ''restore'')', pg_temp.id('ri')), '92j. restore');
+reset role;
+select is((select status::text from public.claim where id = pg_temp.id('c1_sites')) || '/' || (select status from public.review_item where id = pg_temp.id('ri')),
+  'active/restored', '92k. the claim is active again and the item restored');
+select is((select count(*)::int from public.outbox where event = 'claim.created' and aggregate_id = pg_temp.id('c1_sites')), 2,
+  '92l. restore emits claim.created, so things recompute');
+select is((select count(*)::int from public.audit_log where action = 'claim.restored' and target_id = pg_temp.id('c1_sites')), 1, '92m. audited');
+set local role authenticated;
+insert into ids select 'ri2', public.mark_claim_wrong(pg_temp.w(), pg_temp.id('c2_sites'), 'Old');
+select lives_ok(format('select public.resolve_review_item(%L::uuid, ''skip'')', pg_temp.id('ri2')), '92n. dismiss');
+reset role;
+select is((select status::text from public.claim where id = pg_temp.id('c2_sites')) || '/' || (select status from public.review_item where id = pg_temp.id('ri2')),
+  'retracted/skipped', '92o. dismissed: the claim stays retracted');
+select is(cardinality(app.queue_auto_runs(pg_temp.id('c2_sites'))), 1,
+  '92o2. a claim a person marked wrong re-runs the formula reading it (claim.retracted auto-run)');
+select is((select count(*)::int from public.feedback where target_id in (pg_temp.id('ri'), pg_temp.id('ri2'))), 0,
+  '92p. no identity label for wrong-claim items');
+insert into public.mention (org_id, source_record_id, entity_type, raw_name, match_method)
+values (pg_temp.id('org'), pg_temp.id('s1'), 'company', 'OT Identity', 'exact');
+insert into ids select 'ri3', app.create_review_item(pg_temp.id('org'), pg_temp.w(),
+  (select id from public.mention where raw_name = 'OT Identity'), pg_temp.id('e1'), 'fuzzy', 70::smallint);
+set local role authenticated;
+select throws_ok(format('select public.resolve_review_item(%L::uuid, ''restore'')', pg_temp.id('ri3')), '22023', null, '92q. an identity item cannot be restored');
 
 -- ── set_auto_run (A) ─────────────────────────────────────────────────────────
 select lives_ok(format('select public.set_auto_run(%L::uuid, %L::uuid, false)', pg_temp.w(), pg_temp.id('p_dbl')), '93. pause auto-run');
@@ -413,7 +487,8 @@ reset role;
 
 -- ── Grants ───────────────────────────────────────────────────────────────────
 select ok(not has_function_privilege('anon', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int)', 'execute')
-          and has_function_privilege('authenticated', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int)', 'execute'),
+          and has_function_privilege('authenticated', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int)', 'execute')
+          and has_function_privilege('authenticated', 'public.search_accounts(uuid, text, uuid)', 'execute'),
   '101. account_table is for signed-in users');
 select ok(not has_function_privilege('authenticated', 'app.table_brief_columns(uuid, uuid)', 'execute'), '102. app helpers are not granted');
 
