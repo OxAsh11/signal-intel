@@ -16,7 +16,7 @@ async function workspaceOf(userId: string): Promise<{ ws: string; org: string; m
   return row;
 }
 
-type Seeded = { brief: string; sites: string; double: string; note: string };
+type Seeded = { brief: string; sites: string; double: string; note: string; programme: string };
 
 // Eight accounts, A to H, one cell state each in the Sites column; Alpha's Double is derived.
 const ROWS = ['Alpha Grid', 'Bravo Power', 'Charlie Wind', 'Delta Hydro', 'Echo Solar', 'Foxtrot Nuclear', 'Golf Coal', 'Hotel Gas'];
@@ -29,17 +29,25 @@ const ROWS = ['Alpha Grid', 'Bravo Power', 'Charlie Wind', 'Delta Hydro', 'Echo 
  * Alpha is Confirmed / High 90, owned by the user, in NL, last signal 5 Mar 2026.
  * One script in one transaction (simple query): the account, verdict and score writes need app.writer.
  */
-async function seed({ ws, org, member }: { ws: string; org: string; member: string }): Promise<Seeded> {
+async function seed({ ws, org, member }: { ws: string; org: string; member: string }, opts: { programme?: boolean } = {}): Promise<Seeded> {
   const tag = randomUUID().replace(/-/g, '').slice(0, 12);
   const sites = `acc_sites_${tag}`;
   const dbl = `acc_double_${tag}`;
   const note = `acc_note_${tag}`;
+  // With `programme`: a fourth column, Drone programme (boolean, extract), Yes for Alpha and Bravo.
+  const prog = `acc_prog_${tag}`;
   const id = (k: string) => `(select v from ids where k = '${k}')`;
+  // Publishable (app.assert_brief_publishable), so Add column can publish a new version of it.
   const spec = JSON.stringify({
+    offer: 'Drone autonomy software for operators of large sites.',
+    hypothesis: 'Operators of many sites announce drone programmes before they buy autonomy software.',
+    examples: { positive: ['A utility tenders drone inspection', 'A port pilots a docked drone', 'A mine gets a BVLOS approval'], negative: ['A wedding photographer', 'A drone maker'] },
+    sources: { radar_types: ['news_publications'] },
     predicates: [
       { key: sites, label: 'Sites', value_type: 'number', role: 'scale' },
       { key: dbl, label: 'Double', value_type: 'number', role: 'info', fill_method: 'formula', formula: `${sites} * 2`, inputs: [sites] },
       { key: note, label: 'Note', value_type: 'text', role: 'info' },
+      ...(opts.programme ? [{ key: prog, label: 'Drone programme', value_type: 'boolean', role: 'signal' }] : []),
     ],
   });
   const entities = ROWS.map((n, i) => `('e${i}', app.create_entity('${org}', 'company', '${n}', 'tenant'))`).join(', ');
@@ -54,6 +62,7 @@ async function seed({ ws, org, member }: { ws: string; org: string; member: stri
     update public.brief set state = 'Active', current_version_id = ${id('bv')} where id = ${id('b')};
     insert into ids select 'p_sites', id from public.predicate where workspace_id = '${ws}' and key = '${sites}';
     insert into ids select 'p_dbl', id from public.predicate where workspace_id = '${ws}' and key = '${dbl}';
+    insert into ids select 'p_prog', id from public.predicate where workspace_id = '${ws}' and key = '${prog}';
 
     insert into ids select * from (values ${entities}) t(k, v);
     select set_config('app.writer', 'derivation', true);
@@ -75,6 +84,9 @@ async function seed({ ws, org, member }: { ws: string; org: string; member: stri
         '2026-03-04T10:00:00Z', (select id from public.extractor_version where capability = 'extract.acc-${tag}'), 100::smallint);
     insert into ids select 'c_b', app.create_claim('${org}', ${id('e1')}, ${id('p_sites')}, '1234', 'Bravo has 1234', null, null, ${id('s')},
         '2026-03-03T10:00:00Z', (select id from public.extractor_version where capability = 'extract.acc-${tag}'), 60::smallint);
+    ${opts.programme ? `select app.create_claim('${org}', v, ${id('p_prog')}, 'true', 'Runs a drone programme', null, null, ${id('s')},
+        '2026-03-02T10:00:00Z', (select id from public.extractor_version where capability = 'extract.acc-${tag}'), 90::smallint)
+      from ids where k in ('e0', 'e1');` : ''}
 
     select set_config('app.writer', 'derivation', true);
     insert into public.verdict (org_id, workspace_id, brief_version_id, entity_id, value, claim_ids)
@@ -94,9 +106,10 @@ async function seed({ ws, org, member }: { ws: string; org: string; member: stri
                    ('e5', 'no_data', null, null, null), ('e6', 'condition_not_met', null, null, null)) x(e, status, hash, claim, err);
     commit;
   `);
-  const [row] = await sql<{ brief: string; sites: string; double: string; note: string }>(
-    `select b.id as brief, $2::text as sites, $3::text as double, $4::text as note from public.brief b where b.workspace_id = $1 and b.name = $5`,
-    [ws, sites, dbl, note, `Table Brief ${tag}`],
+  const [row] = await sql<Seeded>(
+    `select b.id as brief, $2::text as sites, $3::text as double, $4::text as note, $6::text as programme
+       from public.brief b where b.workspace_id = $1 and b.name = $5`,
+    [ws, sites, dbl, note, `Table Brief ${tag}`, prog],
   );
   return row;
 }
@@ -430,6 +443,221 @@ test.describe('Accounts table', () => {
       await cell(vp, 'Alpha Grid', s.sites).click();
       await expect(panel(vp).locator('[data-panel-evidence]')).toContainText('Alpha runs twelve sites');
       for (const name of ['Re-run', 'Edit', 'Mark wrong']) await expect(panel(vp).getByRole('button', { name })).toHaveCount(0);
+      await ctx.close();
+    });
+  });
+
+  test.describe('Add column, run controls and the bulk bar', () => {
+    const runsOf = async (ws: string, key: string) =>
+      (
+        await sql<{ n: number }>(
+          `select count(*)::int as n from public.predicate_run pr join public.predicate p on p.id = pr.predicate_id
+            where pr.workspace_id = $1 and p.key = $2 and pr.status in ('queued', 'running')`,
+          [ws, key],
+        )
+      )[0].n;
+    const addPanel = (page: Page) => page.getByRole('dialog', { name: 'Add column' });
+    const confirmDialog = (page: Page) => page.getByRole('dialog', { name: 'Confirm run' });
+    /** Plays the worker's preview job: the Brief's pending preview becomes ready. */
+    async function completePreview(brief: string, tier: string, result: unknown, usd: number, minutes: number) {
+      await expect
+        .poll(async () => (await sql<{ n: number }>(`select count(*)::int as n from public.brief_preview where brief_id = $1 and status = 'pending'`, [brief]))[0].n)
+        .toBe(1);
+      await sql(
+        `select app.complete_brief_preview(p.id, $2::public.edit_tier, false, $3::jsonb, $4, $5, false)
+           from public.brief_preview p where p.brief_id = $1 and p.status = 'pending'`,
+        [brief, tier, JSON.stringify(result), usd, minutes],
+      );
+    }
+    async function openTable(page: Page, ws: string, brief: string) {
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${ws}/accounts?brief=${brief}`);
+      await expect(table(page)).toHaveAttribute('data-ready', '');
+    }
+
+    test('a formula column: live 5-row preview, publish, run choices at $0.00, then derived cells', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w, { programme: true });
+      await openTable(page, w.ws, s.brief);
+
+      await page.getByRole('button', { name: 'Add column' }).click();
+      const add = addPanel(page);
+      // AI research and provider waterfalls are listed, disabled.
+      await expect(add.getByRole('radio', { name: 'AI research' })).toBeDisabled();
+      await expect(add.getByRole('radio', { name: 'Provider waterfall' })).toBeDisabled();
+      await expect(add).toContainText('Arrives in P6');
+      await add.getByRole('radio', { name: 'Formula' }).check();
+      await add.getByLabel('Name', { exact: true }).fill('Programme and sites');
+      await expect(add).toContainText('programme_and_sites');
+      await add.getByLabel('Formula', { exact: true }).fill(`${s.programme} and ${s.sites} > 0`);
+      const preview = add.locator('[data-formula-preview]');
+      await expect(preview.locator('[data-preview-row]')).toHaveCount(5);
+      await expect(preview.locator('[data-preview-row="Alpha Grid"] [data-preview-value]')).toHaveText('Yes');
+      await expect(preview.locator('[data-preview-row="Bravo Power"] [data-preview-value]')).toHaveText('Yes');
+      await page.screenshot({ path: 'test-results/accounts-add-column.png', fullPage: true });
+
+      await add.getByRole('button', { name: 'Save and preview' }).click();
+      await completePreview(s.brief, 'Narrow', { counts: {} }, 0, 0);
+      await expect(add.locator('[data-add-column-cost]')).toContainText('Estimated cost $0.00');
+      await add.getByRole('button', { name: 'Publish column' }).click();
+
+      const choices = add.locator('[data-run-choices]');
+      await expect(choices.locator('[data-run-choice="10"]')).toContainText('est. $0.00');
+      await expect(choices.locator('[data-run-choice="all"]')).toContainText('est. $0.00');
+      await expect(choices.getByRole('button', { name: 'Save without running' })).toBeVisible();
+      // Publishing a formula already queued every empty cell (the P3 backfill), for free.
+      await expect(choices.locator('[data-run-backfilled]')).toHaveAttribute('data-run-backfilled', String(ROWS.length));
+      expect(await runsOf(w.ws, 'programme_and_sites')).toBe(ROWS.length);
+
+      // The worker's part: each run is worked out (Yes for Alpha and Bravo; no inputs elsewhere).
+      await sql(
+        `select app.start_run(pr.id) from public.predicate_run pr join public.predicate p on p.id = pr.predicate_id
+          where pr.workspace_id = $1 and p.key = 'programme_and_sites' and pr.status = 'queued'`,
+        [w.ws],
+      );
+      await sql(
+        `select case when e.display_name in ('Alpha Grid', 'Bravo Power') then app.complete_formula_run(pr.id, 'true'::jsonb, null)
+                     else app.finish_run(pr.id, 'no_data') end
+           from public.predicate_run pr join public.predicate p on p.id = pr.predicate_id join public.entity e on e.id = pr.entity_id
+          where pr.workspace_id = $1 and p.key = 'programme_and_sites' and pr.status = 'running'`,
+        [w.ws],
+      );
+      await choices.getByRole('button', { name: 'Save without running' }).click();
+      await page.reload();
+      await expect(cell(page, 'Alpha Grid', 'programme_and_sites').locator('[data-state="derived"]')).toHaveText('Yes');
+      await expect(cell(page, 'Bravo Power', 'programme_and_sites').locator('[data-state="derived"]')).toHaveText('Yes');
+    });
+
+    test('an extract column shows "Fills from N records" and the estimate', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await openTable(page, w.ws, s.brief);
+      await page.getByRole('button', { name: 'Add column' }).click();
+      const add = addPanel(page);
+      await expect(add.getByRole('radio', { name: 'Found in sources' })).toBeChecked();
+      await add.getByLabel('Name', { exact: true }).fill('Site operator');
+      await add.getByLabel('Value', { exact: true }).selectOption('boolean');
+      await add.getByLabel('What to look for').fill('Operates its own industrial sites');
+      await add.getByRole('button', { name: 'Save and preview' }).click();
+      await completePreview(s.brief, 'Expand', { counts: { reextract_records: 3 } }, 0.42, 30);
+      await expect(add.locator('[data-add-column-records]')).toHaveText('Fills from 3 records already collected');
+      await expect(add.locator('[data-add-column-cost]')).toContainText('Estimated cost $0.42');
+      await add.getByRole('button', { name: 'Publish column' }).click();
+      await expect(add.locator('[data-run-choice="all"]')).toContainText(/8 accounts · est\. \$\d+\.\d{2}/);
+      await expect(add.locator('[data-run-choice="10"]')).toContainText(/8 accounts · est\. \$\d+\.\d{2}/);
+      await add.locator('[data-run-choice="10"]').click();
+      await expect(add.getByRole('status').filter({ hasText: 'Queued 8 runs' })).toBeVisible();
+      expect(await runsOf(w.ws, 'site_operator')).toBe(8);
+      await expect(table(page).locator('thead th', { hasText: 'Site operator' })).toBeVisible();
+    });
+
+    test('Run empty shows N accounts · est. $X, then queues N runs; Pause auto-run switches a formula off', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await openTable(page, w.ws, s.brief);
+      await page.getByRole('button', { name: 'Column actions for Note' }).click();
+      await page.getByRole('menuitem', { name: 'Run empty' }).click();
+      const dlg = confirmDialog(page);
+      await expect(dlg.locator('[data-run-estimate]')).toHaveText(/^8 accounts · est\. \$\d+\.\d{2}$/);
+      expect(await runsOf(w.ws, s.note), 'the estimate queued nothing').toBe(0);
+      await page.screenshot({ path: 'test-results/accounts-run-confirm.png', fullPage: true });
+      await dlg.getByRole('button', { name: 'Confirm run' }).click();
+      await expect(dlg.getByRole('status')).toContainText('Queued 8 runs');
+      expect(await runsOf(w.ws, s.note)).toBe(8);
+      await dlg.getByRole('button', { name: 'Done' }).click();
+
+      // An extract column has no auto-run; a formula's menu pauses it.
+      await page.getByRole('button', { name: 'Column actions for Note' }).click();
+      await expect(page.getByRole('menuitem', { name: /auto-run/ })).toHaveCount(0);
+      await page.keyboard.press('Escape');
+      await page.getByRole('button', { name: 'Column actions for Double' }).click();
+      await page.getByRole('menuitem', { name: 'Pause auto-run' }).click();
+      await expect
+        .poll(async () => (await sql<{ on: boolean }>(`select auto_run as on from public.predicate where workspace_id = $1 and key = $2`, [w.ws, s.double]))[0].on)
+        .toBe(false);
+      await page.getByRole('button', { name: 'Column actions for Double' }).click();
+      await expect(page.getByRole('menuitem', { name: 'Resume auto-run' })).toBeVisible();
+    });
+
+    test('a budget cap below the estimate shows the 55000 message and Run the first N, which queues N', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      const [{ per }] = await sql<{ per: string }>(
+        `select app.column_cost_per_entity(p.id, $1)::text as per from public.predicate p where p.workspace_id = $1 and p.key = $2`,
+        [w.ws, s.note],
+      );
+      const cap = Math.max(0.01, Math.ceil(Number(per) * 3 * 100) / 100);
+      expect(cap, 'the cap is below the cost of 8 runs').toBeLessThan(Number(per) * 8);
+      await sql(`insert into public.budget (org_id, workspace_id, period, cap_usd) values ($1, $2, 'month', $3)`, [w.org, w.ws, cap]);
+      const [{ n }] = await sql<{ n: number }>(`select floor($1::numeric / $2::numeric)::int as n`, [cap, per]);
+
+      await openTable(page, w.ws, s.brief);
+      await page.getByRole('button', { name: 'Column actions for Note' }).click();
+      await page.getByRole('menuitem', { name: 'Run empty' }).click();
+      const dlg = confirmDialog(page);
+      await expect(dlg.locator('[data-run-estimate]')).toHaveText(/^8 accounts/);
+      await dlg.getByRole('button', { name: 'Confirm run' }).click();
+      const refusal = dlg.locator('[data-run-refusal]');
+      await expect(refusal).toContainText(`run the first ${n} within budget`);
+      expect(await runsOf(w.ws, s.note), 'a refused run queues nothing').toBe(0);
+      await refusal.getByRole('button', { name: `Run the first ${n}` }).click();
+      await expect(dlg.getByRole('status')).toContainText(`Queued ${n} run`);
+      expect(await runsOf(w.ws, s.note)).toBe(n);
+    });
+
+    test('bulk run: 2 selected rows, Run columns…, confirm queues 2 runs per chosen column', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await openTable(page, w.ws, s.brief);
+      await page.getByLabel('Select Alpha Grid').check();
+      await page.getByLabel('Select Hotel Gas').check();
+      const bar = page.getByRole('region', { name: 'Selected accounts' });
+      await expect(bar).toContainText('2 selected');
+      await expect(bar.getByRole('button', { name: /Add to sequence/ })).toBeDisabled();
+      await expect(bar.getByRole('button', { name: /Find people/ })).toBeDisabled();
+      await expect(bar.getByRole('button', { name: /Merge/ })).toBeDisabled();
+      await bar.getByRole('button', { name: 'Run columns…' }).click();
+      await bar.getByLabel('Note').check();
+      await bar.getByLabel('Sites').check();
+      await bar.getByRole('button', { name: 'Review run' }).click();
+      const dlg = confirmDialog(page);
+      await expect(dlg.locator('[data-run-job="Note"] [data-run-estimate]')).toHaveText(/^2 accounts · est\. \$\d+\.\d{2}$/);
+      await expect(dlg.locator('[data-run-job="Sites"] [data-run-estimate]')).toHaveText(/^2 accounts · est\. \$\d+\.\d{2}$/);
+      await dlg.getByRole('button', { name: 'Confirm run' }).click();
+      await expect(dlg.getByRole('status')).toHaveCount(2);
+      expect(await runsOf(w.ws, s.note)).toBe(2);
+      const [{ sites }] = await sql<{ sites: number }>(
+        `select count(*)::int as sites from public.predicate_run pr join public.predicate p on p.id = pr.predicate_id
+           join public.entity e on e.id = pr.entity_id
+          where pr.workspace_id = $1 and p.key = $2 and pr.status = 'queued' and e.display_name in ('Alpha Grid', 'Hotel Gas')`,
+        [w.ws, s.sites],
+      );
+      expect(sites).toBe(2);
+    });
+
+    test('Viewer (Review Focus 5): no Add column, column menus or bulk Run; All Briefs disables Add column', async ({ page, browser }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      // An Editor under All Briefs: Add column says why it cannot.
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${w.ws}/accounts?brief=all`);
+      await expect(page.getByRole('button', { name: 'Add column' })).toBeDisabled();
+      await expect(page.locator('[data-add-column="disabled"]')).toContainText('Choose a Brief in the lens to add a column');
+
+      const viewer = await newUser('cols-viewer');
+      const [member] = await sql<{ id: string }>('insert into public.member (org_id, user_id, email) values ($1, $2, $3) returning id', [w.org, viewer.id, viewer.email]);
+      await sql(`insert into public.role_assignment (org_id, member_id, workspace_id, role) values ($1, $2, $3, 'Viewer')`, [w.org, member.id, w.ws]);
+      const ctx = await browser.newContext();
+      await signIn(ctx, viewer.email);
+      const vp = await ctx.newPage();
+      await openTable(vp, w.ws, s.brief);
+      await expect(vp.getByRole('button', { name: 'Add column' })).toHaveCount(0);
+      await expect(vp.getByRole('button', { name: /^Column actions for/ })).toHaveCount(0);
+      await vp.getByLabel('Select Alpha Grid').check();
+      const bar = vp.getByRole('region', { name: 'Selected accounts' });
+      await expect(bar).toContainText('1 selected');
+      await expect(bar.getByRole('button', { name: 'Export selected' })).toBeVisible();
+      await expect(bar.getByRole('button', { name: 'Run columns…' })).toHaveCount(0);
       await ctx.close();
     });
   });

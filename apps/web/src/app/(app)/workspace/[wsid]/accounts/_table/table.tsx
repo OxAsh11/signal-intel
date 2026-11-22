@@ -4,7 +4,10 @@ import Link from 'next/link';
 import { useCallback, useRef, useState, type KeyboardEvent } from 'react';
 import { BandChip, StageBadge, VerdictBadge } from '@signal/ui';
 import { Band, Stage, Verdict } from '@signal/contracts';
+import { BulkBar } from './bulk-bar';
 import { Cell, formatDate } from './cell';
+import { ColumnMenu } from './column-menu';
+import { RunConfirm, type RunJob } from './run-confirm';
 import type { Column, TableRow } from './types';
 import type { SortKey } from './url';
 
@@ -36,6 +39,9 @@ export function AccountsTable({
   columns,
   sorts,
   sortHrefs,
+  canEdit = false,
+  briefId = null,
+  filter = null,
 }: {
   ws: string;
   rows: TableRow[];
@@ -43,10 +49,17 @@ export function AccountsTable({
   sorts: SortKey[];
   /** The URL each sortable header links to, keyed by sort key (system sort or column key). */
   sortHrefs: Record<string, string>;
+  /** Editor+: column menus and bulk Run. A Viewer sees neither. */
+  canEdit?: boolean;
+  /** The lens Brief (null under All Briefs): the runs' Brief and budget. */
+  briefId?: string | null;
+  /** The view's filter AST: a column menu runs on the accounts in view. */
+  filter?: Record<string, unknown> | null;
 }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [active, setActive] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const [drawer, setDrawer] = useState(false);
+  const [confirm, setConfirm] = useState<{ title: string; jobs: RunJob[] } | null>(null);
   const gridRef = useRef<HTMLTableElement>(null);
   const hidden = columns.slice(MID_COLUMNS);
 
@@ -103,13 +116,16 @@ export function AccountsTable({
   return (
     <div data-table="" ref={(el) => el?.setAttribute('data-ready', '')} className="max-md:hidden">
       {selected.size > 0 ? (
-        <div className="mb-2 flex items-center gap-3 rounded-md border border-line bg-surface-sunken px-4 py-2 text-[13px]" role="region" aria-label="Selected accounts">
-          <span className="font-medium text-ink">{selected.size} selected</span>
-          <button type="button" className="si-btn si-btn-quiet si-btn-sm" onClick={() => setSelected(new Set())}>
-            Clear selection
-          </button>
-        </div>
+        <BulkBar
+          rows={rows.filter((r) => selected.has(r.account_id))}
+          columns={columns}
+          canEdit={canEdit}
+          briefId={briefId}
+          onRun={(title, jobs) => setConfirm({ title, jobs })}
+          onClear={() => setSelected(new Set())}
+        />
       ) : null}
+      {confirm ? <RunConfirm ws={ws} title={confirm.title} jobs={confirm.jobs} onClose={() => setConfirm(null)} /> : null}
       {hidden.length > 0 ? (
         <div className="mb-2 hidden justify-end md:max-lg:flex">
           <button type="button" className="si-btn si-btn-sm" aria-haspopup="dialog" onClick={() => setDrawer(true)}>
@@ -128,7 +144,21 @@ export function AccountsTable({
               ))}
               {columns.map((c, i) => (
                 <th key={c.id} scope="col" data-column={c.key} className={i >= MID_COLUMNS ? 'max-lg:hidden' : ''} aria-sort={ariaSort(sorts, c.key)}>
-                  <Head label={c.label} sortKey={c.key} sorts={sorts} hrefs={sortHrefs} />
+                  <span className="inline-flex items-center whitespace-nowrap">
+                    <Head label={c.label} sortKey={c.key} sorts={sorts} hrefs={sortHrefs} />
+                    {canEdit ? (
+                      <ColumnMenu
+                        ws={ws}
+                        column={c}
+                        onRun={(mode) =>
+                          setConfirm({
+                            title: `Run ${mode === 'errored' ? 'errored' : mode} · ${c.label}`,
+                            jobs: [{ predicate: c.id, label: c.label, mode, brief: briefId, filter }],
+                          })
+                        }
+                      />
+                    ) : null}
+                  </span>
                 </th>
               ))}
             </tr>

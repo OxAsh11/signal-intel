@@ -4,6 +4,7 @@ import { Suspense } from 'react';
 import { getBriefLens } from '@/lib/brief-lens';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
+import { AddColumn } from './_table/add-column';
 import { Cards } from './_table/cards';
 import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton } from './_table/states';
 import { CellPanel } from './_table/panel';
@@ -120,7 +121,21 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
   const from = (q.page - 1) * PAGE_SIZE + 1;
   return (
     <>
-      <AccountsTable ws={ws} rows={table.rows} columns={table.columns} sorts={sorts} sortHrefs={sortHrefs} />
+      {canEdit ? (
+        <div className="flex justify-end" data-table-tools="">
+          <AddColumn ws={ws} briefId={lens.briefId} filter={filtered ? filter : null} rows={table.rows} columns={table.columns} />
+        </div>
+      ) : null}
+      <AccountsTable
+        ws={ws}
+        rows={table.rows}
+        columns={table.columns}
+        sorts={sorts}
+        sortHrefs={sortHrefs}
+        canEdit={canEdit}
+        briefId={lens.briefId}
+        filter={filtered ? filter : null}
+      />
       <CellPanel ws={ws} briefId={lens.briefId} canEdit={canEdit} userName={userName} />
       <Cards ws={ws} rows={table.rows} columns={table.columns} />
       <Pager ws={ws} q={q} pages={pages} from={from} to={from + table.rows.length - 1} total={table.total} />
