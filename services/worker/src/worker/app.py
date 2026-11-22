@@ -1474,7 +1474,7 @@ def build_app(
             await _enqueue("column.run", f"run:{run_id}", run_id=run_id)
 
     async def _queue_auto_runs(event: dict[str, Any]) -> None:
-        """A new claim re-runs the formula columns that read its column (P3 auto-run).
+        """A new or retracted claim re-runs the formula columns that read its column (auto-run).
 
         app.queue_auto_runs commits the runs together with a column.run_requested event, whose
         dispatch defers the jobs; nothing is deferred here, so a run is never left without one."""
@@ -1501,13 +1501,14 @@ def build_app(
             log.info("column_run.merge_queued", entity_id=winner, runs=len(row[0]))
 
     async def _is_derived_claim(payload: dict[str, Any]) -> bool:
-        """Was the claim written by a formula (its source record is derived:…)?"""
+        """Was the claim written by a formula (its source record is derived:formula)? A person's
+        manual value (derived:manual) is evidence and re-judges the verdict like a sourced claim."""
         record = payload.get("source_record_id")
         if not isinstance(record, str) or not _is_uuid(record):
             return False
         row = await _fetch_one(
             "select exists (select 1 from public.source_record"
-            " where id = %s and connector_id like 'derived:%%')",
+            " where id = %s and connector_id = 'derived:formula')",
             (record,),
         )
         return row is not None and row[0] is True
@@ -1533,7 +1534,9 @@ def build_app(
         if pool is None or not org_id:
             return
         # Org-scoped events (no workspace): new evidence or a merge re-judges the entity.
-        if evt in ("claim.created", "entity.merged"):
+        # A retraction (a person marked the claim wrong, 0043) is evidence going away: it is
+        # handled like a new claim (re-judge or re-score, re-run the formulas reading its column).
+        if evt in ("claim.created", "claim.retracted", "entity.merged"):
             # A merge re-judges the surviving entity; a claim re-judges its own entity.
             entity_id = payload.get("winner" if evt == "entity.merged" else "entity_id")
             if not entity_id:

@@ -1869,7 +1869,7 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         newest_sourced = await db.one(
             "select max(c.created_at) from public.claim c join public.source_record sr"
             " on sr.id = c.source_record_id where c.entity_id = %s"
-            " and sr.connector_id not like 'derived:%%'",
+            " and sr.connector_id <> 'derived:formula'",
             (entity,),
         )
         assert await db.one(m06.NEWEST_CLAIM_SQL, (entity,)) == newest_sourced
@@ -1950,7 +1950,7 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         sourced_sql = (
             "select count(*) from public.claim c join public.source_record sr"
             " on sr.id = c.source_record_id where c.entity_id = %s"
-            " and sr.connector_id not like 'derived:%%'"
+            " and sr.connector_id <> 'derived:formula'"
         )
         sourced_before = await db.one(sourced_sql, (entity,))
         calls_before = len(gateway.calls)
@@ -2056,3 +2056,58 @@ async def _column_runs_scenario(pool: AsyncConnectionPool) -> None:
         runs = await db.admin(runs_sql, (entity, formula))
         assert runs[-1][0] == "succeeded"
         assert (await cell(formula))[0] == "derived"
+
+        # P5 R5: a person's manual value is evidence. Entering the industry "drone vendor" by
+        # hand meets the disqualifying rule, so the verdict is re-judged to Contradicted.
+        verdict_sql = (
+            "select v.value::text from public.verdict v"
+            " join public.brief b on b.current_version_id = v.brief_version_id"
+            " where v.entity_id = %s and b.id = %s"
+        )
+        # (v2 has judged nothing yet: no sourced evidence arrived since it was published.)
+        assert await db.one(verdict_sql, (entity, BRIEF_P3)) is None
+        manual = await _as_p3_user(
+            db,
+            "select public.set_manual_value(%s, %s, %s, '\"drone vendor\"'::jsonb)",
+            (WS_P3, entity, predicates["industry"]),
+        )
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await db.one(verdict_sql, (entity, BRIEF_P3)) == "Contradicted"
+
+        # P5 R6: marking it wrong (claim.retracted) takes the evidence back: re-judged.
+        await _as_p3_user(db, "select public.mark_claim_wrong(%s, %s, 'a typo')", (WS_P3, manual))
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await db.one(verdict_sql, (entity, BRIEF_P3)) == "Confirmed"
+
+        # P5 R6: marking a formula's input wrong re-runs the formula reading it. A new
+        # site_count fills the label; marked wrong, the label re-runs and finds no data.
+        sites = await db.one(
+            "select app.create_claim(%s, %s, %s, '41'::jsonb, 'its 41 substations', null, null,"
+            " %s, now(), %s, 85::smallint)",
+            (ORG_P3, entity, predicates["site_count"], record, CANARY_EXTRACTOR_VERSION),
+        )
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        assert await cell(label) == ("derived", '"41 sites"')
+        label_runs = len(await db.admin(runs_sql, (entity, label)))
+        await _as_p3_user(
+            db, "select public.mark_claim_wrong(%s, %s, 'not theirs')", (WS_P3, sites)
+        )
+        await _drain(app, connector, pool)
+        assert _failed_jobs(connector) == []
+        label_after = await db.admin(runs_sql, (entity, label))
+        assert len(label_after) == label_runs + 1
+        assert label_after[-1][0] == "no_data"
+        assert await cell(label) == ("no_data", None)
+        # P5 I2: the same fact extracted again does not come back.
+        again = await db.one(
+            "select app.create_claim(%s, %s, %s, '41'::jsonb, 'its 41 substations', null, null,"
+            " %s, now(), %s, 85::smallint)",
+            (ORG_P3, entity, predicates["site_count"], record, CANARY_EXTRACTOR_VERSION),
+        )
+        assert again == sites
+        assert await db.one("select status::text from public.claim where id = %s", (sites,)) == (
+            "retracted"
+        )

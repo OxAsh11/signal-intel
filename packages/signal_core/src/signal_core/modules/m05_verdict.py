@@ -57,8 +57,9 @@ account_card_generate_job: Any | None = None
 
 # Claims that count towards a verdict: active and not past their expiry. Each row is
 # (id, key, value, quote, confidence, observed_at, record url, record id).
-# The evidence a verdict weighs. A formula's derived claim (source record derived:...) restates
-# other claims and carries no quote, so it never reaches the rubric or the judge.
+# The evidence a verdict weighs. A formula's derived claim (source record derived:formula)
+# restates other claims and carries no quote, so it never reaches the rubric or the judge. A
+# person's manual value (derived:manual) is evidence.
 LIVE_CLAIMS_SQL = """
     SELECT c.id, p.key, c.value, c.quote, c.confidence, c.observed_at, sr.url, sr.id
       FROM public.claim c
@@ -67,16 +68,16 @@ LIVE_CLAIMS_SQL = """
      WHERE c.entity_id = %s
        AND c.status = 'active'
        AND (c.expires_at IS NULL OR c.expires_at > now())
-       AND sr.connector_id NOT LIKE 'derived:%%'
+       AND sr.connector_id <> 'derived:formula'
      ORDER BY c.observed_at DESC, c.id
 """
 
 
-# Which of these claims a formula derived (source record derived:...).
+# Which of these claims a formula derived (source record derived:formula).
 DERIVED_IDS_SQL = """
     SELECT c.id::text FROM public.claim c
       JOIN public.source_record sr ON sr.id = c.source_record_id
-     WHERE c.id = ANY(%s::uuid[]) AND sr.connector_id LIKE 'derived:%%'
+     WHERE c.id = ANY(%s::uuid[]) AND sr.connector_id = 'derived:formula'
 """
 
 

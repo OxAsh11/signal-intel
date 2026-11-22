@@ -34,16 +34,17 @@ _EXCERPT_CHARS = 1500
 _MAX_SOURCE_CLAIMS = 60
 
 # When the entity last gained evidence from a source (a newer claim makes the last research
-# document out of date). A formula's derived claim (source record derived:...) restates other
-# claims, so it is not new evidence (R7).
+# document out of date). A formula's derived claim (source record derived:formula) restates other
+# claims, so it is not new evidence (R7); a person's manual value (derived:manual) is.
 NEWEST_CLAIM_SQL = """
     SELECT MAX(c.created_at) FROM public.claim c
       JOIN public.source_record sr ON sr.id = c.source_record_id
-     WHERE c.entity_id = %s AND sr.connector_id NOT LIKE 'derived:%%'
+     WHERE c.entity_id = %s AND sr.connector_id <> 'derived:formula'
 """
 
 # The source material: the entity's live claims found in sources, with their quotes and their
-# records' excerpts. Derived claims are left out: research is written from stored sources.
+# records' excerpts. Formula claims are left out: research is written from stored sources and
+# the values people entered.
 SOURCE_CLAIMS_SQL = """
     SELECT sr.id, sr.url, left(sp.content, %s), p.key, c.value, c.quote
       FROM public.claim c
@@ -52,7 +53,7 @@ SOURCE_CLAIMS_SQL = """
       LEFT JOIN public.source_payload sp ON sp.source_record_id = sr.id
      WHERE c.entity_id = %s AND c.status = 'active'
        AND (c.expires_at IS NULL OR c.expires_at > now())
-       AND sr.connector_id NOT LIKE 'derived:%%'
+       AND sr.connector_id <> 'derived:formula'
      ORDER BY c.observed_at DESC
      LIMIT %s
 """

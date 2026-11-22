@@ -87,13 +87,14 @@ def settings(
     return weights, thresholds, roles
 
 
-# The connector of the source record a formula's claims are written against (0039).
-DERIVED_CONNECTOR_PREFIX = "derived:"
+# The connector of the source record a formula's claims are written against (0039). A person's
+# manual value (derived:manual, 0043) is evidence like a sourced claim.
+FORMULA_CONNECTOR = "derived:formula"
 
 
 def is_derived(claim: tuple[Any, ...]) -> bool:
     """Was this claim (a ScoreInputs row) computed by a formula rather than found in a source?"""
-    return len(claim) > 6 and str(claim[6] or "").startswith(DERIVED_CONNECTOR_PREFIX)
+    return len(claim) > 6 and str(claim[6] or "") == FORMULA_CONNECTOR
 
 
 def _band_from_priority(priority: float, thresholds: dict[str, float]) -> str:

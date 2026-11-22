@@ -30,7 +30,7 @@ log = get_logger(__name__)
 
 # id, predicate key, value, confidence, observed_at, half-life (days), connector that found it.
 # Derived (formula) claims are included: they count for fit, scale, timing and labels; scoring_core
-# leaves them out of corroboration by their connector (derived:...).
+# leaves them out of corroboration by their connector (derived:formula; a manual value counts).
 CLAIMS_SQL = """
     SELECT c.id, p.key, c.value, c.confidence, c.observed_at, p.decay_half_life_days,
            sr.connector_id

@@ -269,6 +269,16 @@ def test_derived_claims_add_no_corroboration() -> None:
     assert two.evidence > one.evidence  # evidence from sources does corroborate
 
 
+def test_manual_values_corroborate_like_sourced_claims() -> None:
+    """R5: a person's manual value (derived:manual, 0043) is evidence; only derived:formula is not."""
+    config = _cfg(verticals=["energy"])
+    one = _score(config, [_claim("industry", "Energy")])
+    manual = ("m-1", "drone_programme", True, 100, NOW, None, "derived:manual")
+    with_manual = _score(config, [_claim("industry", "Energy"), manual])
+    assert with_manual.evidence > one.evidence
+    assert with_manual.explanation["evidence"]["claims"] == 2
+
+
 def test_derived_claims_count_for_fit_and_scale() -> None:
     config = _cfg(verticals=["energy"])
     fit = _score(config, [_derived("industry", "Energy")])
