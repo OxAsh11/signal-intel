@@ -233,6 +233,9 @@ test.describe('Accounts table', () => {
     await expect(page.getByRole('region', { name: 'Selected accounts' })).toHaveCount(0);
     await page.keyboard.press('Enter');
     expect(await page.evaluate(() => (window as unknown as { __opened: unknown[] }).__opened.length)).toBe(1);
+    await expect(page.getByRole('dialog', { name: 'Cell detail' })).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(page.getByRole('dialog', { name: 'Cell detail' })).toHaveCount(0);
 
     const [{ after }] = await sql<{ after: number }>(`select count(*)::int as after from public.predicate_run where workspace_id = $1`, [w.ws]);
     expect(after, 'Enter queued no run').toBe(before);
@@ -308,5 +311,120 @@ test.describe('Accounts table', () => {
     await table(page).locator('thead').getByRole('link', { name: /Account/ }).click();
     await expect(page).toHaveURL(/sort=name%3Adesc/);
     await expect(table(page).locator('tbody tr').first()).toContainText('Hotel Gas');
+  });
+
+  test.describe('cell panel', () => {
+    const panel = (page: Page) => page.getByRole('dialog', { name: 'Cell detail' });
+    const runCount = async (ws: string) =>
+      (await sql<{ n: number }>(`select count(*)::int as n from public.predicate_run where workspace_id = $1`, [ws]))[0].n;
+
+    test('a value cell shows its quote, source link, date and history; opening runs nothing', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+      const before = await runCount(w.ws);
+      await cell(page, 'Alpha Grid', s.sites).click();
+      await expect(panel(page)).toContainText('Sites');
+      await expect(panel(page).locator('[data-panel-value]')).toContainText('12');
+      await expect(panel(page).locator('[data-panel-value]')).toContainText('Found in sources');
+      const evidence = panel(page).locator('[data-panel-evidence]');
+      await expect(evidence).toContainText('Alpha runs twelve sites');
+      await expect(evidence).toContainText('5 Mar 2026');
+      await expect(evidence.getByRole('link', { name: 'Source' })).toHaveAttribute('href', /acc\.example/);
+      await expect(panel(page).locator('[data-panel-history]')).toBeVisible();
+      await page.screenshot({ path: 'test-results/accounts-panel.png', fullPage: true });
+      expect(await runCount(w.ws), 'opening the panel queued no run').toBe(before);
+
+      await page.keyboard.press('Escape');
+      await cell(page, 'Bravo Power', s.sites).click();
+      await expect(panel(page).locator('[data-panel-history]')).toContainText('succeeded');
+    });
+
+    test('a derived cell lists its inputs', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+      await cell(page, 'Alpha Grid', s.double).click();
+      await expect(panel(page).locator('[data-panel-value]')).toContainText('Formula');
+      await expect(panel(page).locator('[data-panel-inputs]')).toContainText('Sites');
+      await expect(panel(page).locator('[data-panel-inputs]')).toContainText('12');
+    });
+
+    test('Edit writes a manual value, shows the evidence note, and keeps the old value struck through', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+      await cell(page, 'Alpha Grid', s.sites).click();
+      await panel(page).getByRole('button', { name: 'Edit' }).click();
+      await expect(panel(page).locator('[data-panel-note="evidence"]')).toContainText('This counts as evidence.');
+      await expect(panel(page).locator('[data-panel-note="evidence"]')).toContainText('you can undo it any time with Mark wrong');
+      await panel(page).getByLabel('New value').fill('40');
+      await panel(page).getByRole('button', { name: 'Save value' }).click();
+      await expect(panel(page).locator('[data-panel-value]')).toContainText('Entered by you');
+      await expect(panel(page).locator('[data-panel-value]')).toContainText('40');
+      await expect(panel(page).locator('[data-claim-status="active"]')).toContainText('Counts as evidence · undo with Mark wrong');
+      const old = panel(page).locator('[data-claim-status="superseded"]').filter({ hasText: '12' });
+      await expect(old).toHaveCount(1);
+      await expect(old.locator('.line-through').first()).toBeVisible();
+      await page.keyboard.press('Escape');
+      await expect(cell(page, 'Alpha Grid', s.sites)).toContainText('40');
+    });
+
+    test('Mark wrong needs a reason and creates a Review item', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+      await cell(page, 'Bravo Power', s.sites).click();
+      await panel(page).getByRole('button', { name: 'Mark wrong' }).click();
+      await expect(panel(page).getByRole('button', { name: 'Confirm mark wrong' })).toBeDisabled();
+      await panel(page).getByLabel('Why is this value wrong?').fill('The site count is for a different company.');
+      await panel(page).getByRole('button', { name: 'Confirm mark wrong' }).click();
+      await expect(panel(page).locator('[data-claim-status="retracted"]')).toHaveCount(1);
+      const [{ n }] = await sql<{ n: number }>(
+        `select count(*)::int as n from public.review_item where workspace_id = $1 and type = 'claim_wrong' and status = 'pending'`,
+        [w.ws],
+      );
+      expect(n).toBe(1);
+      await page.reload();
+      await expect(page.getByRole('navigation').getByRole('link', { name: /^Review\s*1\s*pending$/ })).toBeVisible();
+    });
+
+    test('Re-run shows the estimate, confirms, then the cell is queued', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      await page.setViewportSize({ width: 1440, height: 900 });
+      await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+      const before = await runCount(w.ws);
+      await cell(page, 'Hotel Gas', s.sites).click();
+      await panel(page).getByRole('button', { name: 'Re-run' }).click();
+      await expect(panel(page).locator('[data-panel-estimate]')).toHaveText(/^1 account · est\. \$\d+\.\d{2}$/);
+      expect(await runCount(w.ws), 'the estimate queued nothing').toBe(before);
+      await panel(page).getByRole('button', { name: 'Confirm re-run' }).click();
+      await expect(panel(page).getByRole('status')).toContainText('Queued');
+      expect(await runCount(w.ws)).toBe(before + 1);
+      await page.keyboard.press('Escape');
+      await expect(cell(page, 'Hotel Gas', s.sites).locator('[data-state="queued"]')).toBeVisible();
+    });
+
+    test('a Viewer opens the panel but sees no Re-run, Edit or Mark wrong', async ({ browser }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      const viewer = await newUser('panel-viewer');
+      const [member] = await sql<{ id: string }>('insert into public.member (org_id, user_id, email) values ($1, $2, $3) returning id', [w.org, viewer.id, viewer.email]);
+      await sql(`insert into public.role_assignment (org_id, member_id, workspace_id, role) values ($1, $2, $3, 'Viewer')`, [w.org, member.id, w.ws]);
+      const ctx = await browser.newContext();
+      await signIn(ctx, viewer.email);
+      const vp = await ctx.newPage();
+      await vp.setViewportSize({ width: 1440, height: 900 });
+      await vp.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
+      await cell(vp, 'Alpha Grid', s.sites).click();
+      await expect(panel(vp).locator('[data-panel-evidence]')).toContainText('Alpha runs twelve sites');
+      for (const name of ['Re-run', 'Edit', 'Mark wrong']) await expect(panel(vp).getByRole('button', { name })).toHaveCount(0);
+      await ctx.close();
+    });
   });
 });

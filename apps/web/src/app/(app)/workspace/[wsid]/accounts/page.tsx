@@ -2,9 +2,11 @@ import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Suspense } from 'react';
 import { getBriefLens } from '@/lib/brief-lens';
+import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import { Cards } from './_table/cards';
 import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton } from './_table/states';
+import { CellPanel } from './_table/panel';
 import { AccountsTable } from './_table/table';
 import type { TableData } from './_table/types';
 import {
@@ -111,11 +113,15 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
     sortHrefs[key] = tableHref(ws, q, { sort: next.length ? formatSort(next) : null, page: 1 });
   }
 
+  const ctx = await getOrgContext();
+  const canEdit = atLeast(ctx?.workspaceRole, 'Editor');
+  const userName = ctx?.user.name ?? ctx?.user.email ?? 'you';
   const pages = Math.ceil(table.total / PAGE_SIZE);
   const from = (q.page - 1) * PAGE_SIZE + 1;
   return (
     <>
       <AccountsTable ws={ws} rows={table.rows} columns={table.columns} sorts={sorts} sortHrefs={sortHrefs} />
+      <CellPanel ws={ws} briefId={lens.briefId} canEdit={canEdit} userName={userName} />
       <Cards ws={ws} rows={table.rows} columns={table.columns} />
       <Pager ws={ws} q={q} pages={pages} from={from} to={from + table.rows.length - 1} total={table.total} />
     </>
