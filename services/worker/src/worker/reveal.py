@@ -20,6 +20,7 @@ from psycopg_pool import AsyncConnectionPool
 
 from signal_core.crypto import SecretsNotConfigured, decrypt_secret
 from signal_core.logging import get_logger
+from worker.health import PROVIDER_STATUS_PATH, handle_provider_status
 
 log = get_logger("worker.reveal")
 
@@ -58,7 +59,12 @@ async def handle_reveal(
     body: bytes,
 ) -> tuple[int, dict[str, Any]]:
     """One request, without the socket. Kept separate so the rules are easy to test."""
-    if path.split("?")[0] != REVEAL_PATH:
+    route = path.split("?")[0]
+    # The web uses one worker URL for both small endpoints; status lives on the health server and
+    # is mirrored here behind the same token so a single Railway hostname is enough.
+    if route == PROVIDER_STATUS_PATH:
+        return handle_provider_status(token, method, path, headers)
+    if route != REVEAL_PATH:
         return 404, {"error": "not found"}
     if method != "POST":
         return 405, {"error": "POST required"}

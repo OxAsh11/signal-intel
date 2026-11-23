@@ -21,13 +21,18 @@ export function SearchBox({ ws }: { ws: string }) {
   const [state, setState] = useState<'idle' | 'loading' | 'done' | 'error'>('idle');
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(-1);
+  // Phone: the field would crowd the user menu in a 390 px top bar. It starts as an icon.
+  const [phoneOpen, setPhoneOpen] = useState(false);
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
         e.preventDefault();
-        inputRef.current?.focus();
-        inputRef.current?.select();
+        setPhoneOpen(true);
+        requestAnimationFrame(() => {
+          inputRef.current?.focus();
+          inputRef.current?.select();
+        });
       }
     };
     const onDoc = (e: MouseEvent) => {
@@ -69,8 +74,27 @@ export function SearchBox({ ws }: { ws: string }) {
   };
 
   const showList = open && text.trim().length >= 2;
+  const openOnPhone = () => {
+    setPhoneOpen(true);
+    requestAnimationFrame(() => inputRef.current?.focus());
+  };
   return (
-    <div ref={boxRef} className="relative w-full" role="search">
+    <div ref={boxRef} className="relative w-full" role="search" data-search-box="">
+      {phoneOpen ? null : (
+        <button
+          type="button"
+          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-sm border border-line-strong bg-surface text-ink md:hidden"
+          aria-label="Open search"
+          aria-expanded={false}
+          onClick={openOnPhone}
+          data-search-toggle=""
+        >
+          <svg aria-hidden="true" viewBox="0 0 20 20" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="1.8">
+            <circle cx="8.5" cy="8.5" r="5.5" />
+            <path d="m13 13 4 4" strokeLinecap="round" />
+          </svg>
+        </button>
+      )}
       <input
         ref={inputRef}
         type="search"
@@ -84,7 +108,7 @@ export function SearchBox({ ws }: { ws: string }) {
         placeholder="Search accounts  Ctrl K"
         value={text}
         maxLength={200}
-        className="w-full min-w-0 rounded-sm border border-line-strong bg-surface px-3 py-1.5 text-[14px] text-ink placeholder:text-ink-faint"
+        className={`${phoneOpen ? 'block' : 'hidden'} w-full min-w-0 rounded-sm border border-line-strong bg-surface px-3 py-1.5 text-[14px] text-ink placeholder:text-ink-faint md:block`}
         onChange={(e) => {
           const next = e.target.value;
           setText(next);
@@ -96,6 +120,9 @@ export function SearchBox({ ws }: { ws: string }) {
           } else setState('loading');
         }}
         onFocus={() => setOpen(true)}
+        onBlur={() => {
+          if (text.trim().length === 0) setPhoneOpen(false);
+        }}
         onKeyDown={(e) => {
           if (e.key === 'ArrowDown' && hits.length) {
             e.preventDefault();
@@ -110,6 +137,7 @@ export function SearchBox({ ws }: { ws: string }) {
           } else if (e.key === 'Escape') {
             setOpen(false);
             setActive(-1);
+            inputRef.current?.blur();
           }
         }}
       />

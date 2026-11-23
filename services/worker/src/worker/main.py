@@ -96,13 +96,14 @@ async def amain() -> None:
     conninfo = settings.database_url_session.get_secret_value()
 
     state = HealthState()
-    health = await serve_health(state, settings.port)
-    pool = make_pool(conninfo)
-    await pool.open()
-    # The web app reveals a full contact value only through this small, token-protected port.
+    # The web app reveals a full contact value and reads provider status only through small,
+    # token-protected ports. Without the token both stay closed.
     reveal_token = (
         settings.worker_status_token.get_secret_value() if settings.worker_status_token else None
     )
+    health = await serve_health(state, settings.port, token=reveal_token)
+    pool = make_pool(conninfo)
+    await pool.open()
     reveal = (
         await serve_reveal(pool_lookup(pool), reveal_token, settings.worker_reveal_port)
         if reveal_token
