@@ -20,6 +20,19 @@ export async function loadWorkspaceTags(ws: string): Promise<{ id: string; name:
   return (data as unknown as { id: string; name: string; colour: string }[]) ?? [];
 }
 
+export async function loadAccountTags(ws: string): Promise<Array<{ account_id: string; tag_id: string; tag_name: string }>> {
+  const supabase = await createClient();
+  if (!supabase) return [];
+  const { data } = await supabase
+    .from('account_tag_link')
+    .select('account_id, tag_id, tag:tag_id (name)')
+    .limit(2000);
+  const rows = (data ?? []) as Array<{ account_id: string; tag_id: string; tag?: { name: string } | null }>;
+  return rows
+    .map((r) => ({ account_id: r.account_id, tag_id: r.tag_id, tag_name: r.tag?.name ?? '' }))
+    .filter((r) => r.tag_name);
+}
+
 export async function saveTag(form: FormData) {
   const ws = text(form, 'workspace');
   const name = text(form, 'name');
