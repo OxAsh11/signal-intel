@@ -22,8 +22,8 @@ async function seedFailure({ ws, org }: Workspace): Promise<void> {
     [org],
   );
   const [{ predicate }] = await sql<{ predicate: string }>(
-    `insert into public.predicate (org_id, workspace_id, key, label, value_type, role, fill_method)
-     values ($1, $2, $3, 'Provider probe', 'text', 'info', 'extract') returning id as predicate`,
+    `insert into public.predicate (org_id, workspace_id, key, label, value_type, fill_method)
+     values ($1, $2, $3, 'Provider probe', 'text', 'extract') returning id as predicate`,
     [org, ws, `settings_probe_${tag}`],
   );
   const [{ run }] = await sql<{ run: string }>(
