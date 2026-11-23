@@ -1,6 +1,6 @@
 'use server';
 
-import { revalidatePath, refresh } from 'next/cache';
+import { revalidatePath } from 'next/cache';
 import { createClient } from '@/lib/supabase/server';
 import { friendlyError } from '@/lib/org';
 
@@ -31,8 +31,7 @@ export async function moveProvider(form: FormData): Promise<void> {
     console.error(`set_provider_order failed for workspace ${ws}: ${friendlyError(error.message)}`);
     return;
   }
-  // refresh() refetches the route; revalidatePath drops the cached settings read so the new
-  // order is visible in the action response, not just after a later reload.
-  refresh();
+  // The client action calls router.refresh() after this resolves; invalidating the path makes
+  // that refetch read the new order instead of a cached Settings payload.
   revalidatePath('/settings');
 }

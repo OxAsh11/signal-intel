@@ -623,10 +623,11 @@ test.describe('Accounts table', () => {
         ],
       );
       await sql(`update public.brief set current_version_id = $2, updated_at = now() where id = $1`, [s.brief, version2]);
+      // (workspace_id, key) is unique on predicate, so one scalar subquery per key is enough —
+      // and max(uuid) does not exist in PostgreSQL.
       const [{ emailPredicate, researchPredicate }] = await sql<{ emailPredicate: string; researchPredicate: string }>(
-        `select max(id) filter (where key = 'work_email') as "emailPredicate",
-                max(id) filter (where key = 'ai_recent') as "researchPredicate"
-           from public.predicate where workspace_id = $1 and key in ('work_email', 'ai_recent')`,
+        `select (select id from public.predicate where workspace_id = $1 and key = 'work_email') as "emailPredicate",
+                (select id from public.predicate where workspace_id = $1 and key = 'ai_recent') as "researchPredicate"`,
         [w.ws],
       );
 

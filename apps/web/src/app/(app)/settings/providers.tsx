@@ -1,5 +1,5 @@
-import { moveProvider } from '@/app/actions/providers';
 import { atLeast, getOrgContext } from '@/lib/org';
+import { MoveProviderButton } from './move-provider-button';
 import { createClient } from '@/lib/supabase/server';
 
 type DbRow = {
@@ -142,20 +142,8 @@ export async function Providers() {
               <span className="font-semibold" data-order-key={key}>{LABELS[key] ?? key}</span>
               {canEdit ? (
                 <span className="flex items-center gap-1">
-                  <form action={moveProvider}>
-                    <input type="hidden" name="ws" value={ws} />
-                    <input type="hidden" name="order" value={JSON.stringify(order)} />
-                    <input type="hidden" name="from" value={i} />
-                    <input type="hidden" name="delta" value={-1} />
-                    <button type="submit" className="si-btn si-btn-sm" aria-label={`Move ${LABELS[key] ?? key} up`} disabled={i === 0}>↑</button>
-                  </form>
-                  <form action={moveProvider}>
-                    <input type="hidden" name="ws" value={ws} />
-                    <input type="hidden" name="order" value={JSON.stringify(order)} />
-                    <input type="hidden" name="from" value={i} />
-                    <input type="hidden" name="delta" value={1} />
-                    <button type="submit" className="si-btn si-btn-sm" aria-label={`Move ${LABELS[key] ?? key} down`} disabled={i === order.length - 1}>↓</button>
-                  </form>
+                  <MoveProviderButton ws={ws} order={order} from={i} delta={-1} label={LABELS[key] ?? key} glyph="↑" disabled={i === 0} />
+                  <MoveProviderButton ws={ws} order={order} from={i} delta={1} label={LABELS[key] ?? key} glyph="↓" disabled={i === order.length - 1} />
                 </span>
               ) : null}
             </li>
