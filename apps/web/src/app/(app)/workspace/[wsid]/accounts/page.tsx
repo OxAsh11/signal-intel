@@ -14,7 +14,7 @@ import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton
 import { CellPanel } from './_table/panel';
 import type { FilterColumn } from './_table/filter-builder';
 import { ViewBar, type ViewRow } from './_table/view-bar';
-import { AccountsTable } from './_table/table';
+import { AccountsTableWithTags } from './_table/table-with-tags';
 import type { TableData } from './_table/types';
 import {
   PAGE_SIZE,
@@ -242,17 +242,19 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
               <AddColumn ws={ws} briefId={briefId} filter={filtered ? filter : null} rows={table.rows} columns={table.columns} />
             </div>
           ) : null}
-          <AccountsTable
-            ws={ws}
-            rows={table.rows}
-            columns={table.columns}
-            sorts={sorts}
-            sortHrefs={sortHrefs}
-            canEdit={canEdit}
-            briefId={briefId}
-            filter={filtered ? filter : null}
-            waterfallAttempts={waterfallAttempts}
-          />
+          <Suspense fallback={<TableSkeleton />}>
+            <AccountsTableWithTags
+              ws={ws}
+              rows={table.rows}
+              columns={table.columns}
+              sorts={sorts}
+              sortHrefs={sortHrefs}
+              canEdit={canEdit}
+              briefId={briefId}
+              filter={filtered ? filter : null}
+              waterfallAttempts={waterfallAttempts}
+            />
+          </Suspense>
           <CellPanel ws={ws} briefId={briefId} canEdit={canEdit} userName={userName} />
           <Cards ws={ws} rows={table.rows} columns={table.columns} />
           <Pager ws={ws} q={q} pages={pages} from={from} to={from + table.rows.length - 1} total={table.total} />

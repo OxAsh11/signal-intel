@@ -5,6 +5,7 @@ import { useCallback, useRef, useState, type KeyboardEvent } from 'react';
 import { BandChip, StageBadge, VerdictBadge } from '@signal/ui';
 import { Band, Stage, Verdict } from '@signal/contracts';
 import { BulkBar } from './bulk-bar';
+import { AccountTags } from './account-tags';
 import { Cell, formatDate, WaterfallSubcolumns, type WaterfallAttempt } from './cell';
 import { ColumnMenu } from './column-menu';
 import { RunConfirm, type RunJob } from './run-confirm';
@@ -34,17 +35,7 @@ const arrow = (sorts: SortKey[], key: string | null) => {
   return s ? (s.dir === 'asc' ? ' ↑' : ' ↓') : '';
 };
 
-export function AccountsTable({
-  ws,
-  rows,
-  columns,
-  sorts,
-  sortHrefs,
-  canEdit = false,
-  briefId = null,
-  filter = null,
-  waterfallAttempts = {},
-}: {
+export type AccountsTableProps = {
   ws: string;
   rows: TableRow[];
   columns: Column[];
@@ -59,7 +50,22 @@ export function AccountsTable({
   filter?: Record<string, unknown> | null;
   /** One waterfall's last attempts per row, keyed `<entity_id>:<predicate_id>`. */
   waterfallAttempts?: Record<string, WaterfallAttempt[]>;
-}) {
+  /** Hand labels by entity_id: the chips beside each name. */
+  tagsByAccount?: Record<string, { id: string; name: string; colour: string }[]>;
+};
+
+export function AccountsTable({
+  ws,
+  rows,
+  columns,
+  sorts,
+  sortHrefs,
+  canEdit = false,
+  briefId = null,
+  filter = null,
+  waterfallAttempts = {},
+  tagsByAccount = {},
+}: AccountsTableProps) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [active, setActive] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
@@ -217,6 +223,7 @@ export function AccountsTable({
                           {r.name}
                         </Link>
                         {r.country ? <span className="block text-[12px] text-ink-muted">{r.country}</span> : null}
+                        <AccountTags ws={ws} entityId={r.entity_id} tags={tagsByAccount[r.entity_id] ?? []} />
                       </div>
                     </div>
                   </td>
