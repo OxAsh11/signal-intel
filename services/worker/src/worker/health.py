@@ -1,9 +1,4 @@
-"""Tiny HTTP health endpoint for Railway (GET /healthz) and provider status.
-
-`/providers/status` is the same token-protected contract as contact reveal: it gives the web app
-`providers.status()` (which states only whether a key exists, never the key itself). The port stays
-public only for /healthz; every other route needs the shared WORKER_STATUS_TOKEN.
-"""
+"""Tiny HTTP health endpoint for Railway (GET /healthz) and provider/worker status."""
 
 import asyncio
 import hmac
@@ -19,8 +14,10 @@ from signal_core.providers import status as provider_status
 STARTUP_GRACE_S = 60.0
 RELAY_STALE_S = 60.0
 PROVIDER_STATUS_PATH = "/providers/status"
+WORKER_STATUS_PATH = "/worker/status"
 
 StatusFn = Callable[[], list[Any]]
+WorkerStatusFn = Callable[[], dict[str, Any]]
 
 
 def _default_status() -> list[Any]:
@@ -28,7 +25,6 @@ def _default_status() -> list[Any]:
 
 
 def _json_row(row: Any) -> dict[str, Any]:
-    """Timestamps leave as ISO strings; everything else stays exactly as the registry shaped it."""
     out = dict(row)
     at = out.get("last_error_at")
     if isinstance(at, datetime):
@@ -43,7 +39,6 @@ def handle_provider_status(
     headers: dict[str, str],
     status: StatusFn = _default_status,
 ) -> tuple[int, dict[str, Any]]:
-    """One request, without the socket, so the auth and redaction rules are easy to test."""
     if path.split("?")[0] != PROVIDER_STATUS_PATH:
         return 404, {"error": "not found"}
     if method != "GET":
@@ -54,6 +49,26 @@ def handle_provider_status(
     if not hmac.compare_digest(given, f"Bearer {token}"):
         return 401, {"error": "unauthorised"}
     return 200, {"providers": [_json_row(r) for r in status()]}
+
+
+def handle_worker_status(
+    token: str | None,
+    method: str,
+    path: str,
+    headers: dict[str, str],
+    status: WorkerStatusFn | None = None,
+) -> tuple[int, dict[str, Any]]:
+    if path.split("?")[0] != WORKER_STATUS_PATH:
+        return 404, {"error": "not found"}
+    if method != "GET":
+        return 405, {"error": "GET required"}
+    if not token:
+        return 503, {"error": "worker status not configured"}
+    given = headers.get("authorization", "")
+    if not hmac.compare_digest(given, f"Bearer {token}"):
+        return 401, {"error": "unauthorised"}
+    body = status() if status is not None else {}
+    return 200, body
 
 
 @dataclass
@@ -88,6 +103,7 @@ async def serve_health(
     port: int,
     token: str | None = None,
     status: StatusFn | None = None,
+    worker_status: WorkerStatusFn | None = None,
 ) -> asyncio.Server:
     async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
@@ -98,7 +114,7 @@ async def serve_health(
             method = parts[0] if parts else ""
             path = parts[1] if len(parts) > 1 else ""
             headers: dict[str, str] = {}
-            while path.split("?")[0] == PROVIDER_STATUS_PATH:
+            while path.split("?")[0] in (PROVIDER_STATUS_PATH, WORKER_STATUS_PATH):
                 line = (await asyncio.wait_for(reader.readline(), timeout=5)).decode(
                     errors="ignore"
                 )
@@ -109,6 +125,15 @@ async def serve_health(
             if path.split("?")[0] == "/healthz":
                 healthy, body = state.report()
                 response = "200 OK" if healthy else "503 Service Unavailable"
+            elif path.split("?")[0] == WORKER_STATUS_PATH:
+                code, body = handle_worker_status(token, method, path, headers, worker_status)
+                response = {
+                    200: "200 OK",
+                    401: "401 Unauthorized",
+                    404: "404 Not Found",
+                    405: "405 Method Not Allowed",
+                    503: "503 Service Unavailable",
+                }[code]
             else:
                 code, body = handle_provider_status(
                     token, method, path, headers, status or _default_status
@@ -126,10 +151,9 @@ async def serve_health(
                 f"Content-Length: {len(payload)}\r\nConnection: close\r\n\r\n".encode()
                 + payload
             )
-            await writer.drain()
-        except (TimeoutError, ConnectionError, ValueError):
-            pass
         finally:
             writer.close()
+            await writer.wait_closed()
 
-    return await asyncio.start_server(handle, host="0.0.0.0", port=port)
+    server = await asyncio.start_server(handle, "0.0.0.0", port)
+    return server
