@@ -1,6 +1,7 @@
 import Link from 'next/link';
 import { Card, FamilyTag } from '@signal/ui';
 import { CardError } from './card-error';
+import { createClient } from '@/lib/supabase/server';
 import { type HomeCardProps, fmt, loadCard, plural, usd } from './shared';
 
 type Count = { count: number; href: string };
@@ -14,6 +15,11 @@ type NeedsYou = {
 /** What waits for a person (mustard): Review decisions, replies to classify, stale and errored accounts. */
 export async function NeedsYouCard(props: HomeCardProps) {
   const n = await loadCard<NeedsYou>('home_needs_you', props);
+  const supabase = await createClient();
+  const { data: alerts } = supabase
+    ? await supabase.rpc('budget_alerts', { p_ws: props.ws })
+    : { data: [] };
+  const alertList = (alerts as { threshold: number }[] | null) ?? [];
   if (!n) return <CardError id="home-needs" title="Needs you" family="mustard" retry={props.retry} />;
   // The count is accounts; the re-run is the cells of those accounts a run can reach (see the RPC).
   const s = n.stale;
@@ -60,6 +66,15 @@ export async function NeedsYouCard(props: HomeCardProps) {
           </li>
         ))}
       </ul>
+      {alertList.length ? (
+        <ul className="m-0 list-none p-0 border-t border-line pt-2">
+          {alertList.map((a, i) => (
+            <li key={i} className="text-[13px] text-caution">
+              Budget threshold {a.threshold}% crossed.
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </Card>
   );
 }
