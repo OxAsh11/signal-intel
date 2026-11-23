@@ -7,6 +7,7 @@ import { ApiAccess } from './api-access';
 import { Providers } from './providers';
 import { UsageAndBudgets } from './usage';
 import { DataSection } from './_data-section';
+import { HealthSection } from './_health-section';
 
 export const metadata: Metadata = { title: 'Settings' };
 
@@ -66,7 +67,11 @@ export default async function SettingsPage({ searchParams }: PageProps<'/setting
           <DataSection ws={ctx?.workspace?.id ?? ''} />
         </Suspense>
       ) : null}
-      {section === 'health' ? <p className="m-0 text-ink-muted">Health (radars, queue, providers, outbox).</p> : null}
+      {section === 'health' ? (
+        <Suspense fallback={null}>
+          <HealthSection ws={ctx?.workspace?.id ?? ''} />
+        </Suspense>
+      ) : null}
     </>
   );
 }
