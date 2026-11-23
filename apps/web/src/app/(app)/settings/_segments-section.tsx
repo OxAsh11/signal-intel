@@ -15,11 +15,11 @@ export async function SegmentsSection({ ws }: { ws: string }) {
         ))}
         {!(segments ?? []).length ? <li className="text-ink-muted">No segments yet.</li> : null}
       </ul>
-      <form action={saveSegment} className="mt-3 flex items-center gap-2">
+      <form action={saveSegment} className="mt-3 flex flex-col gap-2">
         <input type="hidden" name="workspace" value={ws} />
         <input name="name" required placeholder="segment name" className="rounded-sm border border-line-strong bg-surface px-2 py-1 text-[13px]" />
-        <input name="filter" type="hidden" value="{}" />
-        <button type="submit" className="si-btn si-btn-sm">Add segment</button>
+        <input name="filter" placeholder='{"wg":1,"ag":5}' className="rounded-sm border border-line-strong bg-surface px-2 py-1 text-[13px]" />
+        <button type="submit" className="si-btn si-btn-sm self-start">Add segment</button>
       </form>
     </section>
   );
