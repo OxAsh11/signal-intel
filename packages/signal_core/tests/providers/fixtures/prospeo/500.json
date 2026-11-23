@@ -1,0 +1,7 @@
+{
+  "status_code": 500,
+  "json": {
+    "error": true,
+    "error_code": "INTERNAL_ERROR"
+  }
+}

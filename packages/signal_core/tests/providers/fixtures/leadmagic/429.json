@@ -1,0 +1,9 @@
+{
+  "status_code": 429,
+  "json": {
+    "message": "Rate limit exceeded"
+  },
+  "headers": {
+    "Retry-After": "1"
+  }
+}

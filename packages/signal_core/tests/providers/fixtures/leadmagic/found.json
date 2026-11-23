@@ -1,0 +1,16 @@
+{
+  "status_code": 200,
+  "json": {
+    "email": "jane.doe@acme.com",
+    "status": "valid",
+    "credits_consumed": 1,
+    "message": "Valid email found.",
+    "first_name": "Jane",
+    "last_name": "Doe",
+    "domain": "acme.com",
+    "mx_provider": "Google Workspace",
+    "has_mx": true,
+    "company_name": "Acme Inc",
+    "company_industry": "Technology"
+  }
+}

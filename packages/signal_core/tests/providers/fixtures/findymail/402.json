@@ -1,0 +1,6 @@
+{
+  "status_code": 402,
+  "json": {
+    "error": "Not enough credits"
+  }
+}

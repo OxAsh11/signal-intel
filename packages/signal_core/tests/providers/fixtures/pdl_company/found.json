@@ -1,0 +1,25 @@
+{
+  "status_code": 200,
+  "json": {
+    "status": 200,
+    "likelihood": 8,
+    "id": "tnHcNHbCv8MKeLh92946LAkX6PKg",
+    "name": "Acme",
+    "size": "201-500",
+    "employee_count": 312,
+    "industry": "Computer Software",
+    "founded": 2012,
+    "website": "acme.com",
+    "linkedin_url": "linkedin.com/company/acme",
+    "location": {
+      "name": "Bengaluru, Karnataka, India",
+      "locality": "Bengaluru",
+      "region": "Karnataka",
+      "country": "India",
+      "continent": "asia"
+    },
+    "tags": [
+      "drones"
+    ]
+  }
+}

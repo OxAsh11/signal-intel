@@ -1,0 +1,10 @@
+{
+  "status_code": 500,
+  "json": {
+    "status": 500,
+    "error": {
+      "type": "internal_server_error",
+      "message": "Internal error"
+    }
+  }
+}

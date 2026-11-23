@@ -38,6 +38,12 @@ class Settings(BaseSettings):
 
     # Enrichment provider (M7). Without a key the provider is skipped: "Not set up yet".
     hunter_api_key: SecretStr | None = None
+    # P6 data providers (signal_core.providers). Without a key a provider is skipped and
+    # Settings → Providers shows "Not set up yet". PDL_API_KEY serves Company and Person Search.
+    leadmagic_api_key: SecretStr | None = None
+    findymail_api_key: SecretStr | None = None
+    prospeo_api_key: SecretStr | None = None
+    pdl_api_key: SecretStr | None = None
     # Brave Search (M2 web-search radars, targeted search). Unset: "Not set up yet".
     brave_search_api_key: SecretStr | None = None
 

@@ -10,8 +10,8 @@ Flow for one account:
   4. Each contact becomes a tenant-scoped person with a works_at link to the company. The value
      is stored encrypted, with a keyed digest for de-duplication; suppressed people are skipped.
 
-Providers are configured by environment. With none configured the job does nothing: Settings
-shows "Not set up yet".
+Providers are configured by environment, through the provider registry
+(signal_core.providers). With none configured the job does nothing: Settings shows "Not set up yet".
 """
 
 from __future__ import annotations
@@ -28,6 +28,7 @@ from uuid import UUID
 import httpx
 from psycopg_pool import AsyncConnectionPool
 
+from signal_core import providers as registry
 from signal_core.ai_gateway.gateway import AiGateway
 from signal_core.briefs import active_brief_versions
 from signal_core.config import get_settings
@@ -123,10 +124,15 @@ class HunterProvider:
 
 
 def configured_providers() -> list[EnrichmentProvider]:
-    settings = get_settings()
+    """Account-level domain search providers, keyed through the provider registry.
+
+    Hunter is the only one: an optional extra, used only when HUNTER_API_KEY is set. Per-person
+    work-email finders (LeadMagic, Findymail, Prospeo) run in the P6 waterfall instead.
+    """
     providers: list[EnrichmentProvider] = []
-    if settings.hunter_api_key is not None:
-        providers.append(HunterProvider(settings.hunter_api_key.get_secret_value()))
+    hunter_key = registry.api_key("hunter", get_settings())
+    if hunter_key is not None:
+        providers.append(HunterProvider(hunter_key))
     return providers
 
 

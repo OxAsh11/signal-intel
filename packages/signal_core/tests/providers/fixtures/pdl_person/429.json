@@ -1,0 +1,10 @@
+{
+  "status_code": 429,
+  "json": {
+    "status": 429,
+    "error": {
+      "type": "rate_limit_error",
+      "message": "Rate limit exceeded"
+    }
+  }
+}
