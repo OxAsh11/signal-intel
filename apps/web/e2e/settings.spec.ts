@@ -110,7 +110,8 @@ test.describe('Settings → Providers and the phone top bar', () => {
     await page.reload();
     await expect.poll(() => order(page)).toEqual(['Findymail', 'LeadMagic', 'Prospeo']);
     const [{ saved }] = await sql<{ saved: string[] }>(
-      `select provider_order::text[] as saved from public.workspace_settings where workspace_id = $1`,
+      `select array(select jsonb_array_elements_text(provider_order)) as saved
+         from public.workspace_settings where workspace_id = $1`,
       [workspace.ws],
     );
     expect(saved).toEqual(['findymail', 'leadmagic', 'prospeo']);
