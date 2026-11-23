@@ -9,6 +9,7 @@ import { UsageAndBudgets } from './usage';
 import { DataSection } from './_data-section';
 import { HealthSection } from './_health-section';
 import { BusinessSection } from './_business-section';
+import { SegmentsSection } from './_segments-section';
 
 export const metadata: Metadata = { title: 'Settings' };
 
@@ -69,7 +70,10 @@ export default async function SettingsPage({ searchParams }: PageProps<'/setting
       {section === 'integrations' ? <p className="m-0 text-ink-muted">Not set up yet.</p> : null}
       {section === 'data' ? (
         <Suspense fallback={null}>
-          <DataSection ws={ctx?.workspace?.id ?? ''} />
+          <div className="flex flex-col gap-4">
+            <DataSection ws={ctx?.workspace?.id ?? ''} />
+            <SegmentsSection ws={ctx?.workspace?.id ?? ''} />
+          </div>
         </Suspense>
       ) : null}
       {section === 'health' ? (
