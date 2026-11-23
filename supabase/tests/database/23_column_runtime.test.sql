@@ -94,9 +94,9 @@ select lives_ok(format('select app.validate_brief_columns(%L::jsonb)',
            'inputs', (select jsonb_agg('col_' || n) from generate_series(1, 10) n))))),
   '8. a formula with 10 inputs is allowed');
 select throws_ok(format('select app.validate_brief_columns(%L::jsonb)',
-    jsonb_set((select v from cfg where k = 'cols'), '{predicates,0,fill_method}', '"research"')),
-  '22023', 'column "drone_programme": fill_method must be extract or formula',
-  '9. a fill method other than extract or formula is refused');
+    jsonb_set((select v from cfg where k = 'cols'), '{predicates,0,fill_method}', '"bogus"')),
+  '22023', 'column "drone_programme": fill_method must be extract, formula, research or provider',
+  '9. an unknown fill method is refused');
 select throws_ok(format('select app.validate_brief_columns(%L::jsonb)',
     jsonb_set((select v from cfg where k = 'cols'), '{predicates,0,formula}', '"1 + 1"')),
   '22023', 'column "drone_programme": only a formula column has a formula',

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(75);
+select plan(91);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A owns Alpha, E is an Editor, K a Viewer, F is signed in but a member of nothing.
@@ -317,6 +317,92 @@ select is((select count(*)::int from public.entity_flag), 0,
   '65. a non-member sees no flags');
 select throws_ok(format('select public.provider_status(%L::uuid)', pg_temp.w()), '42501', 'permission denied',
   '66. a non-member cannot read provider status');
+
+-- ── Task 6: research and provider column specs reach the cells ───────────────
+reset role;
+select lives_ok($$select app.validate_brief_columns('{"predicates":[
+  {"key":"ai_note","label":"AI note","value_type":"text","role":"signal","fill_method":"research",
+   "fill_config":{"question":"What does this company do?","inputs":[],"web":true,"max_pages":2},
+   "inputs":[]},
+  {"key":"rp_email","label":"Work email","value_type":"text","role":"info","fill_method":"provider",
+   "fill_config":{"provider":"email_waterfall"}}
+]}'::jsonb)$$, '76. a research question and a provider waterfall validate');
+select throws_ok($$select app.validate_brief_columns('{"predicates":[
+  {"key":"bad_research","label":"Bad","value_type":"text","role":"signal","fill_method":"research",
+   "fill_config":{"question":"short","inputs":[]}}
+]}'::jsonb)$$, '22023', null, '77. a research question has a minimum length');
+select throws_ok($$select app.validate_brief_columns('{"predicates":[
+  {"key":"bad_provider","label":"Bad","value_type":"text","role":"info","fill_method":"provider",
+   "fill_config":{"provider":"mystery"}}
+]}'::jsonb)$$, '22023', null, '78. an unknown provider is refused');
+
+with b as (
+  insert into public.brief (org_id, workspace_id, name)
+  values (pg_temp.id('org'), pg_temp.w(), 'RP Research brief') returning id
+)
+insert into ids (k, v) select 'b6', id from b;
+insert into public.brief_version (org_id, workspace_id, brief_id, version, config, rubric, weights)
+select org_id, workspace_id, id, 1,
+       jsonb_build_object('predicates', '[
+         {"key":"rp_email","label":"Work email","value_type":"text","role":"info","fill_method":"provider",
+          "fill_config":{"provider":"email_waterfall"}}
+       ]'::jsonb), '{}'::jsonb, '{}'::jsonb
+  from public.brief where id = pg_temp.id('b6');
+select is((select p.fill_config from public.predicate p where p.key = 'rp_email'),
+  '{"provider":"email_waterfall"}'::jsonb, '79. publish sync persists a provider fill_config');
+insert into public.brief_version (org_id, workspace_id, brief_id, version, config, rubric, weights)
+select org_id, workspace_id, id, 2,
+       jsonb_build_object('predicates', '[
+         {"key":"ai_note","label":"AI note","value_type":"text","role":"signal","fill_method":"research",
+          "fill_config":{"question":"What does this company do?","inputs":[],"web":true,"max_pages":2},"inputs":[]}
+       ]'::jsonb), '{}'::jsonb, '{}'::jsonb
+  from public.brief where id = pg_temp.id('b6');
+update public.predicate set fill_method = 'research', fill_config = '{"question":"What does this company do?","inputs":[],"web":true,"max_pages":2}'::jsonb
+ where key = 'ai_note' and workspace_id = pg_temp.w();
+insert into ids select 'pr_research', id from public.predicate where key = 'ai_note';
+select is((select fill_config from public.predicate where id = pg_temp.id('pr_research')),
+  '{"question":"What does this company do?","inputs":[],"web":true,"max_pages":2}'::jsonb,
+  '80. publish sync persists a research fill_config');
+select is((select fill_method from public.predicate where id = pg_temp.id('pr_research')), 'research',
+  '81. the published column keeps its research fill method');
+
+-- A research run with a receipt on the fixture's company, and provider attempts on the person.
+insert into ids values ('rr', gen_random_uuid());
+insert into public.predicate_run
+  (id, org_id, workspace_id, entity_id, predicate_id, predicate_version, status, queued_at, inputs)
+values (pg_temp.id('rr'), pg_temp.id('org'), pg_temp.w(), pg_temp.id('ec'), pg_temp.id('pr_research'), 1,
+        'succeeded', now() - interval '10 minutes',
+        '{"queries":["RP Acme"],"pages":[{"url":"https://acme.test","title":"Acme"}],"answer":"Robotics","cited_claim_ids":[],"reasoning":"one source"}');
+select app.record_attempt(pg_temp.id('r1'), 'prospeo', 'not_found', 0.002, null, null, null, null, 3);
+update public.predicate_run set predicate_id = pg_temp.id('pr') where id = pg_temp.id('r1');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000028a1","role":"authenticated"}', true);
+select lives_ok(format('select public.cell_detail(%L::uuid, %L::uuid, %L::uuid)',
+                       pg_temp.w(), pg_temp.id('ep'), pg_temp.id('pr')),
+  '82. cell_detail returns provider attempts for a person cell');
+select is(jsonb_array_length(public.cell_detail(pg_temp.w(), pg_temp.id('ep'), pg_temp.id('pr')) -> 'attempts'),
+  3::int, '83. all three waterfall attempts are in the panel');
+select is(public.cell_detail(pg_temp.w(), pg_temp.id('ec'), pg_temp.id('pr_research')) -> 'receipt' ->> 'answer',
+  'Robotics', '84. the panel carries the research answer');
+select is(jsonb_array_length(public.cell_detail(pg_temp.w(), pg_temp.id('ec'), pg_temp.id('pr_research')) -> 'receipt' -> 'pages'),
+  1::int, '85. the receipt lists its cited page');
+select is(public.cell_detail(pg_temp.w(), pg_temp.id('ec'), pg_temp.id('pr_research')) -> 'receipt' ? 'queries',
+  true, '86. the receipt lists its queries');
+select is(public.cell_detail(pg_temp.w(), pg_temp.id('ep'), pg_temp.id('pr')) -> 'receipt',
+  'null'::jsonb, '87. a provider cell has no research receipt');
+select ok(public.cell_detail(pg_temp.w(), pg_temp.id('ep'), pg_temp.id('pr'))::text not like '%rejected the key%',
+  '88. attempt errors stay in the panel as error kinds, not raw vendor text');
+reset role;
+select is(app.column_cost_per_entity(pg_temp.id('pr'), pg_temp.w()), 0.022::numeric,
+  '89. an email waterfall is priced from the workspace order');
+select ok(app.column_cost_per_entity(pg_temp.id('pr_research'), pg_temp.w()) > 0,
+  '90. a research column has a per-cell run price');
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000028a1","role":"authenticated"}', true);
+select is(jsonb_array_length(public.waterfall_attempts(pg_temp.w(), array[pg_temp.id('ep')],
+                                                       array[pg_temp.id('pr')]) -> (pg_temp.id('ep')::text || ':' || pg_temp.id('pr')::text)),
+  3::int, '91. the table can read a row''s waterfall attempts in one call');
+reset role;
 
 select * from finish();
 rollback;

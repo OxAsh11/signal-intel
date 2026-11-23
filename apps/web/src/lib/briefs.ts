@@ -1,8 +1,21 @@
 export type ValueType = 'boolean' | 'number' | 'enum' | 'text' | 'date';
 export type Role = 'signal' | 'fit.vertical' | 'fit.geography' | 'fit.size' | 'fit.commercial_role' | 'scale' | 'info';
 export type RuleOp = 'is_true' | 'is_false' | 'present' | 'at_least' | 'one_of' | 'contains';
-/** How a column is filled: found in the sources by the AI, or computed by a formula. */
-export type FillMethod = 'extract' | 'formula';
+/** How a column is filled. P6 adds a grounded AI answer and paid provider waterfalls. */
+export type FillMethod = 'extract' | 'formula' | 'research' | 'provider';
+
+/** The two paid fills' configs, validated by app.validate_brief_columns before a Brief publishes. */
+export type ResearchConfig = {
+  question: string;
+  inputs: string[];
+  web: boolean;
+  max_pages: number;
+};
+export type ProviderConfig = {
+  provider: 'leadmagic' | 'findymail' | 'prospeo' | 'pdl_company' | 'email_waterfall';
+  /** Only pdl_company fills a dotted company field; an email waterfall needs none. */
+  field?: string;
+};
 
 /** One column the AI fills for every company (an item of `config.predicates`). */
 export type ColumnSpec = {
@@ -17,8 +30,10 @@ export type ColumnSpec = {
   fill_method?: FillMethod;
   /** The expression of a formula column (1–500 characters); null otherwise. */
   formula?: string | null;
-  /** Formula only: the column keys the formula reads, from `references()`. */
+  /** Formula and research: the column keys this column reads. */
   inputs?: string[];
+  /** Research and provider fills only (see the two types above). */
+  fill_config?: ResearchConfig | ProviderConfig;
 };
 
 /** A rule the verdict is decided by (an item of `config.evidence_rules`). */
@@ -75,7 +90,11 @@ export const TYPE_LABELS: Record<ValueType, string> = {
 export const FILL_LABELS: Record<FillMethod, string> = {
   extract: 'Found in sources',
   formula: 'Formula',
+  research: 'AI research',
+  provider: 'Provider waterfall',
 };
+/** The Brief editor only lets people edit fills it can describe without a paid config. */
+export const EDITABLE_FILLS: FillMethod[] = ['extract', 'formula'];
 
 
 /** The rule ops each column type allows (Global Constraints). */

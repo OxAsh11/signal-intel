@@ -217,12 +217,12 @@ select is(pg_temp.t(f => '{"field": {"system": "name"}, "op": "contains", "value
 -- ── cell_detail ──────────────────────────────────────────────────────────────
 create function pg_temp.cd(e text, p text) returns jsonb language sql as $$ select public.cell_detail(pg_temp.w(), pg_temp.id(e), pg_temp.id(p)) $$;
 select is((select string_agg(k, ',' order by k) from jsonb_object_keys(pg_temp.cd('e1', 'p_sites')) k),
-  'claim_id,claims,column,confidence,fill_label,inputs,runs,state,value', '32. the panel''s keys');
+  'attempts,claim_id,claims,column,confidence,fill_label,inputs,receipt,runs,state,value', '32. the panel''s keys');
 select is(pg_temp.cd('e1', 'p_sites') - 'claims' - 'runs',
   jsonb_build_object('column', jsonb_build_object('id', pg_temp.id('p_sites'), 'key', 'ot_sites', 'label', 'Sites', 'value_type', 'number',
                                                   'fill_method', 'extract', 'auto_run', false, 'allowed_values', null),
                      'state', 'value', 'value', 12, 'confidence', 80, 'claim_id', pg_temp.id('c1_sites'), 'fill_label', 'Found in sources',
-                     'inputs', '[]'::jsonb),
+                     'inputs', '[]'::jsonb, 'attempts', '[]'::jsonb, 'receipt', null::jsonb),
   '33. a sourced value');
 select is(pg_temp.cd('e1', 'p_sites') -> 'claims',
   jsonb_build_array(jsonb_build_object('id', pg_temp.id('c1_sites'), 'value', 12, 'quote', 'E1 runs twelve sites',
@@ -243,7 +243,7 @@ select is((pg_temp.cd('e3', 'p_sites') #> '{runs,0}') - 'queued_at' - 'started_a
   jsonb_build_object('id', pg_temp.id('r3_err'), 'status', 'error', 'cost_usd', 0.01, 'brief_version', 1, 'error', 'boom'),
   '39. an errored run with its cost and reason');
 select is(pg_temp.cd('e3', 'p_sites') - 'column' - 'runs',
-  '{"state": "error", "value": null, "confidence": null, "claim_id": null, "fill_label": "Found in sources", "claims": [], "inputs": []}'::jsonb,
+  '{"state": "error", "value": null, "confidence": null, "claim_id": null, "fill_label": "Found in sources", "claims": [], "inputs": [], "attempts": [], "receipt": null}'::jsonb,
   '40. an error cell with no value');
 select is(jsonb_array_length(pg_temp.cd('e2', 'p_note') -> 'runs'), 50, '41. at most 50 runs');
 select is(jsonb_array_length(pg_temp.cd('e2', 'p_note') -> 'claims'), 50, '42. at most 50 claims');
@@ -368,7 +368,7 @@ select is((select count(*)::int from public.claim c join public.source_record sr
 select is((select status::text from public.claim where id = pg_temp.id('c2_sites')), 'active', '80. the sourced claim is left alone');
 set local role authenticated;
 select is(pg_temp.cd('e2', 'p_sites') - 'column' - 'claims' - 'runs' - 'state' - 'claim_id',
-  '{"value": 8, "confidence": 100, "fill_label": "Entered by you", "inputs": []}'::jsonb, '81. the panel: the manual value, entered by you');
+  '{"value": 8, "confidence": 100, "fill_label": "Entered by you", "inputs": [], "attempts": [], "receipt": null}'::jsonb, '81. the panel: the manual value, entered by you');
 select is(pg_temp.cd('e2', 'p_sites') ->> 'claim_id', pg_temp.id('m2')::text,
   '81b. I2: the panel names the cell''s claim (the manual value), so the other active claims show as overridden and Mark wrong acts on it');
 select is((select jsonb_agg(jsonb_build_object('value', c -> 'value', 'status', c -> 'status', 'struck', c -> 'superseded_at' <> 'null'::jsonb) order by o)

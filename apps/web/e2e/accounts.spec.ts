@@ -16,7 +16,7 @@ async function workspaceOf(userId: string): Promise<{ ws: string; org: string; m
   return row;
 }
 
-type Seeded = { brief: string; sites: string; double: string; note: string; programme: string };
+type Seeded = { brief: string; bv: string; sites: string; double: string; note: string; programme: string };
 
 // Eight accounts, A to H, one cell state each in the Sites column; Alpha's Double is derived.
 const ROWS = ['Alpha Grid', 'Bravo Power', 'Charlie Wind', 'Delta Hydro', 'Echo Solar', 'Foxtrot Nuclear', 'Golf Coal', 'Hotel Gas'];
@@ -107,7 +107,7 @@ async function seed({ ws, org, member }: { ws: string; org: string; member: stri
     commit;
   `);
   const [row] = await sql<Seeded>(
-    `select b.id as brief, $2::text as sites, $3::text as double, $4::text as note, $6::text as programme
+    `select b.id as brief, b.current_version_id as bv, $2::text as sites, $3::text as double, $4::text as note, $6::text as programme
        from public.brief b where b.workspace_id = $1 and b.name = $5`,
     [ws, sites, dbl, note, `Table Brief ${tag}`, prog],
   );
@@ -504,26 +504,44 @@ test.describe('Accounts table', () => {
 
       await page.getByRole('button', { name: 'Add column' }).click();
       const add = addPanel(page);
-      // AI research and provider waterfalls are listed, disabled.
-      await expect(add.getByRole('radio', { name: 'AI research' })).toBeDisabled();
-      await expect(add.getByRole('radio', { name: 'Provider waterfall' })).toBeDisabled();
-      await expect(add).toContainText('Arrives in P6');
-      await add.getByRole('radio', { name: 'Formula' }).check();
-      await add.getByLabel('Name', { exact: true }).fill('Programme and sites');
-      await expect(add).toContainText('programme_and_sites');
-      await add.getByLabel('Formula', { exact: true }).fill(`${s.programme} and ${s.sites} > 0`);
-      const preview = add.locator('[data-formula-preview]');
+      await expect(add.getByRole('radio', { name: 'AI research' })).toBeEnabled();
+      await expect(add.getByRole('radio', { name: 'Provider waterfall' })).toBeEnabled();
+      await add.getByRole('radio', { name: 'AI research' }).check();
+      await add.getByLabel('Name', { exact: true }).fill('Recent announcement');
+      await add.getByLabel('Question').fill('What did this company announce recently about its operations?');
+      await add.getByLabel('Drone programme').check();
+      await add.getByLabel('Search the web').check();
+      await add.getByLabel('Max pages').selectOption('2');
+      await page.screenshot({ path: 'test-results/add-column-research.png', fullPage: true });
+      await add.getByRole('button', { name: 'Save and preview' }).click();
+      await completePreview(s.brief, 'Narrow', { counts: {} }, 0.18, 2);
+      await expect(add.locator('[data-add-column-cost]')).toContainText('Estimated cost $0.18');
+      await add.getByRole('button', { name: 'Publish column' }).click();
+      const researchChoices = add.locator('[data-run-choices]');
+      await expect(researchChoices.locator('[data-run-choice="preview5"]')).toContainText('Preview on 5 accounts');
+      await expect(researchChoices.locator('[data-run-choice="preview5"]')).toContainText('est. $');
+      await researchChoices.getByRole('button', { name: 'Save without running' }).click();
+      await expect(addPanel(page)).toHaveCount(0);
+      await expect(table(page).locator('thead th', { hasText: 'Recent announcement' })).toBeVisible();
+
+      await page.getByRole('button', { name: 'Add column' }).click();
+      const addFormula = addPanel(page);
+      await addFormula.getByRole('radio', { name: 'Formula' }).check();
+      await addFormula.getByLabel('Name', { exact: true }).fill('Programme and sites');
+      await expect(addFormula).toContainText('programme_and_sites');
+      await addFormula.getByLabel('Formula', { exact: true }).fill(`${s.programme} and ${s.sites} > 0`);
+      const preview = addFormula.locator('[data-formula-preview]');
       await expect(preview.locator('[data-preview-row]')).toHaveCount(5);
       await expect(preview.locator('[data-preview-row="Alpha Grid"] [data-preview-value]')).toHaveText('Yes');
       await expect(preview.locator('[data-preview-row="Bravo Power"] [data-preview-value]')).toHaveText('Yes');
       await page.screenshot({ path: 'test-results/accounts-add-column.png', fullPage: true });
 
-      await add.getByRole('button', { name: 'Save and preview' }).click();
+      await addFormula.getByRole('button', { name: 'Save and preview' }).click();
       await completePreview(s.brief, 'Narrow', { counts: {} }, 0, 0);
-      await expect(add.locator('[data-add-column-cost]')).toContainText('Estimated cost $0.00');
-      await add.getByRole('button', { name: 'Publish column' }).click();
+      await expect(addFormula.locator('[data-add-column-cost]')).toContainText('Estimated cost $0.00');
+      await addFormula.getByRole('button', { name: 'Publish column' }).click();
 
-      const choices = add.locator('[data-run-choices]');
+      const choices = addFormula.locator('[data-run-choices]');
       await expect(choices.locator('[data-run-choice="10"]')).toContainText('est. $0.00');
       await expect(choices.locator('[data-run-choice="all"]')).toContainText('est. $0.00');
       await expect(choices.getByRole('button', { name: 'Save without running' })).toBeVisible();
@@ -571,6 +589,120 @@ test.describe('Accounts table', () => {
       await expect(add.getByRole('status').filter({ hasText: 'Queued 8 runs' })).toBeVisible();
       expect(await runsOf(w.ws, 'site_operator')).toBe(8);
       await expect(table(page).locator('thead th', { hasText: 'Site operator' })).toBeVisible();
+    });
+
+    test('waterfall attempts and research receipt render in the cell panel', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      // Seed a provider waterfall column with three last-run attempts, then a research column
+      // with a stored receipt. No vendor calls: every row is written directly as the worker
+      // would, so CI (no keys, no fake worker) stays deterministic.
+      const [{ alpha }] = await sql<{ alpha: string }>(
+        `select id as alpha from public.entity where workspace_id = $1 and display_name = 'Alpha Grid'`,
+        [w.ws],
+      );
+
+      // Publish a second Brief version with the two new columns. The insert trigger validates the
+      // specs and syncs predicates exactly as the app's publish path does; v1 stays immutable.
+      const researchFill = { question: 'What did this company do?', inputs: [s.sites], web: true, max_pages: 2 };
+      const [{ version2 }] = await sql<{ version2: string }>(
+        `insert into public.brief_version (id, brief_id, org_id, workspace_id, version, config, rubric, weights, published_at)
+         select gen_random_uuid(), b.id, b.org_id, b.workspace_id, 2,
+                jsonb_set(bv.config, '{predicates}', (bv.config -> 'predicates') || $2::jsonb || $3::jsonb),
+                bv.rubric, bv.weights, now()
+           from public.brief b join public.brief_version bv on bv.id = b.current_version_id
+          where b.id = $1
+         returning id as "version2"`,
+        [
+          s.brief,
+          JSON.stringify([{ key: 'work_email', label: 'Work email', value_type: 'text', role: 'info', fill_method: 'provider', fill_config: { provider: 'email_waterfall' } }]),
+          JSON.stringify([{ key: 'ai_recent', label: 'Recent AI answer', value_type: 'text', role: 'info', fill_method: 'research', inputs: [s.sites], fill_config: researchFill }]),
+        ],
+      );
+      await sql(`update public.brief set current_version_id = $2, updated_at = now() where id = $1`, [s.brief, version2]);
+      const [{ emailPredicate, researchPredicate }] = await sql<{ emailPredicate: string; researchPredicate: string }>(
+        `select max(id) filter (where key = 'work_email') as "emailPredicate",
+                max(id) filter (where key = 'ai_recent') as "researchPredicate"
+           from public.predicate where workspace_id = $1 and key in ('work_email', 'ai_recent')`,
+        [w.ws],
+      );
+
+      await sql(
+        `insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, brief_version_id, status,
+                                           queued_at, started_at, finished_at, inputs_hash, inputs)
+         values ($1, $2, $3, $4, 1, $5, 'succeeded',
+                 now() - interval '2 hours', now() - interval '2 hours', now() - interval '2 hours',
+                 'research-hash', $6::jsonb)`,
+        [
+          w.org,
+          w.ws,
+          alpha,
+          researchPredicate,
+          version2,
+          JSON.stringify({
+            queries: ['acme AI announcement'],
+            pages: [
+              { url: 'https://acme.example/a', title: 'Acme AI announcement' },
+              { url: 'https://acme.example/b', title: 'Press release' },
+            ],
+            answer: 'It launched a docked drone pilot.',
+            cited_claim_ids: ['aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa'],
+            reasoning: 'The press release says a docked pilot.',
+          }),
+        ],
+      );
+      const [{ emailRun }] = await sql<{ emailRun: string }>(
+        `insert into public.predicate_run (org_id, workspace_id, entity_id, predicate_id, predicate_version, brief_version_id, status,
+                                           queued_at, started_at, finished_at, inputs_hash)
+         values ($1, $2, $3, $4, 1, $5, 'succeeded',
+                 now() - interval '3 hours', now() - interval '3 hours', now() - interval '3 hours', 'waterfall-hash')
+         returning id as "emailRun"`,
+        [w.org, w.ws, alpha, emailPredicate, version2],
+      );
+
+      await sql(
+        `select app.record_attempt($1, 'leadmagic', 'found', 0.012, null, null, 90, 'lm-1', 1, null)`,
+        [emailRun],
+      );
+      await sql(
+        `select app.record_attempt($1, 'findymail', 'not_found', 0.015, null, null, null, null, 1, null)`,
+        [emailRun],
+      );
+      await sql(
+        `select app.record_attempt($1, 'prospeo', 'error', 0, 'rejected the key', null, null, null, 1, 'vendor')`,
+        [emailRun],
+      );
+
+      await openTable(page, w.ws, s.brief);
+
+      // Waterfall header subcolumns render after the explicit expand.
+      const emailHeader = table(page).locator('thead th', { hasText: 'Work email' });
+      await expect(emailHeader).toBeVisible();
+      const expanded = emailHeader.getByRole('button', { name: /Expand Work email providers/ });
+      await expanded.click();
+      await expect(table(page).locator('thead [data-waterfall-header]')).toBeVisible();
+      await page.screenshot({ path: 'test-results/waterfall-subcolumns.png', fullPage: true });
+      await expect(table(page).locator('tbody tr:first-child').locator('[data-waterfall-provider="leadmagic"]')).toHaveText('✓');
+      await expect(table(page).locator('tbody tr:first-child').locator('[data-waterfall-provider="findymail"]')).toHaveText('✗');
+      await expect(table(page).locator('tbody tr:first-child').locator('[data-waterfall-provider="prospeo"]')).toHaveText('✗');
+
+      // Panel: attempts list with cost/error kind.
+      await cell(page, 'Alpha Grid', 'work_email').click();
+      const panel = page.getByRole('dialog', { name: 'Cell detail' });
+      await expect(panel.locator('[data-panel-attempts]')).toBeVisible();
+      await expect(panel.locator('[data-attempt-provider="leadmagic"]')).toContainText('Found · $0.01');
+      await expect(panel.locator('[data-attempt-provider="prospeo"]')).toContainText('Error');
+      await page.screenshot({ path: 'test-results/waterfall-panel-attempts.png', fullPage: true });
+
+      // Panel: research receipt pages and answer.
+      await page.keyboard.press('Escape');
+      await cell(page, 'Alpha Grid', 'ai_recent').click();
+      const researchPanel = page.getByRole('dialog', { name: 'Cell detail' });
+      await expect(researchPanel.locator('[data-panel-receipt]')).toBeVisible();
+      await expect(researchPanel.locator('[data-panel-receipt-answer]')).toContainText('launched a docked drone pilot');
+      await expect(researchPanel.locator('[data-panel-receipt-pages]')).toContainText('Acme AI announcement');
+      await expect(researchPanel.locator('[data-panel-receipt-pages]')).toContainText('Press release');
+      await page.screenshot({ path: 'test-results/waterfall-panel-receipt.png', fullPage: true });
     });
 
     test('R9: Add column refuses while the Brief has other unpublished changes, and links to the Brief', async ({ page }) => {

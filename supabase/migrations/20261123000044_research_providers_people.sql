@@ -1028,3 +1028,696 @@ revoke all on function public.estimate_find_people(uuid, uuid, int) from public,
 revoke all on function public.request_find_people(uuid, uuid, int, uuid) from public, anon;
 grant execute on function public.estimate_find_people(uuid, uuid, int) to authenticated;
 grant execute on function public.request_find_people(uuid, uuid, int, uuid) to authenticated;
+
+-- ── 12. Research and provider column specs (Task 6) ──────────────────────────
+-- P3 reserved 'research' and 'provider' as fill methods but its validator only accepted
+-- extract/formula, and its publish trigger only saved a fill_config for formula. A Brief may now
+-- carry either config; every other check (keys, types, rules, cycles) is kept exactly as in 0039.
+create or replace function app.validate_brief_columns(p_cfg jsonb) returns void
+  language plpgsql immutable set search_path = ''
+as $$
+declare
+  v_preds  jsonb := coalesce(nullif(p_cfg -> 'predicates', 'null'::jsonb), '[]'::jsonb);
+  v_rules  jsonb := coalesce(nullif(p_cfg -> 'evidence_rules', 'null'::jsonb), '[]'::jsonb);
+  v_types  jsonb := '{}'::jsonb;
+  v_enums  jsonb := '{}'::jsonb;
+  v_fills  jsonb := '{}'::jsonb;
+  v_inputs jsonb := '{}'::jsonb;
+  s        jsonb;
+  r        jsonb;
+  v_key    text;
+  v_type   text;
+  v_fill   text;
+  v_op     text;
+  v_val    jsonb;
+  v_cfg    jsonb;
+  v_n      jsonb;
+  v_in     text;
+  v_cycle  text[];
+  v_legacy text[] := '{}';
+begin
+  if jsonb_typeof(v_preds) <> 'array' then
+    raise exception 'predicates must be a list of columns' using errcode = '22023';
+  end if;
+  if jsonb_typeof(v_rules) <> 'array' then
+    raise exception 'evidence_rules must be a list of rules' using errcode = '22023';
+  end if;
+  if jsonb_array_length(v_preds) > 12 then
+    raise exception 'a Brief has at most 12 columns (this one has %)', jsonb_array_length(v_preds)
+      using errcode = '22023';
+  end if;
+  if jsonb_array_length(v_rules) > 10 then
+    raise exception 'a Brief has at most 10 evidence rules (this one has %)', jsonb_array_length(v_rules)
+      using errcode = '22023';
+  end if;
+
+  for s in select value from jsonb_array_elements(v_preds) loop
+    if jsonb_typeof(s) = 'string' then
+      v_legacy := v_legacy || (s #>> '{}');
+      continue;
+    end if;
+    if jsonb_typeof(s) <> 'object' then
+      raise exception 'each column must be an object or a key' using errcode = '22023';
+    end if;
+    v_key := case when jsonb_typeof(s -> 'key') = 'string' then s ->> 'key' end;
+    if v_key is null or v_key !~ '^[a-z][a-z0-9_]{1,39}$' then
+      raise exception 'column "%": key must be 2–40 lowercase letters, digits or underscores, starting with a letter',
+        coalesce(s ->> 'key', '') using errcode = '22023';
+    end if;
+    if v_types ? v_key then
+      raise exception 'column "%": key is used twice', v_key using errcode = '22023';
+    end if;
+    if jsonb_typeof(s -> 'label') is distinct from 'string'
+       or length(btrim(s ->> 'label')) = 0 or length(s ->> 'label') > 80 then
+      raise exception 'column "%": label needs 1–80 characters', v_key using errcode = '22023';
+    end if;
+    v_type := case when jsonb_typeof(s -> 'value_type') = 'string' then s ->> 'value_type' end;
+    if v_type is null or v_type not in ('boolean', 'number', 'enum', 'text', 'date') then
+      raise exception 'column "%": value_type must be boolean, number, enum, text or date', v_key
+        using errcode = '22023';
+    end if;
+    v_val := s -> 'allowed_values';
+    if v_type = 'enum' then
+      if jsonb_typeof(v_val) is distinct from 'array'
+         or jsonb_array_length(v_val) not between 2 and 12
+         or exists (select 1 from jsonb_array_elements(v_val) e
+                     where jsonb_typeof(e) <> 'string' or btrim(e #>> '{}') = '')
+         or (select count(distinct e) from jsonb_array_elements(v_val) e) <> jsonb_array_length(v_val) then
+        raise exception 'column "%": enum needs 2–12 allowed values', v_key using errcode = '22023';
+      end if;
+      v_enums := v_enums || jsonb_build_object(v_key, v_val);
+    elsif v_val is not null and v_val <> 'null'::jsonb then
+      raise exception 'column "%": only an enum has allowed values', v_key using errcode = '22023';
+    end if;
+    v_val := s -> 'extraction_hint';
+    if v_val is not null and v_val <> 'null'::jsonb
+       and (jsonb_typeof(v_val) <> 'string' or length(v_val #>> '{}') > 300) then
+      raise exception 'column "%": extraction_hint must be text of at most 300 characters', v_key
+        using errcode = '22023';
+    end if;
+    v_n := s -> 'decay_half_life_days';
+    if v_n is not null and v_n <> 'null'::jsonb
+       and (jsonb_typeof(v_n) <> 'number' or v_n::numeric <> trunc(v_n::numeric)
+            or v_n::numeric not between 1 and 3650) then
+      raise exception 'column "%": decay_half_life_days must be empty or 1–3650 days', v_key
+        using errcode = '22023';
+    end if;
+    if jsonb_typeof(s -> 'role') is distinct from 'string'
+       or s ->> 'role' not in ('signal', 'fit.vertical', 'fit.geography', 'fit.size',
+                               'fit.commercial_role', 'scale', 'info') then
+      raise exception 'column "%": role must be signal, fit.vertical, fit.geography, fit.size, fit.commercial_role, scale or info',
+        v_key using errcode = '22023';
+    end if;
+
+    -- P3's fill check, widened for P6's two paid fill methods.
+    v_val := s -> 'fill_method';
+    if v_val is null or v_val = 'null'::jsonb then
+      v_fill := 'extract';
+    elsif jsonb_typeof(v_val) = 'string' and v_val #>> '{}' in ('extract', 'formula', 'research', 'provider') then
+      v_fill := v_val #>> '{}';
+    else
+      raise exception 'column "%": fill_method must be extract, formula, research or provider', v_key
+        using errcode = '22023';
+    end if;
+
+    v_cfg := s -> 'fill_config';
+    if v_fill in ('research', 'provider') then
+      if jsonb_typeof(v_cfg) is distinct from 'object' then
+        raise exception 'column "%": a % column needs a fill_config object', v_key, v_fill using errcode = '22023';
+      end if;
+    elsif v_cfg is not null and v_cfg <> 'null'::jsonb and v_cfg <> '{}'::jsonb then
+      raise exception 'column "%": fill_config is only for research and provider columns', v_key using errcode = '22023';
+    end if;
+    if v_fill = 'research' then
+      if jsonb_typeof(v_cfg -> 'question') <> 'string'
+         or length(btrim(v_cfg ->> 'question')) not between 10 and 500 then
+        raise exception 'column "%": research needs a question of 10–500 characters', v_key using errcode = '22023';
+      end if;
+      v_val := v_cfg -> 'inputs';
+      if jsonb_typeof(v_val) is distinct from 'array' or jsonb_array_length(v_val) > 10
+         or exists (select 1 from jsonb_array_elements(v_val) e where jsonb_typeof(e) <> 'string')
+         or (select count(distinct e) from jsonb_array_elements(v_val) e) <> jsonb_array_length(v_val) then
+        raise exception 'column "%": research inputs must be at most 10 distinct column keys', v_key
+          using errcode = '22023';
+      end if;
+      v_val := v_cfg -> 'web';
+      if v_val is not null and v_val <> 'null'::jsonb and jsonb_typeof(v_val) <> 'boolean' then
+        raise exception 'column "%": research web must be true or false', v_key using errcode = '22023';
+      end if;
+      v_n := v_cfg -> 'max_pages';
+      if v_n is not null and v_n <> 'null'::jsonb
+         and (jsonb_typeof(v_n) <> 'number' or v_n::numeric <> trunc(v_n::numeric)
+              or v_n::numeric not between 1 and 5) then
+        raise exception 'column "%": research max_pages must be 1–5', v_key using errcode = '22023';
+      end if;
+    end if;
+    if v_fill = 'provider' then
+      if v_cfg ->> 'provider' not in ('leadmagic', 'findymail', 'prospeo', 'pdl_company', 'email_waterfall') then
+        raise exception 'column "%": unknown provider "%"', v_key, coalesce(v_cfg ->> 'provider', '')
+          using errcode = '22023';
+      end if;
+      v_val := v_cfg -> 'field';
+      if v_val is not null and v_val <> 'null'::jsonb
+         and (jsonb_typeof(v_val) <> 'string' or (v_cfg ->> 'provider') <> 'pdl_company'
+              or (v_val #>> '{}') !~ '^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){0,4}$') then
+        raise exception 'column "%": only pdl_company has a dotted company field', v_key using errcode = '22023';
+      end if;
+    end if;
+
+    -- SQL never parses a formula: the editor and the worker check its parse and inputs.
+    v_val := s -> 'formula';
+    if v_fill = 'formula' then
+      if jsonb_typeof(v_val) is distinct from 'string'
+         or length(btrim(v_val #>> '{}')) = 0 or length(v_val #>> '{}') > 500 then
+        raise exception 'column "%": a formula column needs a formula of 1–500 characters', v_key
+          using errcode = '22023';
+      end if;
+    elsif v_val is not null and v_val <> 'null'::jsonb then
+      raise exception 'column "%": only a formula column has a formula', v_key using errcode = '22023';
+    end if;
+    v_val := s -> 'inputs';
+    if v_fill = 'formula' then
+      if jsonb_typeof(v_val) is distinct from 'array'
+         or jsonb_array_length(v_val) not between 1 and 10
+         or exists (select 1 from jsonb_array_elements(v_val) e where jsonb_typeof(e) <> 'string')
+         or (select count(distinct e) from jsonb_array_elements(v_val) e) <> jsonb_array_length(v_val) then
+        raise exception 'column "%": a formula reads 1–10 other columns', v_key using errcode = '22023';
+      end if;
+      v_inputs := v_inputs || jsonb_build_object(v_key, v_val);
+    elsif v_fill = 'research' then
+      if jsonb_typeof(v_val) is distinct from 'array'
+         or jsonb_array_length(v_val) > 10
+         or exists (select 1 from jsonb_array_elements(v_val) e where jsonb_typeof(e) <> 'string')
+         or (select count(distinct e) from jsonb_array_elements(v_val) e) <> jsonb_array_length(v_val) then
+        raise exception 'column "%": research reads 0–10 other columns', v_key using errcode = '22023';
+      end if;
+      v_inputs := v_inputs || jsonb_build_object(v_key, v_val);
+    elsif v_val is not null and v_val <> 'null'::jsonb and v_val <> '[]'::jsonb then
+      raise exception 'column "%": only a formula or research column has inputs', v_key using errcode = '22023';
+    end if;
+
+    v_types := v_types || jsonb_build_object(v_key, v_type);
+    v_fills := v_fills || jsonb_build_object(v_key, v_fill);
+  end loop;
+
+  -- Inputs exist; a formula may only read extract/formula columns (research claims are evidence,
+  -- but a formula can read their values too once they run — P3's rule is kept as written).
+  for v_key in select k from jsonb_object_keys(v_inputs) k order by k collate "C" loop
+    for v_in in select jsonb_array_elements_text(v_inputs -> v_key) loop
+      if v_in = v_key then
+        if v_fills ->> v_key = 'formula' then
+          raise exception 'column "%": a formula cannot read its own column', v_key using errcode = '22023';
+        end if;
+        raise exception 'column "%": a column cannot read its own column', v_key using errcode = '22023';
+      end if;
+      if not (v_fills ? v_in) and v_in = any(v_legacy) then
+        if v_fills ->> v_key = 'formula' then
+          raise exception 'column "%": formula input "%" has no column spec; give it one first', v_key, v_in
+            using errcode = '22023';
+        end if;
+        raise exception 'column "%": input "%" has no column spec; give it one first', v_key, v_in
+          using errcode = '22023';
+      end if;
+      if not (v_fills ? v_in) then
+        raise exception 'column "%": input "%" is not a column of this Brief', v_key, v_in using errcode = '22023';
+      end if;
+      if v_fills ->> v_key = 'formula' and v_fills ->> v_in not in ('extract', 'formula') then
+        raise exception 'column "%": input "%" must be an extract or formula column', v_key, v_in
+          using errcode = '22023';
+      end if;
+    end loop;
+  end loop;
+
+  v_cycle := app.formula_cycle(v_inputs);
+  if v_cycle is not null then
+    raise exception 'formula columns form a cycle: %', array_to_string(v_cycle, ' → ') using errcode = '22023';
+  end if;
+
+  for r in select value from jsonb_array_elements(v_rules) loop
+    if jsonb_typeof(r) <> 'object' then
+      raise exception 'each evidence rule must be an object' using errcode = '22023';
+    end if;
+    v_key := r ->> 'predicate';
+    if v_key is null or not (v_types ? v_key) then
+      raise exception 'column "%": an evidence rule points at a column this Brief does not define',
+        coalesce(v_key, '') using errcode = '22023';
+    end if;
+    if v_fills ->> v_key = 'formula' then
+      raise exception 'column "%": an evidence rule cannot point at a formula column', v_key using errcode = '22023';
+    end if;
+    v_type := v_types ->> v_key;
+    if r ->> 'kind' is null or r ->> 'kind' not in ('requires', 'disqualifies') then
+      raise exception 'column "%": rule kind must be requires or disqualifies', v_key using errcode = '22023';
+    end if;
+    v_op := r ->> 'op';
+    if v_op is null or not (
+         (v_type = 'boolean' and v_op in ('is_true', 'is_false', 'present')) or
+         (v_type = 'number'  and v_op in ('at_least', 'present')) or
+         (v_type = 'enum'    and v_op in ('one_of', 'present')) or
+         (v_type = 'text'    and v_op in ('contains', 'present')) or
+         (v_type = 'date'    and v_op = 'present')) then
+      raise exception 'column "%": a % column has no rule "%"', v_key, v_type, coalesce(v_op, '')
+        using errcode = '22023';
+    end if;
+    v_val := r -> 'value';
+    if v_op = 'one_of' then
+      if jsonb_typeof(v_val) is distinct from 'array' or jsonb_array_length(v_val) = 0
+         or exists (select 1 from jsonb_array_elements(v_val) e where not (v_enums -> v_key) @> jsonb_build_array(e)) then
+        raise exception 'column "%": one_of needs values from its allowed values', v_key using errcode = '22023';
+      end if;
+    elsif v_op = 'at_least' then
+      if jsonb_typeof(v_val) is distinct from 'number' then
+        raise exception 'column "%": at_least needs a number', v_key using errcode = '22023';
+      end if;
+    elsif v_op = 'contains' then
+      if jsonb_typeof(v_val) is distinct from 'array' or jsonb_array_length(v_val) = 0
+         or exists (select 1 from jsonb_array_elements(v_val) e where jsonb_typeof(e) <> 'string') then
+        raise exception 'column "%": contains needs a list of words', v_key using errcode = '22023';
+      end if;
+    elsif v_val is not null and v_val <> 'null'::jsonb then
+      raise exception 'column "%": rule "%" takes no value', v_key, v_op using errcode = '22023';
+    end if;
+    v_n := r -> 'min_sources';
+    if v_n is not null and v_n <> 'null'::jsonb
+       and (jsonb_typeof(v_n) <> 'number' or v_n::numeric <> trunc(v_n::numeric)
+            or v_n::numeric not between 1 and 5) then
+      raise exception 'column "%": min_sources must be 1–5', v_key using errcode = '22023';
+    end if;
+    v_n := r -> 'max_age_days';
+    if v_n is not null and v_n <> 'null'::jsonb
+       and (jsonb_typeof(v_n) <> 'number' or v_n::numeric <> trunc(v_n::numeric)
+            or v_n::numeric not between 1 and 3650) then
+      raise exception 'column "%": max_age_days must be empty or 1–3650 days', v_key using errcode = '22023';
+    end if;
+  end loop;
+end $$;
+
+-- Publish sync (0039's body, unchanged except for fill_config and research inputs). A research or
+-- provider column now carries its config into public.predicate, so the executor sees what the
+-- Brief author wrote; research inputs resolve to input_predicate_ids like a formula's do.
+create or replace function app.sync_brief_predicates() returns trigger
+  language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_preds  jsonb := case when jsonb_typeof(new.config -> 'predicates') = 'array'
+                         then new.config -> 'predicates' else '[]'::jsonb end;
+  v_order  jsonb;
+  v_prev   jsonb;
+  s        jsonb;
+  p        public.predicate%rowtype;
+  v_id     uuid;
+  v_union  jsonb;
+  v_added  text[];
+  v_hint   text;
+  v_decay  int;
+  v_fill   text;
+  v_fcfg   jsonb;
+  v_ins    uuid[];
+  v_ver    int;
+  v_fill_q uuid[] := '{}';
+begin
+  perform app.validate_brief_columns(new.config);
+
+  select coalesce(jsonb_agg(e order by e ->> 'key'), '[]'::jsonb) into v_order
+    from jsonb_array_elements(v_preds) e
+   where jsonb_typeof(e) = 'object' and coalesce(e ->> 'fill_method', 'extract') <> 'formula';
+  select v_order || coalesce(jsonb_agg(e order by o.n), '[]'::jsonb) into v_order
+    from unnest(app.formula_order(
+           (select coalesce(jsonb_object_agg(x ->> 'key', x -> 'inputs'), '{}'::jsonb)
+              from jsonb_array_elements(v_preds) x
+             where jsonb_typeof(x) = 'object' and x ->> 'fill_method' = 'formula'))) with ordinality o(k, n)
+    join jsonb_array_elements(v_preds) e on jsonb_typeof(e) = 'object' and e ->> 'key' = o.k;
+
+  for s in select e from jsonb_array_elements(v_order) e loop
+    v_fill := coalesce(s ->> 'fill_method', 'extract');
+    v_fcfg := case
+      when v_fill = 'formula' then jsonb_build_object('formula', s ->> 'formula')
+      when v_fill in ('research', 'provider') then coalesce(s -> 'fill_config', '{}'::jsonb)
+      else '{}'::jsonb end;
+    select coalesce(array_agg(x.id order by x.key collate "C"), '{}') into v_ins
+      from public.predicate x
+     where v_fill in ('formula', 'research') and x.workspace_id = new.workspace_id
+       and x.key in (select jsonb_array_elements_text(s -> 'inputs'));
+
+    select * into p from public.predicate
+     where workspace_id = new.workspace_id and key = s ->> 'key' for update;
+    if not found then
+      v_id := null;
+      insert into public.predicate
+        (key, org_id, workspace_id, label, value_type, allowed_values, decay_half_life_days, extraction_hint,
+         fill_method, fill_config, input_predicate_ids, auto_run)
+      values
+        (s ->> 'key', new.org_id, new.workspace_id, s ->> 'label', s ->> 'value_type',
+         case when s ->> 'value_type' = 'enum' then s -> 'allowed_values' end,
+         (s ->> 'decay_half_life_days')::numeric::int, coalesce(s ->> 'extraction_hint', ''),
+         v_fill, v_fcfg, v_ins, v_fill = 'formula')
+      on conflict on constraint one_key_per_scope do nothing
+      returning id into v_id;
+      if v_id is not null then
+        perform app.audit(new.org_id, new.workspace_id, 'predicate.created', 'predicate', v_id, null,
+                          jsonb_build_object('key', s ->> 'key', 'value_type', s ->> 'value_type',
+                                             'brief_version_id', new.id));
+        if v_fill = 'formula' then
+          v_fill_q := v_fill_q || v_id;
+        end if;
+        continue;
+      end if;
+      select * into p from public.predicate
+       where workspace_id = new.workspace_id and key = s ->> 'key' for update;
+    end if;
+
+    if p.value_type <> s ->> 'value_type' then
+      raise exception 'column "%" already exists in this workspace as %; give it another key',
+        p.key, p.value_type using errcode = '23514';
+    end if;
+    if p.fill_method <> v_fill then
+      raise exception 'column "%" already exists in this workspace filled by %; give it another key',
+        p.key, p.fill_method using errcode = '23514';
+    end if;
+    if p.value_type = 'enum' then
+      select coalesce(p.allowed_values, '[]'::jsonb) || coalesce(jsonb_agg(e order by o), '[]'::jsonb)
+        into v_union
+        from jsonb_array_elements(s -> 'allowed_values') with ordinality a(e, o)
+       where not coalesce(p.allowed_values, '[]'::jsonb) @> jsonb_build_array(e);
+      if v_union is distinct from p.allowed_values then
+        update public.predicate set allowed_values = v_union where id = p.id;
+        perform app.audit(new.org_id, new.workspace_id, 'predicate.values_added', 'predicate', p.id,
+                          jsonb_build_object('allowed_values', p.allowed_values),
+                          jsonb_build_object('allowed_values', v_union, 'brief_version_id', new.id));
+      end if;
+    end if;
+
+    v_hint  := coalesce(s ->> 'extraction_hint', '');
+    v_decay := (s ->> 'decay_half_life_days')::numeric::int;
+    if p.label is distinct from s ->> 'label'
+       or coalesce(p.extraction_hint, '') <> v_hint
+       or p.decay_half_life_days is distinct from v_decay then
+      update public.predicate
+         set label = s ->> 'label',
+             extraction_hint = case when coalesce(extraction_hint, '') = v_hint
+                                    then extraction_hint else v_hint end,
+             decay_half_life_days = v_decay
+       where id = p.id;
+      perform app.audit(new.org_id, new.workspace_id, 'predicate.updated', 'predicate', p.id,
+                        jsonb_build_object('label', p.label, 'extraction_hint', p.extraction_hint,
+                                           'decay_half_life_days', p.decay_half_life_days),
+                        jsonb_build_object('label', s ->> 'label', 'extraction_hint', v_hint,
+                                           'decay_half_life_days', v_decay,
+                                           'brief_version_id', new.id));
+    end if;
+
+    if p.fill_config is distinct from v_fcfg or p.input_predicate_ids is distinct from v_ins then
+      update public.predicate set fill_config = v_fcfg, input_predicate_ids = v_ins
+       where id = p.id returning version into v_ver;
+      perform app.audit(new.org_id, new.workspace_id, 'predicate.fill_changed', 'predicate', p.id,
+                        jsonb_build_object('fill_config', p.fill_config, 'input_predicate_ids', p.input_predicate_ids,
+                                           'version', p.version),
+                        jsonb_build_object('fill_config', v_fcfg, 'input_predicate_ids', v_ins,
+                                           'version', v_ver, 'brief_version_id', new.id));
+    end if;
+
+    if v_fill = 'formula'
+       and (select x.config_hash from public.predicate x where x.id = p.id) is distinct from p.config_hash then
+      v_fill_q := v_fill_q || p.id;
+    end if;
+  end loop;
+
+  select config -> 'predicates' into v_prev from public.brief_version
+   where brief_id = new.brief_id and version = new.version - 1;
+  v_prev := case when jsonb_typeof(v_prev) = 'array' then v_prev else '[]'::jsonb end;
+  select array_agg(k order by k) into v_added
+    from (select e ->> 'key' as k from jsonb_array_elements(v_preds) e where jsonb_typeof(e) = 'object'
+          except
+          select case jsonb_typeof(e) when 'string' then e #>> '{}' else e ->> 'key' end
+            from jsonb_array_elements(v_prev) e) added;
+  if v_added is not null then
+    perform app.emit('predicate.backfill_requested'::public.event_type, new.org_id, new.workspace_id,
+                     'brief_version', new.id,
+                     jsonb_build_object('brief_id', new.brief_id, 'brief_version_id', new.id,
+                                        'org_id', new.org_id, 'workspace_id', new.workspace_id,
+                                        'predicate_keys', to_jsonb(v_added)));
+    select v_fill_q || coalesce(array_agg(x.id), '{}') into v_fill_q
+      from public.predicate x
+     where x.workspace_id = new.workspace_id and x.fill_method = 'formula' and x.key = any(v_added);
+  end if;
+  if cardinality(v_fill_q) > 0 then
+    perform app.queue_formula_backfill(array(select distinct unnest(v_fill_q)), new.id);
+  end if;
+  return null;
+end $$;
+
+-- Panel detail for P6 runs (Task 6): the attempts behind one run and a research receipt, safe to
+-- show as-is. Provider attempts expose only ordinal/provider/status/cost/confidence/error_kind and
+-- a raw_ref that the fillers write as a masked hint or URL — never a key or an unmasked email.
+-- A research receipt is the run's stored inputs (queries, page URL/title, answer, citations and
+-- reasoning), returned only when the run actually wrote the cell's claim or, if there is no claim,
+-- is the newest successful run. Cost and status stay in the existing `runs` list.
+create or replace function public.cell_detail(p_ws uuid, p_entity uuid, p_predicate uuid) returns jsonb
+  language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_org    uuid;
+  p        public.predicate%rowtype;
+  c        record;
+  v_me     uuid;
+  v_label  text;
+  v_runin  jsonb;
+  v_inputs jsonb := '[]'::jsonb;
+  v_claims jsonb;
+  v_runs   jsonb;
+  v_attempts jsonb;
+  v_receipt  jsonb;
+  v_last   uuid;
+begin
+  perform app.home_lens(p_ws, null);
+  select w.org_id into v_org from public.workspace w where w.id = p_ws;
+  -- A company cell is an account row; a person cell is one linked to that account's company. The
+  -- email waterfall fills people, so both must open the same panel.
+  if not exists (
+    select 1 from public.account a join public.entity e on e.id = a.entity_id
+     where a.workspace_id = p_ws and e.org_id = v_org
+       and (a.entity_id = p_entity or exists (
+              select 1 from public.relationship r
+               where r.org_id = v_org and r.from_entity_id = p_entity
+                 and r.relation = 'works_at' and r.to_entity_id = a.entity_id))) then
+    raise exception 'account not found in this workspace' using errcode = '22023';
+  end if;
+  select * into p from public.predicate where id = p_predicate and (workspace_id = p_ws or workspace_id is null);
+  if not found then
+    raise exception 'column not found in this workspace' using errcode = '22023';
+  end if;
+  select * into c from public.cells(p_ws, array[p_entity], array[p_predicate]);
+  v_me := app.current_member_id(v_org);
+
+  select case when sr.connector_id = 'derived:manual' then
+                 case when v_me is not null and exists (
+                             select 1 from public.audit_log al
+                              where al.target_type = 'claim' and al.target_id = cl.id
+                                and al.action = 'claim.manual_value_set' and al.actor_member_id = v_me)
+                      then 'Entered by you' else coalesce(cl.quote, 'Entered by hand') end
+               when sr.connector_id like 'derived:%' then 'Formula'
+               else 'Found in sources' end
+    into v_label
+    from public.claim cl join public.source_record sr on sr.id = cl.source_record_id
+   where cl.id = c.claim_id;
+  v_label := coalesce(v_label, case p.fill_method when 'formula' then 'Formula' when 'manual' then 'Entered by hand'
+                                                  else 'Found in sources' end);
+
+  select coalesce(jsonb_agg(x.j order by x.act desc, x.observed_at desc, x.created_at desc, x.id desc), '[]'::jsonb)
+    into v_claims
+    from (select cl.id, cl.observed_at, cl.created_at, cl.status = 'active' as act,
+                 jsonb_build_object('id', cl.id, 'value', cl.value, 'quote', cl.quote, 'source_url', sr.url,
+                                    'source_type', sr.source_type, 'observed_at', cl.observed_at, 'status', cl.status,
+                                    'superseded_at', case when cl.status = 'superseded' then nx.created_at end) as j
+            from public.claim cl
+            join public.source_record sr on sr.id = cl.source_record_id
+            left join public.claim nx on nx.id = cl.superseded_by
+           where cl.entity_id = p_entity and cl.predicate_id = p_predicate and cl.org_id = v_org
+           order by (cl.status = 'active') desc, cl.observed_at desc, cl.created_at desc, cl.id desc
+           limit 50) x;
+
+  if p.fill_method = 'formula' then
+    if c.claim_id is not null then
+      select pr.inputs into v_runin from public.predicate_run pr
+       where pr.entity_id = p_entity and pr.predicate_id = p_predicate and pr.claim_id = c.claim_id
+         and jsonb_typeof(pr.inputs) = 'array'
+       order by pr.queued_at desc, pr.id desc limit 1;
+    end if;
+    if v_runin is not null then
+      select coalesce(jsonb_agg(jsonb_build_object('column_label', x.label, 'value', cl.value, 'claim_id', cl.id)
+                                order by x.key collate "C", cl.id), '[]'::jsonb)
+        into v_inputs
+        from public.claim cl join public.predicate x on x.id = cl.predicate_id
+       where cl.org_id = v_org
+         and cl.id in (select i::uuid from jsonb_array_elements_text(v_runin) i
+                        where i ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$');
+    else
+      select coalesce(jsonb_agg(jsonb_build_object('column_label', x.label, 'value', iv.value, 'claim_id', iv.id)
+                                order by x.key collate "C"), '[]'::jsonb)
+        into v_inputs
+        from public.predicate x
+        cross join lateral (select cl.id, cl.value from public.claim cl
+                             where cl.entity_id = p_entity and cl.predicate_id = x.id and cl.status = 'active'
+                               and cl.org_id = v_org
+                             order by cl.observed_at desc, cl.id desc limit 1) iv
+       where x.id = any(p.input_predicate_ids);
+    end if;
+  end if;
+
+  select coalesce(jsonb_agg(x.j order by x.queued_at desc, x.id desc), '[]'::jsonb)
+    into v_runs
+    from (select pr.id, pr.queued_at,
+                 jsonb_build_object('id', pr.id, 'status', pr.status, 'cost_usd', pr.cost_usd, 'brief_version', bv.version,
+                                    'queued_at', pr.queued_at, 'started_at', pr.started_at, 'finished_at', pr.finished_at,
+                                    'error', pr.error) as j
+            from public.predicate_run pr
+            left join public.brief_version bv on bv.id = pr.brief_version_id
+           where pr.entity_id = p_entity and pr.predicate_id = p_predicate and pr.workspace_id = p_ws
+           order by pr.queued_at desc, pr.id desc
+           limit 50) x;
+
+  -- Last run that explains the current value, else the newest run; both lists below follow it.
+  select pr.id into v_last from public.predicate_run pr
+   where pr.entity_id = p_entity and pr.predicate_id = p_predicate and pr.workspace_id = p_ws
+     and (c.claim_id is null or pr.claim_id = c.claim_id)
+   order by (pr.claim_id = c.claim_id) desc, pr.queued_at desc, pr.id desc limit 1;
+
+  if v_last is not null then
+    select coalesce(jsonb_agg(jsonb_build_object('ordinal', a.ordinal, 'provider', a.provider, 'status', a.status,
+                                                 'cost_usd', a.cost_usd, 'confidence', a.confidence,
+                                                 'raw_ref', a.raw_ref, 'error_kind', a.error_kind)
+                              order by a.ordinal, a.id), '[]'::jsonb)
+      into v_attempts
+      from public.predicate_run_attempt a where a.run_id = v_last;
+    if p.fill_method = 'research' then
+      select case when jsonb_typeof(pr.inputs) = 'object'
+                   and (pr.inputs ? 'queries' or pr.inputs ? 'answer' or pr.inputs ? 'pages')
+                  then pr.inputs end
+        into v_receipt
+        from public.predicate_run pr where pr.id = v_last;
+    end if;
+  end if;
+  v_attempts := coalesce(v_attempts, '[]'::jsonb);
+
+  return jsonb_build_object('column', app.table_column_json(p.id), 'state', c.state, 'value', c.value,
+                            'confidence', c.confidence, 'claim_id', c.claim_id, 'fill_label', v_label, 'claims', v_claims,
+                            'inputs', v_inputs, 'runs', v_runs, 'attempts', v_attempts, 'receipt', v_receipt);
+end $$;
+
+-- Task 6 also needs a run price for the two new fill methods, otherwise publishing a research or
+-- provider column leaves Add column stuck on an "it has no run price yet" estimate. The worker keeps
+-- the same prices in model_price; SQL only turns them into a per-cell maximum. The email waterfall
+-- is priced as every provider in the workspace's order, since a run may reach any of them.
+insert into public.ai_capability_model (capability, model) values ('write', 'claude-sonnet-5-5')
+on conflict (capability) do nothing;
+
+create or replace function app.column_cost_per_entity(p_predicate uuid, p_ws uuid) returns numeric
+  language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  p        public.predicate%rowtype;
+  v_model  text;
+  v_in     numeric;
+  v_out    numeric;
+  v_recs   numeric;
+  v_cost   numeric;
+  v_pages  int;
+  v_order  jsonb;
+begin
+  select * into p from public.predicate where id = p_predicate;
+  if not found then
+    raise exception 'column not found' using errcode = 'P0002';
+  end if;
+  if p.fill_method in ('formula', 'manual') then
+    return 0;
+  end if;
+
+  if p.fill_method = 'provider' then
+    if coalesce(p.fill_config ->> 'provider', '') = 'email_waterfall' then
+      select provider_order into v_order from public.workspace_settings
+       where workspace_id = coalesce(p_ws, p.workspace_id);
+      v_order := coalesce(nullif(v_order, 'null'::jsonb), '["leadmagic","findymail","prospeo"]'::jsonb);
+      select coalesce(sum(mp.usd_per_million / 1000000), 0) into v_cost
+        from jsonb_array_elements_text(v_order) x(model)
+        join public.model_price mp on mp.model = x.model and mp.unit = 'enrichment_lookup';
+    else
+      select mp.usd_per_million / 1000000 into v_cost
+        from public.model_price mp
+       where mp.model = p.fill_config ->> 'provider' and mp.unit = 'enrichment_lookup';
+    end if;
+    if v_cost is null or v_cost <= 0 then
+      raise exception 'no price for provider "%"', coalesce(p.fill_config ->> 'provider', '') using errcode = 'P0002';
+    end if;
+    return round(v_cost, 6);
+  end if;
+
+  if p.fill_method = 'research' then
+    select model into v_model from public.ai_capability_model where capability = 'write';
+    select usd_per_million into v_in from public.model_price where model = v_model and unit = 'ai_input_tokens';
+    select usd_per_million into v_out from public.model_price where model = v_model and unit = 'ai_output_tokens';
+    if v_in is null or v_out is null then
+      raise exception 'no price for the research model "%"', coalesce(v_model, '') using errcode = 'P0002';
+    end if;
+    v_cost := (3000 * v_in + 500 * v_out) / 1000000;
+    if coalesce((p.fill_config ->> 'web')::boolean, false) then
+      v_pages := least(5, greatest(1, coalesce((p.fill_config ->> 'max_pages')::int, 1)));
+      select usd_per_million / 1000000 into v_in
+        from public.model_price where model = 'brave-search' and unit = 'fetch';
+      if v_in is not null then
+        v_cost := v_cost + v_pages * v_in;
+      end if;
+    end if;
+    return round(v_cost, 6);
+  end if;
+
+  if p.fill_method <> 'extract' then
+    raise exception 'column "%" is filled by %; it has no run price yet', p.key, p.fill_method using errcode = '22023';
+  end if;
+  select model into v_model from public.ai_capability_model where capability = 'extract';
+  select usd_per_million into v_in from public.model_price where model = v_model and unit = 'ai_input_tokens';
+  select usd_per_million into v_out from public.model_price where model = v_model and unit = 'ai_output_tokens';
+  if v_in is null or v_out is null then
+    raise exception 'no price for the extract model "%"', coalesce(v_model, '') using errcode = 'P0002';
+  end if;
+  select avg(x.n) into v_recs
+    from (select m.entity_id, count(distinct sr.id) as n
+            from public.source_record sr
+            join public.mention m on m.source_record_id = sr.id
+           where sr.workspace_id = coalesce(p_ws, p.workspace_id) and sr.extraction_status = 'extracted'
+             and m.entity_id is not null
+           group by m.entity_id) x;
+  v_recs := least(20, coalesce(v_recs, 1));
+  return round(v_recs * (3000 * v_in + 500 * v_out) / 1000000, 6);
+end $$;
+
+-- The operating table shows a waterfall's last attempt per row without calling one RPC per cell.
+-- Keys are "<entity_id>:<predicate_id>"; only the current workspace's attempts can be read.
+create or replace function public.waterfall_attempts(p_ws uuid, p_entity_ids uuid[], p_predicate_ids uuid[])
+returns jsonb language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_org uuid;
+begin
+  if not app.has_workspace_role(p_ws, 'Viewer') then
+    raise exception 'permission denied' using errcode = '42501';
+  end if;
+  select org_id into v_org from public.workspace where id = p_ws;
+  return coalesce((
+    select jsonb_object_agg(
+             last.entity_id::text || ':' || last.predicate_id::text,
+             (select coalesce(jsonb_agg(jsonb_build_object('provider', a.provider, 'status', a.status,
+                                                           'cost_usd', a.cost_usd, 'ordinal', a.ordinal)
+                                        order by a.ordinal, a.id), '[]'::jsonb)
+                from public.predicate_run_attempt a where a.run_id = last.id))
+      from (
+        select distinct on (pr.entity_id, pr.predicate_id) pr.id, pr.entity_id, pr.predicate_id
+          from public.predicate_run pr
+         where pr.workspace_id = p_ws
+           and pr.entity_id = any(p_entity_ids) and pr.predicate_id = any(p_predicate_ids)
+         order by pr.entity_id, pr.predicate_id, pr.queued_at desc, pr.id desc
+      ) last
+  ), '{}'::jsonb);
+end $$;
+
+revoke all on function public.waterfall_attempts(uuid, uuid[], uuid[]) from public, anon;
+grant execute on function public.waterfall_attempts(uuid, uuid[], uuid[]) to authenticated;
