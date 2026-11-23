@@ -1421,6 +1421,7 @@ dependencies = [
     { name = "psycopg", extra = ["binary", "pool"] },
     { name = "pydantic" },
     { name = "pydantic-settings" },
+    { name = "sarvamai" },
     { name = "structlog" },
     { name = "voyageai" },
 ]
@@ -1435,6 +1436,7 @@ requires-dist = [
     { name = "psycopg", extras = ["binary", "pool"], specifier = ">=3.2" },
     { name = "pydantic", specifier = ">=2.11" },
     { name = "pydantic-settings", specifier = ">=2.10" },
+    { name = "sarvamai", specifier = ">=0.1.48" },
     { name = "structlog", specifier = ">=25" },
     { name = "voyageai", specifier = "==0.5.0" },
 ]
