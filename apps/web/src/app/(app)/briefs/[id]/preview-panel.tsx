@@ -11,7 +11,7 @@ type Result = {
   entering?: Change[];
   leaving?: Change[];
   band_changes?: Change[];
-  counts?: { rejudge_verdicts?: number; reextract_records?: number; new_radar_types?: number };
+  counts?: { rejudge_verdicts?: number; reextract_records?: number; new_radar_types?: number; recompute_verdicts?: number; stale_cells?: number; backfill_records?: number };
 };
 type Preview = {
   id: string;
@@ -156,6 +156,15 @@ export async function PreviewPanel({
         {r.counts?.reextract_records ? ` · ${r.counts.reextract_records} records re-read` : ''}
         {r.counts?.new_radar_types ? ` · ${r.counts.new_radar_types} radar types collecting` : ''}
       </p>
+      {(() => {
+        const clauses: string[] = [];
+        const rv = r.counts?.recompute_verdicts ?? 0;
+        const sc = r.counts?.stale_cells ?? 0;
+        if (rv > 0) clauses.push(`${rv} verdicts will be recomputed (free)`);
+        if (sc > 0) clauses.push(`${sc} AI cells will be stale (est. $${cost.toFixed(2)} to re-run)`);
+        const sentence = clauses.length ? `Changes the rubric. ${clauses.join('. ')}.` : 'Nothing else changes';
+        return <p className="m-0 text-[14px] font-medium">{sentence}</p>;
+      })()}
       <ChangeList title="Entering" items={r.entering ?? []} total={totals.entering} />
       <ChangeList title="Leaving" items={r.leaving ?? []} total={totals.leaving} />
       <ChangeList title="Band changes" items={r.band_changes ?? []} total={totals.band_changes} />

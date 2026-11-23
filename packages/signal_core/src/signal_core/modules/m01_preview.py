@@ -241,7 +241,14 @@ async def _counts(
     rejudge: bool,
     changed: list[str],
 ) -> dict[str, int]:
-    counts = {"rejudge_verdicts": 0, "reextract_records": 0, "new_radar_types": 0}
+    counts = {
+        "rejudge_verdicts": 0,
+        "reextract_records": 0,
+        "new_radar_types": 0,
+        "recompute_verdicts": 0,
+        "stale_cells": 0,
+        "backfill_records": 0,
+    }
     async with pool.connection() as conn, conn.cursor() as cur:
         if rejudge:
             await cur.execute(
@@ -250,6 +257,7 @@ async def _counts(
             )
             row = await cur.fetchone()
             counts["rejudge_verdicts"] = int(row[0]) if row else 0
+            counts["recompute_verdicts"] = counts["rejudge_verdicts"]
         # New column keys are backfilled over the Brief's scope (capped per publish), not
         # over every record in the workspace. Only extract columns re-extract: a formula column
         # is filled by its own runs.
@@ -261,6 +269,8 @@ async def _counts(
             )
             row = await cur.fetchone()
             counts["reextract_records"] = int(row[0]) if row else 0
+            counts["stale_cells"] = counts["reextract_records"]
+            counts["backfill_records"] = counts["reextract_records"]
     new_types = set((new_cfg.get("sources") or {}).get("radar_types") or [])
     old_types = set((old_cfg.get("sources") or {}).get("radar_types") or [])
     # A new hypothesis, keywords or seeds re-run every radar's queries; new sources run only theirs.
