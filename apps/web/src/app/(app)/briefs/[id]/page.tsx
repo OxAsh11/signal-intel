@@ -91,10 +91,15 @@ export default async function BriefDetailPage({ params, searchParams }: PageProp
           </Link>
         ))}
         {brief.state === 'Pilot' ? (
-          <Link href={`/briefs/${id}?tab=pilot`} className={tab === 'pilot' ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}>
-            Pilot
-          </Link>
+          <>
+            <Link href={`/briefs/${id}?tab=pilot`} className={tab === 'pilot' ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}>
+              Pilot
+            </Link>
+            <Link href={`/briefs/${id}/pilot`} className="font-medium text-ink underline">Pilot results</Link>
+          </>
         ) : null}
+        <Link href={`/briefs/${id}/radars`} className="text-ink underline">Radars</Link>
+        <Link href={`/briefs/${id}/versions`} className="text-ink underline">Version history</Link>
       </nav>
 
       <div className="si-cols">
