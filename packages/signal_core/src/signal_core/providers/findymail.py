@@ -26,6 +26,8 @@ from signal_core.providers.base import (
     ProviderResult,
     error_result,
     found,
+    http_ref,
+    input_error,
     not_found,
 )
 
@@ -60,7 +62,7 @@ class FindymailProvider(HttpProvider):
         name = input.name()
         company = input.domain or input.company_name
         if not name or not company:
-            return error_result(self.key, "needs a name and a domain")
+            return input_error(self.key, "needs a name and a domain")
         outcome = await self._call(
             "POST",
             FIND_URL,
@@ -69,12 +71,14 @@ class FindymailProvider(HttpProvider):
             pass_through=frozenset({404}),
         )
         if outcome.error:
-            return error_result(self.key, outcome.error, f"findymail:http:{outcome.status_code}")
+            return error_result(
+                self.key, outcome.error, http_ref("findymail", outcome), health_key="findymail_find"
+            )
         data = outcome.body if isinstance(outcome.body, dict) else {}
         contact = data.get("contact") if outcome.status_code != 404 else None
         email = contact.get("email") if isinstance(contact, dict) else None
         if not email:
-            return not_found(self.key, "findymail:search-name")
+            return not_found(self.key, "findymail:search-name", health_key="findymail_find")
         # Findymail returns only addresses it has verified.
         return found(
             self.key,
@@ -83,18 +87,26 @@ class FindymailProvider(HttpProvider):
             units=1,
             unit_price=self._price,
             raw_ref="findymail:search-name",
+            health_key="findymail_find",
         )
 
     async def verify(self, email: str) -> ProviderResult:
         """The vendor's verdict on one address: value "valid" or "invalid" (always 1 credit)."""
         if not email or "@" not in email:
-            return error_result(self.key, "needs an email to verify")
+            return input_error(self.key, "needs an email to verify")
         outcome = await self._call("POST", VERIFY_URL, self._headers(), json={"email": email})
         if outcome.error:
-            return error_result(self.key, outcome.error, f"findymail:http:{outcome.status_code}")
+            return error_result(
+                self.key,
+                outcome.error,
+                http_ref("findymail", outcome),
+                health_key="findymail_verify",
+            )
         data = outcome.body if isinstance(outcome.body, dict) else {}
         if "verified" not in data:
-            return error_result(self.key, "unexpected answer", "findymail:verify")
+            return error_result(
+                self.key, "unexpected answer", "findymail:verify", health_key="findymail_verify"
+            )
         verified = data.get("verified") is True
         return found(
             self.key,
@@ -103,6 +115,7 @@ class FindymailProvider(HttpProvider):
             units=1,
             unit_price=self._verify_price,
             raw_ref="findymail:verify",
+            health_key="findymail_verify",
         )
 
 

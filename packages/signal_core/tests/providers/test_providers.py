@@ -17,8 +17,10 @@ from pydantic import SecretStr
 
 from signal_core import providers
 from signal_core.config import Settings
+from signal_core.providers import base
 from signal_core.providers.base import (
     REJECTED_KEY,
+    TIMEOUT_SECONDS,
     HttpProvider,
     Provider,
     ProviderInput,
@@ -51,6 +53,7 @@ class Case:
     input: ProviderInput
     found_value: Any
     found_cost: Decimal
+    invalid_key: str = "401"  # fixture for a rejected key (Prospeo answers 400 INVALID_API_KEY)
 
 
 CASES = [
@@ -80,6 +83,7 @@ CASES = [
         PERSON,
         "jane.doe@acme.com",
         Decimal("0.010"),
+        invalid_key="invalid_key",
     ),
     Case(
         "pdl_company",
@@ -110,6 +114,22 @@ def _clean_health() -> Iterator[None]:
     reset_health()
 
 
+@pytest.fixture(autouse=True)
+def _capturable_logs(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """capture_logs only sees loggers that are not cached yet. The worker's configure_logging sets
+    cache_logger_on_first_use=True, so in a full-suite run the providers' module logger may be
+    bound already: reset structlog and hand the module a fresh logger for each test."""
+    saved = structlog.get_config()
+    structlog.reset_defaults()
+    monkeypatch.setattr(base, "log", structlog.get_logger(base.__name__))
+    yield
+    structlog.configure(**saved)
+
+
+def _events(logs: list[dict[str, Any]]) -> set[str]:
+    return {str(r.get("event")) for r in logs}
+
+
 def _route(mock: respx.MockRouter, case: Case) -> respx.Route:
     return mock.request(case.method, case.url)
 
@@ -120,14 +140,21 @@ def _assert_key_never_logged(logs: list[dict[str, Any]], result: ProviderResult)
     assert KEY not in result.model_dump_json()
 
 
-async def _run(case: Case, *responses: httpx.Response | Exception) -> tuple[ProviderResult, int]:
+async def _run_logged(
+    case: Case, *responses: httpx.Response | Exception
+) -> tuple[ProviderResult, int, list[dict[str, Any]]]:
     with respx.mock(assert_all_called=False) as mock:
         route = _route(mock, case)
         route.side_effect = list(responses)
         with structlog.testing.capture_logs() as logs:
             result = await case.make().lookup(case.input)
         _assert_key_never_logged(logs, result)
-        return result, route.call_count
+        return result, route.call_count, logs
+
+
+async def _run(case: Case, *responses: httpx.Response | Exception) -> tuple[ProviderResult, int]:
+    result, calls, _ = await _run_logged(case, *responses)
+    return result, calls
 
 
 @pytest.mark.parametrize("case", CASES, ids=IDS)
@@ -150,10 +177,11 @@ async def test_not_found_is_free_and_never_raises(case: Case) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_401_rejected_the_key(case: Case) -> None:
-    result, calls = await _run(case, fixture(case.vendor, "401"))
+    result, calls, logs = await _run_logged(case, fixture(case.vendor, case.invalid_key))
     assert calls == 1  # never retried
     assert result.status == "error" and result.error == REJECTED_KEY
-    assert result.cost_usd == 0
+    assert result.error_kind == "vendor" and result.cost_usd == 0
+    assert logs and "provider.http_error" in _events(logs)  # the no-key check saw real records
     row = next(r for r in providers.status(_settings()) if r["key"] == result.provider)
     assert row["last_error"] == REJECTED_KEY and row["last_error_at"] is not None
 
@@ -176,9 +204,22 @@ async def test_500_twice_is_an_error(case: Case) -> None:
 
 @pytest.mark.parametrize("case", CASES, ids=IDS)
 async def test_timeout_is_an_error(case: Case) -> None:
-    result, _ = await _run(case, httpx.ReadTimeout("read timed out"))
+    result, _, logs = await _run_logged(case, httpx.ReadTimeout(f"read timed out {KEY}"))
     assert result.status == "error" and result.error == "timed out"
     assert result.cost_usd == 0
+    assert result.raw_ref is not None and result.raw_ref.endswith(":timeout")
+    assert logs and "provider.timeout" in _events(logs)
+
+
+@pytest.mark.parametrize("case", CASES, ids=IDS)
+async def test_every_call_has_the_15_second_timeout(case: Case) -> None:
+    assert TIMEOUT_SECONDS == 15.0
+    with respx.mock() as mock:
+        route = _route(mock, case)
+        route.side_effect = [fixture(case.vendor, "found")]
+        await case.make().lookup(case.input)
+    timeout = route.calls.last.request.extensions["timeout"]
+    assert timeout == {"connect": 15.0, "read": 15.0, "write": 15.0, "pool": 15.0}
 
 
 @pytest.mark.parametrize("case", CASES, ids=IDS)
@@ -308,7 +349,74 @@ async def test_missing_inputs_are_errors_without_a_call() -> None:
         ):
             result = await provider.lookup(empty)
             assert result.status == "error" and result.cost_usd == 0
+            assert result.error_kind == "input"
+        verdict = await FindymailVerifier(FindymailProvider(KEY)).lookup(empty)
+        assert verdict.status == "error" and verdict.error_kind == "input"
         assert any_call.call_count == 0
+    # A row without a domain says nothing about the provider: Settings must not show Failing.
+    for row in providers.status(_settings()):
+        assert row["last_error"] is None and row["last_error_at"] is None
+
+
+async def test_input_error_does_not_clear_a_real_failure() -> None:
+    with respx.mock() as mock:
+        mock.post("https://api.leadmagic.io/v1/people/email-finder").side_effect = [
+            fixture("leadmagic", "401")
+        ]
+        await LeadMagicProvider(KEY).lookup(PERSON)
+    await LeadMagicProvider(KEY).lookup(ProviderInput())
+    row = next(r for r in providers.status(_settings()) if r["key"] == "leadmagic")
+    assert row["last_error"] == REJECTED_KEY
+
+
+async def test_findymail_find_and_verify_health_are_separate() -> None:
+    finder = FindymailProvider(KEY, backoff_seconds=0)
+    with respx.mock() as mock:
+        mock.post("https://app.findymail.com/api/verify").side_effect = [
+            fixture("findymail", "402")
+        ]
+        mock.post("https://app.findymail.com/api/search/name").side_effect = [
+            fixture("findymail", "found")
+        ]
+        assert (await finder.verify("jane.doe@acme.com")).error == "out of credits"
+        assert (await finder.lookup(PERSON)).status == "found"
+    rows = {(r["key"], r["kind"]): r for r in providers.status(_settings())}
+    assert rows[("findymail", "email_finder")]["last_error"] is None
+    assert rows[("findymail", "email_verifier")]["last_error"] == "out of credits"
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        fixture("prospeo", "bad_400"),
+        httpx.Response(400, text="<html>Bad Request</html>"),
+        httpx.Response(200, text="not json"),
+    ],
+    ids=["400-without-error-field", "400-not-json", "200-not-json"],
+)
+async def test_prospeo_unreadable_answer_is_an_error(response: httpx.Response) -> None:
+    with respx.mock() as mock:
+        mock.post("https://api.prospeo.io/enrich-person").side_effect = [response]
+        with structlog.testing.capture_logs() as logs:
+            result = await ProspeoProvider(KEY, backoff_seconds=0).lookup(PERSON)
+    assert result.status == "error" and result.error_kind == "vendor"
+    assert result.cost_usd == 0
+    assert logs and "provider.http_error" in _events(logs)
+    _assert_key_never_logged(logs, result)
+
+
+async def test_prospeo_internal_error_is_retried_like_a_5xx() -> None:
+    with respx.mock() as mock:
+        route = mock.post("https://api.prospeo.io/enrich-person")
+        route.side_effect = [fixture("prospeo", "internal_error"), fixture("prospeo", "found")]
+        result = await ProspeoProvider(KEY, backoff_seconds=0).lookup(PERSON)
+    assert route.call_count == 2 and result.status == "found"
+    with respx.mock() as mock:
+        route = mock.post("https://api.prospeo.io/enrich-person")
+        route.side_effect = [fixture("prospeo", "internal_error")] * 2
+        result = await ProspeoProvider(KEY, backoff_seconds=0).lookup(PERSON)
+    assert route.call_count == 2
+    assert result.status == "error" and result.error == "vendor error"
 
 
 async def test_transport_error_never_leaks_the_key() -> None:
@@ -318,7 +426,8 @@ async def test_transport_error_never_leaks_the_key() -> None:
         ).side_effect = httpx.ConnectError(f"failed with header {KEY}")
         with structlog.testing.capture_logs() as logs:
             result = await LeadMagicProvider(KEY).lookup(PERSON)
-    assert result.status == "error"
+    assert result.status == "error" and result.raw_ref == "leadmagic:transport"
+    assert logs and "provider.transport_error" in _events(logs)
     _assert_key_never_logged(logs, result)
 
 
@@ -326,15 +435,15 @@ async def test_transport_error_never_leaks_the_key() -> None:
 
 
 def _settings(**keys: str) -> Settings:
-    base: dict[str, Any] = {
+    values: dict[str, Any] = {
         "leadmagic_api_key": None,
         "findymail_api_key": None,
         "prospeo_api_key": None,
         "pdl_api_key": None,
         "hunter_api_key": None,
     }
-    base |= {k: SecretStr(v) for k, v in keys.items()}
-    return Settings(_env_file=None, **base)  # type: ignore[call-arg]
+    values |= {k: SecretStr(v) for k, v in keys.items()}
+    return Settings(_env_file=None, **values)  # type: ignore[call-arg]
 
 
 def test_configured_keyed_only_in_workspace_order() -> None:

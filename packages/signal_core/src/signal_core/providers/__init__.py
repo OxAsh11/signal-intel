@@ -55,6 +55,11 @@ class ProviderSpec:
     kind: ProviderKind
     setting: str  # the Settings attribute that holds the key
     build: Factory
+    health_key: str | None = None  # where its last error is kept, when not `key`
+
+    @property
+    def health(self) -> str:
+        return self.health_key or self.key
 
 
 PROVIDERS: tuple[ProviderSpec, ...] = (
@@ -69,6 +74,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "email_finder",
         "findymail_api_key",
         lambda k, p, c: FindymailProvider(k, unit_price=p, client=c),
+        "findymail_find",
     ),
     ProviderSpec(
         "prospeo",
@@ -81,6 +87,7 @@ PROVIDERS: tuple[ProviderSpec, ...] = (
         "email_verifier",
         "findymail_api_key",
         lambda k, p, c: FindymailVerifier(FindymailProvider(k, verify_price=p, client=c)),
+        "findymail_verify",
     ),
     ProviderSpec(
         "pdl_company",
@@ -156,11 +163,14 @@ class ProviderStatus(TypedDict):
 
 
 def status(settings: Settings | None = None) -> list[ProviderStatus]:
-    """One row per registry entry, for Settings → Providers. Never includes a key."""
+    """One row per registry entry, for Settings → Providers. Never includes a key.
+
+    Findymail has two rows (find, verify) whose health is kept apart.
+    """
     settings = settings or get_settings()
     rows: list[ProviderStatus] = []
     for spec in PROVIDERS:
-        h = health(spec.key)
+        h = health(spec.health)
         price_key = "findymail_verify" if spec.kind == "email_verifier" else spec.key
         rows.append(
             {

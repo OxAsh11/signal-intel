@@ -22,6 +22,8 @@ from signal_core.providers.base import (
     ProviderResult,
     error_result,
     found,
+    http_ref,
+    input_error,
     not_found,
 )
 
@@ -47,7 +49,7 @@ class LeadMagicProvider(HttpProvider):
         has_person = "first_name" in body or "full_name" in body
         has_company = "domain" in body or "company_name" in body
         if not (has_person and has_company) and "profile_url" not in body:
-            return error_result(self.key, "needs a name and a domain")
+            return input_error(self.key, "needs a name and a domain")
 
         outcome = await self._call(
             "POST",
@@ -56,7 +58,7 @@ class LeadMagicProvider(HttpProvider):
             json=body,
         )
         if outcome.error:
-            return error_result(self.key, outcome.error, f"leadmagic:http:{outcome.status_code}")
+            return error_result(self.key, outcome.error, http_ref("leadmagic", outcome))
         data = outcome.body if isinstance(outcome.body, dict) else {}
         email = data.get("email")
         if not email or data.get("domain_mismatch") or data.get("status") != "valid":

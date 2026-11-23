@@ -26,6 +26,8 @@ from signal_core.providers.base import (
     ProviderResult,
     error_result,
     found,
+    http_ref,
+    input_error,
     not_found,
 )
 
@@ -68,7 +70,7 @@ class PdlCompany(HttpProvider):
         elif input.company_name:
             params = {"name": input.company_name}
         else:
-            return error_result(self.key, "needs a domain")
+            return input_error(self.key, "needs a domain")
         outcome = await self._call(
             "GET",
             COMPANY_URL,
@@ -77,7 +79,7 @@ class PdlCompany(HttpProvider):
             pass_through=frozenset({404}),
         )
         if outcome.error:
-            return error_result(self.key, outcome.error, f"pdl:http:{outcome.status_code}")
+            return error_result(self.key, outcome.error, http_ref("pdl", outcome))
         body = outcome.body if isinstance(outcome.body, dict) else {}
         if outcome.status_code == 404 or not body.get("name"):
             return not_found(self.key, "pdl:company-enrich")
@@ -131,7 +133,7 @@ class PdlPerson(HttpProvider):
 
     async def lookup(self, input: ProviderInput) -> ProviderResult:
         if not input.domain:
-            return error_result(self.key, "needs a domain")
+            return input_error(self.key, "needs a domain")
         outcome = await self._call(
             "POST",
             PERSON_URL,
@@ -148,7 +150,7 @@ class PdlPerson(HttpProvider):
             pass_through=frozenset({404}),
         )
         if outcome.error:
-            return error_result(self.key, outcome.error, f"pdl:http:{outcome.status_code}")
+            return error_result(self.key, outcome.error, http_ref("pdl", outcome))
         body = outcome.body if isinstance(outcome.body, dict) else {}
         records = body.get("data") if outcome.status_code != 404 else None
         rows = records if isinstance(records, list) else []

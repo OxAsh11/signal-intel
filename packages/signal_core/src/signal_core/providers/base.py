@@ -17,6 +17,7 @@ callers that have no table row yet.
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -31,6 +32,9 @@ log = get_logger(__name__)
 
 ProviderKind = Literal["email_finder", "email_verifier", "company", "person_search"]
 ResultStatus = Literal["found", "not_found", "error"]
+# "vendor": the provider failed (key, credits, rate limit, 5xx, timeout) and Settings shows it as
+# Failing. "input": the row lacked what the lookup needs; the provider itself is fine.
+ErrorKind = Literal["vendor", "input"]
 
 TIMEOUT_SECONDS = 15.0
 RETRY_BACKOFF_SECONDS = 1.0
@@ -92,6 +96,7 @@ class ProviderResult(BaseModel):
     billable_units: int = 0
     cost_usd: Decimal = Decimal(0)
     error: str | None = None
+    error_kind: ErrorKind | None = None
 
 
 @runtime_checkable
@@ -151,11 +156,13 @@ async def request_json(
     client: httpx.AsyncClient | None = None,
     backoff_seconds: float = RETRY_BACKOFF_SECONDS,
     pass_through: frozenset[int] = frozenset(),
+    retry_on: Callable[[int, Any], bool] | None = None,
 ) -> HttpOutcome:
     """One vendor call: 15 s timeout, one retry on 429/5xx, the key scrubbed from every reason.
 
     A 2xx, or a status in `pass_through` (a vendor that says "not found" with 404 or 400), comes
     back with its body for the adapter to read; any other status comes back as an error reason.
+    `retry_on(status, body)` marks other answers as transient (Prospeo's 400 INTERNAL_ERROR).
     """
     owned = client is None
     http = client or httpx.AsyncClient(timeout=TIMEOUT_SECONDS)
@@ -174,20 +181,28 @@ async def request_json(
                 return HttpOutcome(None, error="could not reach the provider")
 
             code = response.status_code
-            if 200 <= code < 300 or code in pass_through:
-                return HttpOutcome(code, _json_or_none(response))
+            body = _json_or_none(response)
             retryable = code == 429 or code >= 500
+            if not retryable and retry_on is not None:
+                retryable = retry_on(code, body)
             if retryable and attempt == 1:
                 log.info("provider.retry", provider=provider, status_code=code)
                 await asyncio.sleep(_retry_after(response, backoff_seconds))
                 continue
+            if 200 <= code < 300 or code in pass_through:
+                return HttpOutcome(code, body)
             reason = _reason_for(code)
-            log.warning("provider.http_error", provider=provider, status_code=code, reason=reason)
-            return HttpOutcome(code, _json_or_none(response), error=reason)
+            log_http_error(provider, code, reason)
+            return HttpOutcome(code, body, error=reason)
         raise AssertionError("unreachable")  # pragma: no cover
     finally:
         if owned:
             await http.aclose()
+
+
+def log_http_error(provider: str, status_code: int | None, reason: str) -> None:
+    """The one log line for a vendor refusal: provider, status and reason. Never a key or body."""
+    log.warning("provider.http_error", provider=provider, status_code=status_code, reason=reason)
 
 
 def _retry_after(response: httpx.Response, default: float) -> float:
@@ -213,9 +228,15 @@ class ProviderHealth:
 _HEALTH: dict[str, ProviderHealth] = {}
 
 
-def record(result: ProviderResult) -> ProviderResult:
-    """Remember the provider's latest error for Settings → Providers ("Failing")."""
-    health = _HEALTH.setdefault(result.provider, ProviderHealth())
+def record(result: ProviderResult, health_key: str | None = None) -> ProviderResult:
+    """Remember the provider's latest vendor error for Settings → Providers ("Failing").
+
+    Input errors (a row without a domain) say nothing about the provider and are not recorded.
+    `health_key` separates one vendor's capabilities (findymail_find, findymail_verify).
+    """
+    if result.status == "error" and result.error_kind == "input":
+        return result
+    health = _HEALTH.setdefault(health_key or result.provider, ProviderHealth())
     if result.status == "error":
         health.last_error = result.error
         health.last_error_at = datetime.now(UTC)
@@ -233,12 +254,36 @@ def reset_health() -> None:
     _HEALTH.clear()
 
 
-def error_result(provider: str, reason: str, raw_ref: str | None = None) -> ProviderResult:
-    return record(ProviderResult(provider=provider, status="error", error=reason, raw_ref=raw_ref))
+def http_ref(vendor: str, outcome: HttpOutcome) -> str:
+    """A short reference for a failed call: the HTTP status, or timeout / transport."""
+    if outcome.status_code is not None:
+        return f"{vendor}:http:{outcome.status_code}"
+    return f"{vendor}:timeout" if outcome.error == "timed out" else f"{vendor}:transport"
 
 
-def not_found(provider: str, raw_ref: str | None = None) -> ProviderResult:
-    return record(ProviderResult(provider=provider, status="not_found", raw_ref=raw_ref))
+def error_result(
+    provider: str, reason: str, raw_ref: str | None = None, *, health_key: str | None = None
+) -> ProviderResult:
+    """A vendor failure: recorded, so Settings shows the provider as Failing."""
+    return record(
+        ProviderResult(
+            provider=provider, status="error", error=reason, error_kind="vendor", raw_ref=raw_ref
+        ),
+        health_key,
+    )
+
+
+def input_error(provider: str, reason: str) -> ProviderResult:
+    """The row lacks what the lookup needs. No call was made; the provider's health is untouched."""
+    return ProviderResult(provider=provider, status="error", error=reason, error_kind="input")
+
+
+def not_found(
+    provider: str, raw_ref: str | None = None, *, health_key: str | None = None
+) -> ProviderResult:
+    return record(
+        ProviderResult(provider=provider, status="not_found", raw_ref=raw_ref), health_key
+    )
 
 
 def found(
@@ -249,6 +294,7 @@ def found(
     units: int,
     unit_price: Decimal,
     raw_ref: str | None = None,
+    health_key: str | None = None,
 ) -> ProviderResult:
     return record(
         ProviderResult(
@@ -259,7 +305,8 @@ def found(
             raw_ref=raw_ref,
             billable_units=units,
             cost_usd=unit_price * units,
-        )
+        ),
+        health_key,
     )
 
 
@@ -294,6 +341,7 @@ class HttpProvider:
         json: Any = None,
         params: dict[str, Any] | None = None,
         pass_through: frozenset[int] = frozenset(),
+        retry_on: Callable[[int, Any], bool] | None = None,
     ) -> HttpOutcome:
         return await request_json(
             provider=self.key,
@@ -306,4 +354,5 @@ class HttpProvider:
             client=self._client,
             backoff_seconds=self._backoff,
             pass_through=pass_through,
+            retry_on=retry_on,
         )

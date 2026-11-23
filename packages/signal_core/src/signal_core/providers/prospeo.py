@@ -25,6 +25,9 @@ from signal_core.providers.base import (
     ProviderResult,
     error_result,
     found,
+    http_ref,
+    input_error,
+    log_http_error,
     not_found,
 )
 
@@ -37,6 +40,15 @@ _ERRORS = {
     "INVALID_REQUEST": "request refused",
     "INTERNAL_ERROR": "vendor error",
 }
+
+
+def _transient(status_code: int, body: Any) -> bool:
+    """Prospeo reports its own server errors as 400 INTERNAL_ERROR: retry them like a 5xx."""
+    return (
+        status_code == 400
+        and isinstance(body, dict)
+        and str(body.get("error_code") or "") == "INTERNAL_ERROR"
+    )
 
 
 class ProspeoProvider(HttpProvider):
@@ -58,7 +70,7 @@ class ProspeoProvider(HttpProvider):
         has_person = "first_name" in data or "full_name" in data
         has_company = "company_website" in data or "company_name" in data
         if not (has_person and has_company) and "linkedin_url" not in data:
-            return error_result(self.key, "needs a name and a domain")
+            return input_error(self.key, "needs a name and a domain")
 
         outcome = await self._call(
             "POST",
@@ -66,15 +78,24 @@ class ProspeoProvider(HttpProvider):
             {"X-KEY": self._api_key, "Content-Type": "application/json"},
             json={"data": data, "only_verified_email": True},
             pass_through=frozenset({400}),
+            retry_on=_transient,
         )
         if outcome.error:
-            return error_result(self.key, outcome.error, f"prospeo:http:{outcome.status_code}")
-        body = outcome.body if isinstance(outcome.body, dict) else {}
+            return error_result(self.key, outcome.error, http_ref("prospeo", outcome))
+        if not isinstance(outcome.body, dict):
+            log_http_error(self.key, outcome.status_code, "unexpected answer")
+            return error_result(self.key, "unexpected answer", http_ref("prospeo", outcome))
+        body: dict[str, Any] = outcome.body
+        if outcome.status_code == 400 and not body.get("error"):
+            log_http_error(self.key, 400, "request refused")
+            return error_result(self.key, "request refused", http_ref("prospeo", outcome))
         if body.get("error"):
             code = str(body.get("error_code") or "")
             if code == "NO_MATCH":
                 return not_found(self.key, "prospeo:enrich-person")
-            return error_result(self.key, _ERRORS.get(code, "request refused"), f"prospeo:{code}")
+            reason = _ERRORS.get(code, "request refused")
+            log_http_error(self.key, outcome.status_code, reason)
+            return error_result(self.key, reason, f"prospeo:{code}")
 
         raw_person = body.get("person")
         person: dict[str, Any] = raw_person if isinstance(raw_person, dict) else {}
