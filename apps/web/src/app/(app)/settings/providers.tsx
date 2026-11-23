@@ -1,5 +1,5 @@
 import { atLeast, getOrgContext } from '@/lib/org';
-import { MoveProviderButton } from './move-provider-button';
+import { WaterfallOrder } from './waterfall-order';
 import { createClient } from '@/lib/supabase/server';
 
 type DbRow = {
@@ -131,25 +131,7 @@ export async function Providers() {
         </table>
       </div>
 
-      <div className="flex flex-col gap-2" data-waterfall-order="">
-        <h3 className="m-0 text-[15px] font-semibold">Waterfall order</h3>
-        <p className="m-0 text-[13px] text-ink-muted">
-          {canEdit ? 'Admins can move a provider up or down. Everyone else sees the order read-only.' : 'The order is read-only for your role.'}
-        </p>
-        <ol className="m-0 flex flex-col gap-1 p-0">
-          {order.map((key, i) => (
-            <li key={key} className="flex items-center justify-between gap-2 rounded-md border border-line px-3 py-2">
-              <span className="font-semibold" data-order-key={key}>{LABELS[key] ?? key}</span>
-              {canEdit ? (
-                <span className="flex items-center gap-1">
-                  <MoveProviderButton ws={ws} order={order} from={i} delta={-1} label={LABELS[key] ?? key} glyph="↑" disabled={i === 0} />
-                  <MoveProviderButton ws={ws} order={order} from={i} delta={1} label={LABELS[key] ?? key} glyph="↓" disabled={i === order.length - 1} />
-                </span>
-              ) : null}
-            </li>
-          ))}
-        </ol>
-      </div>
+      <WaterfallOrder ws={ws} order={order} canEdit={canEdit} labels={LABELS} />
     </section>
   );
 }
