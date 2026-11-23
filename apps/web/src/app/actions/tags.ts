@@ -13,6 +13,13 @@ async function rpc(fn: string, args: Record<string, unknown>) {
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
+export async function loadWorkspaceTags(ws: string): Promise<{ id: string; name: string; colour: string }[]> {
+  const supabase = await createClient();
+  if (!supabase) return [];
+  const { data } = await supabase.from('account_tag').select('id, name, colour').eq('workspace_id', ws).order('name');
+  return (data as unknown as { id: string; name: string; colour: string }[]) ?? [];
+}
+
 export async function saveTag(form: FormData) {
   const ws = text(form, 'workspace');
   const name = text(form, 'name');
@@ -29,14 +36,13 @@ export async function deleteTag(form: FormData) {
   revalidatePath('/settings');
 }
 
-export async function tagAccounts(_: { error?: string } | undefined, form: FormData) {
+export async function tagAccounts(form: FormData) {
   const ws = text(form, 'workspace');
   const tag = text(form, 'tag');
   const on = form.get('on') === 'on' || form.get('on') === 'true';
   const ids = form.getAll('account').map((v) => String(v));
-  if (!ws || !tag || !ids.length) return { error: 'Missing data.' };
+  if (!ws || !tag || !ids.length) return;
   const { error } = await rpc('tag_accounts', { p_ws: ws, p_tag: tag, p_account_ids: ids, p_on: on });
-  if (error) return { error };
+  if (error) console.error(error);
   revalidatePath('/workspace');
-  return { ok: true } as { error?: string; ok?: boolean };
 }

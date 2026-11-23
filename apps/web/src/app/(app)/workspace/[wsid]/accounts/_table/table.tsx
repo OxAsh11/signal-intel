@@ -136,6 +136,7 @@ export function AccountsTable({
           briefId={briefId}
           onRun={(title, jobs) => setConfirm({ title, jobs })}
           onClear={() => setSelected(new Set())}
+          ws={ws}
         />
       ) : null}
       {confirm ? <RunConfirm ws={ws} title={confirm.title} jobs={confirm.jobs} onClose={() => setConfirm(null)} /> : null}

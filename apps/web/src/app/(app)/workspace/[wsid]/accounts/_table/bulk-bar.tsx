@@ -1,10 +1,11 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { formatDate } from './cell';
 import { cellText, csvCell } from './csv';
 import type { RunJob } from './run-confirm';
 import type { Column, TableRow } from './types';
+import { tagAccounts, loadWorkspaceTags } from '@/app/actions/tags';
 
 const SOON: { label: string; why: string }[] = [
   { label: 'Add to sequence', why: 'Arrives with the Email engine' },
@@ -50,6 +51,7 @@ export function BulkBar({
   briefId,
   onRun,
   onClear,
+  ws,
 }: {
   rows: TableRow[];
   columns: Column[];
@@ -57,9 +59,16 @@ export function BulkBar({
   briefId: string | null;
   onRun: (title: string, jobs: RunJob[]) => void;
   onClear: () => void;
+  ws: string;
 }) {
   const [picking, setPicking] = useState(false);
   const [chosen, setChosen] = useState<ReadonlySet<string>>(new Set());
+  const [tags, setTags] = useState<{ id: string; name: string; colour: string }[]>([]);
+  const [labelTag, setLabelTag] = useState('');
+  const [labelTagName, setLabelTagName] = useState('');
+  useEffect(() => {
+    void loadWorkspaceTags(ws).then(setTags);
+  }, [ws]);
   const runnable = columns.filter((c) => c.fill_method === 'extract' || c.fill_method === 'formula');
   const n = rows.length;
 
@@ -88,10 +97,41 @@ export function BulkBar({
         </button>
         {canEdit ? (
           <>
-            <button type="button" className="si-btn si-btn-sm" disabled title="Arrives with saved segments">
-              Label
-            </button>
-            {SOON.map((s) => (
+            {tags.length ? (
+              <form action={tagAccounts} data-bulk-label="" className="flex items-center gap-2">
+                <input type="hidden" name="workspace" value={ws} />
+                <input type="hidden" name="tag" value={labelTag || tags[0]?.id || ''} />
+                {rows.map((r) => (
+                  <input key={r.entity_id} type="hidden" name="account" value={r.entity_id} />
+                ))}
+                <input type="hidden" name="on" value="on" />
+                <select
+                  className="si-btn si-btn-sm"
+                  value={labelTagName || tags[0]?.name || ''}
+                  onChange={(e) => {
+                    const t = tags.find((x) => x.name === e.target.value);
+                    if (t) {
+                      setLabelTag(t.id);
+                      setLabelTagName(t.name);
+                    }
+                  }}
+                >
+                  {tags.map((t) => (
+                    <option key={t.id} value={t.name}>
+                      {t.name}
+                    </option>
+                  ))}
+                </select>
+                <button type="submit" className="si-btn si-btn-sm">
+                  Add tag
+                </button>
+              </form>
+            ) : (
+              <button type="button" className="si-btn si-btn-sm" disabled title="Arrives with saved segments">
+                Label
+              </button>
+            )}
+            {SOON.filter((s) => s.label !== 'Label').map((s) => (
               <button key={s.label} type="button" className="si-btn si-btn-sm" disabled title={s.why}>
                 {s.label}
                 <span className="sr-only"> ({s.why})</span>
