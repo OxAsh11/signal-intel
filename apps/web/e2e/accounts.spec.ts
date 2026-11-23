@@ -391,7 +391,10 @@ test.describe('Accounts table', () => {
       await expect(old).toHaveCount(1);
       await expect(old.locator('.line-through').first()).toBeVisible();
       await expect(old).toContainText('overridden by the newer value 40');
-      await page.keyboard.press('Escape');
+      // Close the panel (its backdrop covers the table): after Save the focus may have left the
+      // panel, so use its Close button rather than Escape, and wait until it is gone.
+      await panel(page).getByRole('button', { name: 'Close' }).click();
+      await expect(panel(page)).toBeHidden();
       await expect(cell(page, 'Alpha Grid', s.sites)).toContainText('40');
 
       // Mark wrong acts on the value the cell shows (the manual 40), not on the overridden source.
