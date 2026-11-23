@@ -30,6 +30,7 @@ export function fieldInfos(columns: FilterColumn[]): FieldInfo[] {
     { id: 'band', label: 'Band', ops: ['one_of'], options: [...Band.options] },
     { id: 'stage', label: 'Stage', ops: ['one_of'], options: [...Stage.options] },
     { id: 'label', label: 'Label', ops: ['one_of'], options: [] },
+    { id: 'tag', label: 'Tag', ops: ['one_of'], options: [] },
     { id: 'name', label: 'Name', ops: ['contains', 'eq', 'is_empty', 'is_not_empty'], options: [] },
     { id: 'domain', label: 'Domain', ops: ['contains', 'eq', 'is_empty', 'is_not_empty'], options: [] },
     { id: 'created_at', label: 'Created', ops: ['within_days', 'older_than_days'], options: [] },
@@ -74,6 +75,7 @@ function blank(info: FieldInfo): Cond {
 function complete(columns: FilterColumn[], c: Cond): boolean {
   const ed = editorFor(columns, c);
   if (c.field === 'label' && !c.kind.trim()) return false;
+  if (c.field === 'tag') return Array.isArray(c.value) && c.value.length > 0;
   if (ed === 'none') return true;
   if (ed === 'multi') return Array.isArray(c.value) && c.value.length > 0;
   const s = String(c.value ?? '').trim();
@@ -94,6 +96,7 @@ function condAst(columns: FilterColumn[], c: Cond): Record<string, unknown> {
   if (ed === 'number' || ed === 'days') value = Number(c.value);
   else if (ed === 'text' && c.op === 'one_of') value = String(c.value).split(',').map((v) => v.trim()).filter(Boolean);
   else if (ed === 'text' || ed === 'date' || ed === 'one') value = String(c.value).trim();
+  if (id === 'tag') return { field, op: c.op, value: Array.isArray(c.value) ? c.value : [] };
   return { field, op: c.op, value };
 }
 
