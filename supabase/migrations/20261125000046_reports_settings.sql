@@ -257,8 +257,19 @@ as $$
 declare v_rows jsonb;
 begin
   if not app.has_workspace_role(p_ws, 'Viewer') then raise exception 'permission denied' using errcode = '42501'; end if;
-  select coalesce(jsonb_agg(jsonb_build_object('id', s.id, 'name', s.name)), '[]'::jsonb) into v_rows
-    from public.segment s where s.workspace_id = p_ws;
+  select coalesce(jsonb_agg(jsonb_build_object('id', s.id, 'name', s.name, 'count', m.count)), '[]'::jsonb) into v_rows
+    from public.segment s
+    left join lateral (
+      select count(distinct l.account_id)::int as count
+        from public.account_tag_link l
+        join public.account_tag t on t.id = l.tag_id
+        where t.workspace_id = p_ws and jsonb_extract_path_text(s.filter, 'value') is not null
+          and t.name = any(array(
+            select jsonb_array_elements_text(coalesce(s.filter -> 'value', '[]'::jsonb))
+          ))
+          and s.workspace_id = p_ws
+    ) m on true
+    where s.workspace_id = p_ws;
   return coalesce(v_rows, '[]'::jsonb);
 end $$;
 

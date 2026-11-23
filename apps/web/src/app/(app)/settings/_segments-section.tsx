@@ -6,12 +6,14 @@ export async function SegmentsSection({ ws }: { ws: string }) {
   const { data: segments } = supabase
     ? await supabase.from('segment').select('id, name').eq('workspace_id', ws).order('name')
     : { data: [] };
+  const { data: counts } = supabase ? await supabase.rpc('segment_counts', { p_ws: ws }) : { data: [] };
+  const countMap = new Map((counts as { id: string; count: number }[] | null)?.map((c) => [c.id, c.count]));
   return (
     <section className="si-card">
       <h2 className="si-h2">Segments</h2>
       <ul className="m-0 pl-5 text-[14px]">
-        {(segments ?? []).map((s: { id: string; name: string }) => (
-          <li key={s.id}>{s.name}</li>
+        {(segments ?? []).map((s: { id: string; name: string; count?: number }) => (
+          <li key={s.id}>{s.name} · {countMap.get(s.id) ?? 0} member(s)</li>
         ))}
         {!(segments ?? []).length ? <li className="text-ink-muted">No segments yet.</li> : null}
       </ul>
