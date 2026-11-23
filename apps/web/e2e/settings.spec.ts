@@ -103,18 +103,23 @@ test.describe('Settings → Providers and the phone top bar', () => {
   });
 
   test('an Admin reorders the waterfall and it persists', async ({ page }) => {
+    const savedOrder = async () => {
+      const [{ saved }] = await sql<{ saved: string[] }>(
+        `select array(select jsonb_array_elements_text(provider_order)) as saved
+           from public.workspace_settings where workspace_id = $1`,
+        [workspace.ws],
+      );
+      return saved;
+    };
     await page.goto('/settings');
     await expect.poll(() => order(page)).toEqual(['LeadMagic', 'Findymail', 'Prospeo']);
     await section(page).getByRole('button', { name: 'Move LeadMagic down' }).click();
+    // Check the write first: a UI-only poll cannot tell a cached reply from a wrong order.
+    await expect.poll(savedOrder).toEqual(['findymail', 'leadmagic', 'prospeo']);
     await expect.poll(() => order(page)).toEqual(['Findymail', 'LeadMagic', 'Prospeo']);
     await page.reload();
     await expect.poll(() => order(page)).toEqual(['Findymail', 'LeadMagic', 'Prospeo']);
-    const [{ saved }] = await sql<{ saved: string[] }>(
-      `select array(select jsonb_array_elements_text(provider_order)) as saved
-         from public.workspace_settings where workspace_id = $1`,
-      [workspace.ws],
-    );
-    expect(saved).toEqual(['findymail', 'leadmagic', 'prospeo']);
+    expect(await savedOrder()).toEqual(['findymail', 'leadmagic', 'prospeo']);
     await page.screenshot({ path: 'test-results/settings-provider-order.png', fullPage: true });
   });
 

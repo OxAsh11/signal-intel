@@ -509,7 +509,8 @@ test.describe('Accounts table', () => {
       await add.getByRole('radio', { name: 'AI research' }).check();
       await add.getByLabel('Name', { exact: true }).fill('Recent announcement');
       await add.getByLabel('Question').fill('What did this company announce recently about its operations?');
-      await add.getByLabel('Drone programme').check();
+      // The input is sr-only inside its label; click the label text so React sees the change.
+      await add.getByText('Drone programme', { exact: true }).click();
       await add.getByLabel('Search the web').check();
       await add.getByLabel('Max pages').selectOption('2');
       await page.screenshot({ path: 'test-results/add-column-research.png', fullPage: true });
@@ -598,7 +599,9 @@ test.describe('Accounts table', () => {
       // with a stored receipt. No vendor calls: every row is written directly as the worker
       // would, so CI (no keys, no fake worker) stays deterministic.
       const [{ alpha }] = await sql<{ alpha: string }>(
-        `select id as alpha from public.entity where workspace_id = $1 and display_name = 'Alpha Grid'`,
+        `select e.id as alpha from public.entity e
+           join public.account a on a.entity_id = e.id
+          where a.workspace_id = $1 and e.display_name = 'Alpha Grid'`,
         [w.ws],
       );
 
