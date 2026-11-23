@@ -23,7 +23,7 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
   if (!ctx?.workspace || !supabase) return null;
 
   const { data: brief, error } = await supabase
-    .from('brief').select('id, name, state, intake_status, draft_config, current_version_id, updated_at')
+    .from('brief').select('id, name, state, intake_status, intake_steps, draft_config, current_version_id, updated_at')
     .eq('id', id).eq('workspace_id', ctx.workspace.id).maybeSingle();
 
   if (error || !brief) notFound();
@@ -87,7 +87,7 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
       <div className="si-cols">
         <div className="flex min-w-0 flex-col gap-4">
           {brief.intake_status === 'pending' ? (
-            <BriefIntakeLoading briefId={id} />
+            <BriefIntakeLoading briefId={id} steps={Array.isArray(brief.intake_steps) ? brief.intake_steps : []} />
           ) : (
             <BriefEditor brief={briefForEditor} canEdit={canEdit} workspacePredicates={workspacePredicates} />
           )}

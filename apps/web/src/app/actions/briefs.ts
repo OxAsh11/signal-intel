@@ -17,6 +17,22 @@ async function rpc(fn: string, args: Record<string, unknown>) {
 
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
+/** Generate a Brief from a website: the worker reads the site and drafts the whole Brief. */
+export async function generateBrief(form: FormData): Promise<void> {
+  const workspace = text(form, 'workspace');
+  const domain = text(form, 'domain');
+  const description = text(form, 'description');
+  if (!workspace || !domain) return;
+  const { data, error } = await rpc('generate_brief', {
+    p_ws: workspace,
+    p_domain: domain,
+    p_description: description || null,
+    p_name_auto: true,
+  });
+  if (error) return;
+  redirect(`/briefs/${data as string}`);
+}
+
 /** Brief Studio step 1: everything the person wrote goes to the AI, which drafts the whole Brief. */
 export async function createBrief(_: ActionState, form: FormData): Promise<ActionState> {
   const workspace = text(form, 'workspace');
