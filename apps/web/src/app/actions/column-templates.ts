@@ -12,6 +12,11 @@ export async function listColumnTemplates(ws: string) {
   return (data as unknown[]) ?? [];
 }
 
+export async function loadColumnTemplates(ws: string): Promise<Array<{ id: string; name: string; spec: unknown }>> {
+  const data = await listColumnTemplates(ws);
+  return data as Array<{ id: string; name: string; spec: unknown }>;
+}
+
 export async function saveColumnTemplate(form: FormData) {
   const ws = text(form, 'workspace');
   const name = text(form, 'name');

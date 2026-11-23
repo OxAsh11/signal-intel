@@ -15,6 +15,7 @@ import {
   type RunEstimate,
   type RunTarget,
 } from '@/app/actions/columns';
+import { loadColumnTemplates } from '@/app/actions/column-templates';
 import { columnKeyProblem, keyFromLabel, PENDING_CHANGES, TYPE_LABELS, type ColumnSpec, type ValueType } from '@/lib/briefs';
 import { formatValue } from './cell';
 import { estimateText, RunOutcome, usd, useRun } from './run-confirm';
@@ -152,6 +153,7 @@ function AddColumnDrawer({
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ColumnPreview | null>(null);
   const [busy, setBusy] = useState(false);
+  const [library, setLibrary] = useState<{ id: string; name: string; spec: unknown }[]>([]);
   const panelRef = useRef<HTMLElement>(null);
   const returnFocus = useRef<HTMLElement | null>(null);
 
@@ -168,6 +170,16 @@ function AddColumnDrawer({
       live = false;
     };
   }, [ws, briefId]);
+
+  useEffect(() => {
+    let live = true;
+    void loadColumnTemplates(ws).then((res) => {
+      if (live) setLibrary(res);
+    });
+    return () => {
+      live = false;
+    };
+  }, [ws]);
 
   // The worker works the preview out; ask again until it is ready or failed.
   const previewId = step.at === 'preview' ? step.previewId : null;
@@ -358,6 +370,28 @@ function AddColumnDrawer({
               <input id="add-col-label" className={field} value={label} maxLength={80} onChange={(e) => setLabel(e.target.value)} autoFocus />
               {label.trim() ? <span className="text-[12px] text-ink-muted">Key: <code className="si-mono">{key}</code></span> : null}
             </div>
+
+            {library.length ? (
+              <div className="flex flex-col gap-1">
+                <label className="si-label">From library</label>
+                <div className="flex flex-wrap gap-2">
+                  {library.map((t) => (
+                    <button
+                      key={t.id}
+                      type="button"
+                      className="si-ftag border-0 cursor-pointer text-[13px]"
+                      onClick={() => {
+                        const spec = (t.spec ?? {}) as Record<string, unknown>;
+                        setLabel(typeof spec.label === 'string' ? spec.label : t.name);
+                        setAllowed(spec.allowed_values ? String(spec.allowed_values) : '');
+                      }}
+                    >
+                      {t.name}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ) : null}
 
             <div className="flex flex-col gap-1">
               <label htmlFor="add-col-type" className="si-label">Value</label>
