@@ -63,14 +63,15 @@ export async function Providers() {
   const ws = ctx.workspace.id;
   const canEdit = atLeast(ctx.workspaceRole, 'Admin');
 
-  const [{ data, error }, settings, worker] = await Promise.all([
+  const [{ data, error }, { data: saved }, worker] = await Promise.all([
     supabase.rpc('provider_status', { p_ws: ws }),
-    supabase.from('workspace_settings').select('provider_order').eq('workspace_id', ws).maybeSingle(),
+    // POST through an RPC rather than a REST GET: a cached GET can still show the old order
+    // immediately after a Server Action wrote the new one.
+    supabase.rpc('get_provider_order', { p_ws: ws }),
     workerStatus(),
   ]);
   const dbRows = (Array.isArray(data) ? data : []) as DbRow[];
   const prices = new Map(dbRows.map((r) => [r.key, r]));
-  const saved = (settings as { provider_order?: unknown } | null)?.provider_order;
   const order = Array.isArray(saved)
     ? [...saved.filter((k): k is string => typeof k === 'string' && ORDER_KEYS.includes(k))]
     : [];

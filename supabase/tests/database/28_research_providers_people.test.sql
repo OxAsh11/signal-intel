@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(91);
+select plan(92);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A owns Alpha, E is an Editor, K a Viewer, F is signed in but a member of nothing.
@@ -254,6 +254,8 @@ select is((select provider_order from public.workspace_settings where workspace_
 select public.set_provider_order(pg_temp.w(), '["prospeo","leadmagic"]'::jsonb);
 select is((select provider_order from public.workspace_settings where workspace_id = pg_temp.w()),
   '["prospeo","leadmagic"]'::jsonb, '57. an Admin can change the order');
+select is(public.get_provider_order(pg_temp.w()), '["prospeo","leadmagic"]'::jsonb,
+  '57a. Settings reads the saved order back through the RPC');
 select throws_ok(format('select public.set_provider_order(%L::uuid, %L::jsonb)',
                         pg_temp.w(), '["unknown"]'::jsonb),
   '22023', 'unknown provider in the order', '58. an unknown provider is refused');
