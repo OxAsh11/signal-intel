@@ -44,9 +44,10 @@ from psycopg_pool import AsyncConnectionPool
 
 import signal_core.modules.m03_extraction as _m03_extraction
 from signal_core.ai_gateway.gateway import AiGateway
+from signal_core.fill import FillResult, provider_fill, research_fill
 from signal_core.formula import JsonScalar, check_result, evaluate, parse, references
 from signal_core.logging import get_logger
-from signal_core.metering import CallContext
+from signal_core.metering import BudgetGuard, CallContext, PgBudgetGuard
 
 log = get_logger(__name__)
 
@@ -80,7 +81,7 @@ class _Outcome:
         status: str,
         *,
         claim_id: UUID | None = None,
-        inputs: list[str] | None = None,
+        inputs: Any = None,
         not_run_reason: dict[str, Any] | None = None,
         error: str | None = None,
         value: JsonScalar = None,
@@ -103,11 +104,13 @@ async def execute_run(
     run_id: UUID,
     *,
     today: date | None = None,
+    budget: BudgetGuard | None = None,
 ) -> str:
     """Fill the cell of a queued run and return its final status.
 
     A run that is not queued (nor abandoned while running) is left alone and its current status
     returned ("missing" when there is no such run)."""
+    budget = budget or PgBudgetGuard(pool)
     async with pool.connection() as conn:
         cur = await conn.execute(START_SQL, (run_id,))
         run: dict[str, Any] | None = _first(await cur.fetchone())
@@ -119,7 +122,7 @@ async def execute_run(
         log.warning("column_run.reclaimed", run_id=str(run_id))
 
     try:
-        outcome = await _fill(pool, gateway, run_id, run, today or datetime.now(UTC).date())
+        outcome = await _fill(pool, gateway, budget, run_id, run, today or datetime.now(UTC).date())
     except Exception as exc:  # the run shows the failure; retrying would repeat it
         log.warning("column_run.error", run_id=str(run_id), error=type(exc).__name__)
         outcome = _Outcome("error", error=str(exc) or type(exc).__name__)
@@ -176,6 +179,7 @@ async def _write_outcome(pool: AsyncConnectionPool, run_id: UUID, outcome: _Outc
 async def _fill(
     pool: AsyncConnectionPool,
     gateway: AiGateway | None,
+    budget: BudgetGuard,
     run_id: UUID,
     run: dict[str, Any],
     today: date,
@@ -194,7 +198,37 @@ async def _fill(
         return await _fill_formula(pool, run_id, run, today)
     if run["fill_method"] == "extract":
         return await _fill_extract(pool, gateway, run_id, run)
+    if run["fill_method"] == "provider":
+        result = await _fill_provider(pool, budget, run_id, run)
+        return _from_fill(result)
+    if run["fill_method"] == "research":
+        if gateway is None:
+            raise RuntimeError("AI is not set up")
+        result = await research_fill.fill_research(pool, gateway, budget, run, run_id)
+        return _from_fill(result)
     raise ValueError(f"a {run['fill_method']} column cannot be run yet")
+
+
+def _from_fill(result: FillResult) -> _Outcome:
+    """A fill module's decision becomes the same outcome P3 writes at the end of a run."""
+    return _Outcome(
+        result.status,
+        claim_id=result.claim_id,
+        inputs=result.inputs,
+        not_run_reason=result.not_run_reason,
+        error=result.error,
+        value=result.value,
+    )
+
+
+async def _fill_provider(
+    pool: AsyncConnectionPool, budget: BudgetGuard, run_id: UUID, run: dict[str, Any]
+) -> FillResult:
+    """A dotted ``field`` means a company column; otherwise it is the work-email waterfall."""
+    config = run.get("fill_config") or {}
+    if config.get("field"):
+        return await provider_fill.fill_company_field(pool, budget, run, run_id)
+    return await provider_fill.fill_work_email(pool, budget, run, run_id)
 
 
 async def _fill_formula(
