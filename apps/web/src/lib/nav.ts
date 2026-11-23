@@ -30,7 +30,7 @@ export const NAV: NavItem[] = [
   { key: 'sources', label: 'Sources', href: '/sources', group: 'find', job: 'The radars each Brief runs: volume, filtering and yield.' },
   { key: 'accounts', label: 'Accounts', href: '/accounts', group: 'work', job: 'Every account found, with its columns, verdict and evidence.' },
   {
-    key: 'people', label: 'People', href: '/people', group: 'work', placeholder: 'p6',
+    key: 'people', label: 'People', href: '/people', group: 'work',
     job: 'The people at each account: roles, contact points and who to reach first.',
   },
   { key: 'review', label: 'Review', href: '/review', group: 'work', job: 'One queue for every human decision, ordered by how much the answer matters.' },

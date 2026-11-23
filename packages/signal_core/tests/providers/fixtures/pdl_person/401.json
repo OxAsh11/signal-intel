@@ -1,0 +1,10 @@
+{
+  "status_code": 401,
+  "json": {
+    "status": 401,
+    "error": {
+      "type": "authentication_error",
+      "message": "Invalid API key"
+    }
+  }
+}

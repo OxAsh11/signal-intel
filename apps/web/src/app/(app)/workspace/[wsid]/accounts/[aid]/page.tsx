@@ -3,7 +3,10 @@ import Link from 'next/link';
 import { notFound } from 'next/navigation';
 import { BandChip, Card, DerivedValue, EvidenceQuote, FamilyTag, ScoreBreakdown, StageBadge, VerdictBadge } from '@signal/ui';
 import type { Band, Stage, Verdict } from '@signal/contracts';
+import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
+import type { PeopleData, PersonRow } from '../../people/types';
+import { FindPeople } from './find-people';
 
 export const metadata: Metadata = { title: 'Account' };
 
@@ -41,10 +44,19 @@ const host = (url: string | null) => {
  * The account page: the evidence instrument. Verdict and score with their receipts, who to
  * contact, and the next step. Families: mint = judgement, grass = engagement, pool = research.
  */
-export default async function AccountDetailPage({ params }: { params: Promise<{ wsid: string; aid: string }> }) {
-  const { wsid, aid } = await params;
+export default async function AccountDetailPage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ wsid: string; aid: string }>;
+  searchParams: Promise<{ tab?: string }>;
+}) {
+  const [{ wsid, aid }, sp] = await Promise.all([params, searchParams]);
+  const tab = sp.tab === 'people' ? 'people' : 'overview';
   const supabase = await createClient();
   if (!supabase) return null;
+  const ctx = await getOrgContext();
+  const canEdit = atLeast(ctx?.workspaceRole, 'Editor');
   const now = nowMs();
 
   const { data: account } = await supabase
@@ -112,8 +124,32 @@ export default async function AccountDetailPage({ params }: { params: Promise<{ 
         </div>
       </div>
 
-      <div className="si-cols">
-        <div className="flex min-w-0 flex-col gap-6">
+      <nav className="flex gap-4 border-b border-line" aria-label="Account sections">
+        <Link
+          href={`/workspace/${wsid}/accounts/${aid}`}
+          aria-current={tab === 'overview' ? 'page' : undefined}
+          className={tab === 'overview'
+            ? 'si-nav-on border-b-2 border-signal pb-2 text-[14px] text-ink no-underline'
+            : 'pb-2 text-[14px] text-ink-muted no-underline hover:text-ink'}
+        >
+          Overview
+        </Link>
+        <Link
+          href={`/workspace/${wsid}/accounts/${aid}?tab=people`}
+          aria-current={tab === 'people' ? 'page' : undefined}
+          className={tab === 'people'
+            ? 'si-nav-on border-b-2 border-signal pb-2 text-[14px] text-ink no-underline'
+            : 'pb-2 text-[14px] text-ink-muted no-underline hover:text-ink'}
+        >
+          People
+        </Link>
+      </nav>
+
+      {tab === 'people' ? (
+        <AccountPeople ws={wsid} aid={aid} canEdit={canEdit} />
+      ) : (
+        <div className="si-cols">
+          <div className="flex min-w-0 flex-col gap-6">
           <Card family="mint" kind="feature" aria-labelledby="why-h" className="min-h-[260px]">
             <FamilyTag family="mint">Judgement · why now</FamilyTag>
             <h2 id="why-h" className="si-h2 text-[22px]">Why this account, now</h2>
@@ -252,7 +288,66 @@ export default async function AccountDetailPage({ params }: { params: Promise<{ 
             </Card>
           ) : null}
         </aside>
-      </div>
+        </div>
+      )}
     </>
+  );
+}
+
+/** The account's people: those linked by a works_at relationship, plus a costed Find action. */
+async function AccountPeople({ ws, aid, canEdit }: { ws: string; aid: string; canEdit: boolean }) {
+  const supabase = await createClient();
+  if (!supabase) return null;
+  const res = await supabase.rpc('account_table', {
+    p_ws: ws,
+    p_brief: null,
+    p_filter: {},
+    p_sort: [],
+    p_columns: null,
+    p_limit: 200,
+    p_offset: 0,
+    p_entity_type: 'person',
+  });
+  const people = ((res.data as PeopleData | null)?.rows ?? []).filter((r: PersonRow) => r.account_id === aid);
+
+  return (
+    <section aria-label="People at this account" className="flex flex-col gap-4" data-account-people="">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <h2 className="si-h2">
+          {people.length ? `${people.length} ${people.length === 1 ? 'person' : 'people'} at this account` : 'No people yet'}
+        </h2>
+        {canEdit ? <FindPeople ws={ws} account={aid} /> : null}
+      </div>
+      {res.error ? (
+        <p role="alert" className="m-0 text-[13px] text-danger">
+          People could not be loaded: {res.error.message}
+        </p>
+      ) : people.length ? (
+        <div className="si-table-box rounded-md border border-line bg-surface">
+          <table className="si-table">
+            <thead>
+              <tr>
+                <th scope="col">Name</th>
+                <th scope="col">Role</th>
+                <th scope="col">Work email</th>
+                <th scope="col">Location flag</th>
+              </tr>
+            </thead>
+            <tbody>
+              {people.map((p) => (
+                <tr key={p.entity_id} data-row={p.name}>
+                  <td className="font-medium text-ink">{p.name}</td>
+                  <td>{p.title ?? '—'}</td>
+                  <td>{p.work_email ?? '—'}</td>
+                  <td>{p.location_mismatch ? 'Possibly a different office' : '—'}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      ) : (
+        <p className="m-0 text-[13px] text-ink-muted">Find people to see who works at this account.</p>
+      )}
+    </section>
   );
 }

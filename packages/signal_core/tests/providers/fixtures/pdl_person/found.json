@@ -1,0 +1,36 @@
+{
+  "status_code": 200,
+  "json": {
+    "status": 200,
+    "total": 2,
+    "scroll_token": "1117$12.176522",
+    "data": [
+      {
+        "id": "pdl_p1",
+        "full_name": "Jane Doe",
+        "first_name": "Jane",
+        "last_name": "Doe",
+        "job_title": "VP Operations",
+        "work_email": "jane.doe@acme.com",
+        "linkedin_url": "linkedin.com/in/janedoe",
+        "location_name": "Bengaluru, Karnataka, India",
+        "location_locality": "Bengaluru",
+        "location_region": "Karnataka",
+        "location_country": "India"
+      },
+      {
+        "id": "pdl_p2",
+        "full_name": "Ravi Kumar",
+        "first_name": "Ravi",
+        "last_name": "Kumar",
+        "job_title": "Head of Drone Operations",
+        "work_email": true,
+        "linkedin_url": "linkedin.com/in/ravikumar",
+        "location_name": "Mumbai, Maharashtra, India",
+        "location_locality": "Mumbai",
+        "location_region": "Maharashtra",
+        "location_country": "India"
+      }
+    ]
+  }
+}

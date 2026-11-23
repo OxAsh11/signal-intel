@@ -8,7 +8,8 @@ def test_enums_match_appendix() -> None:
     assert [v.value for v in Verdict] == ["Confirmed", "Likely", "Unverified", "Contradicted"]
     assert len(Stage) == 9
     assert Stage.HANDED_OFF == "Handed off"
-    assert len(EventType) == 25
+    assert len(EventType) == 26
+    assert EventType.PEOPLE_FIND_REQUESTED == "people.find_requested"
 
 
 def test_logs_redact_personal_data() -> None:

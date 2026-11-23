@@ -11,5 +11,5 @@ export async function UserMenu() {
       </Link>
     );
   }
-  return <span className="text-ink-muted">{user.name ?? user.email}</span>;
+  return <span className="min-w-0 truncate text-ink-muted" data-user-menu="">{user.name ?? user.email}</span>;
 }

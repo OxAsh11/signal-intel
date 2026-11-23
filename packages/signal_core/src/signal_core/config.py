@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     app_env: Literal["local", "staging", "production", "test"] = "local"
     log_level: str = "info"
     port: int = 8080
+    # Shared with the web app: the small worker HTTP server exposes contact-value reveals and
+    # (later) provider status. No token means the port stays closed.
+    worker_status_token: SecretStr | None = None
+    worker_reveal_port: int = 8081
 
     # Session pooler / direct connection: required for LISTEN/NOTIFY and Procrastinate.
     database_url_session: SecretStr | None = None
@@ -38,6 +42,12 @@ class Settings(BaseSettings):
 
     # Enrichment provider (M7). Without a key the provider is skipped: "Not set up yet".
     hunter_api_key: SecretStr | None = None
+    # P6 data providers (signal_core.providers). Without a key a provider is skipped and
+    # Settings → Providers shows "Not set up yet". PDL_API_KEY serves Company and Person Search.
+    leadmagic_api_key: SecretStr | None = None
+    findymail_api_key: SecretStr | None = None
+    prospeo_api_key: SecretStr | None = None
+    pdl_api_key: SecretStr | None = None
     # Brave Search (M2 web-search radars, targeted search). Unset: "Not set up yet".
     brave_search_api_key: SecretStr | None = None
 

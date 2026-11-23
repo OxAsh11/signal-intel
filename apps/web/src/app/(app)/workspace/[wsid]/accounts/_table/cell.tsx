@@ -22,6 +22,57 @@ export function formatValue(value: unknown, type: string): string {
 
 export const confidenceBand = (c: number): 'H' | 'M' | 'L' => (c >= 80 ? 'H' : c >= 50 ? 'M' : 'L');
 
+/** The last waterfall attempt for one cell, from public.waterfall_attempts. */
+export type WaterfallAttempt = {
+  provider: string;
+  status: 'found' | 'not_found' | 'error' | string;
+  cost_usd: number | string | null;
+  ordinal: number;
+};
+export const WATERFALL_PROVIDERS = ['leadmagic', 'findymail', 'prospeo'];
+
+const attemptStatus = (attempt: WaterfallAttempt | undefined) => {
+  if (!attempt) return { mark: 'Skipped', label: 'Skipped' };
+  if (attempt.status === 'found') return { mark: '✓', label: 'Found' };
+  return { mark: '✗', label: attempt.status === 'error' ? 'Error' : 'Not found' };
+};
+
+/**
+ * A waterfall column expanded into one sub-column per provider. The header shows the vendors; a
+ * cell shows ✓ / ✗ / Skipped from that row's last run. Attempts are read-only evidence — clicking a
+ * sub-column still opens the cell panel, where the cost and error kind are listed.
+ */
+export function WaterfallSubcolumns({
+  attempts = [],
+  header = false,
+}: {
+  attempts?: WaterfallAttempt[];
+  header?: boolean;
+}) {
+  const byProvider = new Map(attempts.map((a) => [a.provider, a]));
+  const providers = [...WATERFALL_PROVIDERS, ...attempts.map((a) => a.provider).filter((p) => !WATERFALL_PROVIDERS.includes(p))];
+  return (
+    <span className="grid min-w-[168px] grid-cols-3 gap-1" data-waterfall-subcolumns="" data-waterfall-header={header ? '' : undefined}>
+      {providers.slice(0, 3).map((name) => {
+        const attempt = byProvider.get(name);
+        const state = attemptStatus(attempt);
+        const cost = attempt?.cost_usd == null ? null : Number(attempt.cost_usd);
+        return (
+          <span
+            key={name}
+            className="inline-flex min-w-0 items-center justify-center gap-1 rounded-sm border border-line px-1 py-0.5 text-[11px] text-ink-muted"
+            data-waterfall-provider={name}
+            data-waterfall-status={attempt?.status ?? 'skipped'}
+            title={header ? name : `${name}: ${state.label}${cost != null ? ` · $${cost.toFixed(3)}` : ''}`}
+          >
+            {header ? <span className="truncate">{name}</span> : <span aria-label={state.label}>{state.mark}</span>}
+          </span>
+        );
+      })}
+    </span>
+  );
+}
+
 function Value({ text }: { text: string }) {
   return (
     <span className="block max-w-[28ch] truncate" title={text}>

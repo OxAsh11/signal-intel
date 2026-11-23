@@ -27,12 +27,19 @@ const PREVIEW_ROWS = 5;
 const VALUE_TYPES = Object.keys(TYPE_LABELS) as ValueType[];
 const HAS_VALUE = new Set(['value', 'derived', 'stale']);
 
-type Kind = 'extract' | 'formula';
-const KINDS: { kind: Kind | 'research' | 'waterfall'; label: string; hint: string; soon?: true }[] = [
+type Kind = 'extract' | 'formula' | 'research' | 'provider';
+const KINDS: { kind: Kind; label: string; hint: string }[] = [
   { kind: 'extract', label: 'Found in sources', hint: 'The AI reads the records collected for each account.' },
   { kind: 'formula', label: 'Formula', hint: 'Computed from other columns. Free, and instant.' },
-  { kind: 'research', label: 'AI research', hint: 'Arrives in P6', soon: true },
-  { kind: 'waterfall', label: 'Provider waterfall', hint: 'Arrives in P6', soon: true },
+  { kind: 'research', label: 'AI research', hint: 'A grounded answer with pages and a receipt. Paid per run.' },
+  { kind: 'provider', label: 'Provider waterfall', hint: 'Work email on people, or a PDL company field. Paid per lookup.' },
+];
+const PROVIDERS = [
+  { key: 'email_waterfall', label: 'Work email (waterfall)' },
+  { key: 'pdl_company', label: 'PDL company field' },
+  { key: 'leadmagic', label: 'LeadMagic' },
+  { key: 'findymail', label: 'Findymail' },
+  { key: 'prospeo', label: 'Prospeo' },
 ];
 
 type Step =
@@ -71,11 +78,11 @@ function previewRows(formula: string, rows: TableRow[], columns: Column[]) {
 }
 
 /**
- * Add column (05 §3.3): Found in sources or Formula (AI research and provider waterfalls arrive in
- * P6). Saving appends the column to the lens Brief's draft, runs P2's preview (cost and tier),
- * publishes through the existing path, then offers Run on 10, Run on all in view, or Save without
- * running, each with its estimate. A formula shows a live 5-row preview over the rows in view.
- * Editor+ only (the page renders nothing for a Viewer).
+ * Add column (05 §3.3): Found in sources, Formula, AI research or a paid provider waterfall. Saving
+ * appends the column to the lens Brief's draft, runs P2's preview (cost and tier), publishes through
+ * the existing path, then offers a 5-account paid preview, Run on 10, Run on all in view, or Save
+ * without running, each with its estimate. A formula shows a live 5-row preview over the rows in
+ * view. Editor+ only (the page renders nothing for a Viewer).
  */
 export function AddColumn({
   ws,
@@ -135,6 +142,12 @@ function AddColumnDrawer({
   const [allowed, setAllowed] = useState('');
   const [hint, setHint] = useState('');
   const [formula, setFormula] = useState('');
+  const [question, setQuestion] = useState('');
+  const [researchInputs, setResearchInputs] = useState<string[]>([]);
+  const [web, setWeb] = useState(true);
+  const [maxPages, setMaxPages] = useState(2);
+  const [provider, setProvider] = useState('email_waterfall');
+  const [providerField, setProviderField] = useState('');
   const [step, setStep] = useState<Step>({ at: 'form' });
   const [error, setError] = useState<string | null>(null);
   const [preview, setPreview] = useState<ColumnPreview | null>(null);
@@ -199,13 +212,39 @@ function AddColumnDrawer({
     if (keyProblem) return keyProblem;
     if (valueType === 'enum' && (values.length < 2 || values.length > 12)) return 'A list column needs 2 to 12 values, separated by commas.';
     if (kind === 'formula') return formulaProblem(formula, key, [...ctx.specs.map((s) => s.key), key], ctx.legacyKeys);
+    if (kind === 'research') {
+      if (question.trim().length < 10 || question.trim().length > 500) return 'Ask a question of 10 to 500 characters.';
+      if (researchInputs.length > 10) return 'A research column can read at most 10 other columns.';
+      if (maxPages < 1 || maxPages > 5) return 'Choose 1 to 5 pages.';
+      return null;
+    }
+    if (kind === 'provider') {
+      if (!PROVIDERS.some((p) => p.key === provider)) return 'Choose a provider.';
+      if (providerField && (provider !== 'pdl_company' || !/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){0,4}$/.test(providerField.trim()))) {
+        return 'Only PDL company columns take a dotted company field.';
+      }
+      return null;
+    }
     return null;
   })();
 
   async function save() {
     setError(null);
     setStep({ at: 'saving' });
-    const res = await addColumn(ws, briefId, { kind, label, value_type: valueType, allowed_values: values, hint, formula });
+    const res = await addColumn(ws, briefId, {
+      kind,
+      label,
+      value_type: valueType,
+      allowed_values: values,
+      hint,
+      formula,
+      question,
+      research_inputs: researchInputs,
+      web,
+      max_pages: maxPages,
+      provider,
+      provider_field: providerField,
+    });
     if (!res.ok) {
       setError(res.error);
       return setStep({ at: 'form' });
@@ -293,8 +332,8 @@ function AddColumnDrawer({
                 {KINDS.map((k) => (
                   <label
                     key={k.kind}
-                    className={`flex flex-col gap-0.5 rounded-md border p-3 text-[13px] ${
-                      k.soon ? 'cursor-not-allowed border-line text-ink-faint' : kind === k.kind ? 'cursor-pointer border-ink' : 'cursor-pointer border-line hover:border-line-strong'
+                    className={`flex cursor-pointer flex-col gap-0.5 rounded-md border p-3 text-[13px] ${
+                      kind === k.kind ? 'border-ink' : 'border-line hover:border-line-strong'
                     }`}
                   >
                     <span className="flex items-center gap-2 font-medium">
@@ -302,14 +341,13 @@ function AddColumnDrawer({
                         type="radio"
                         name="kind"
                         value={k.kind}
-                        disabled={!!k.soon}
                         checked={kind === k.kind}
-                        onChange={() => setKind(k.kind as Kind)}
+                        onChange={() => setKind(k.kind)}
                         className="accent-[var(--ink)]"
                       />
                       {k.label}
                     </span>
-                    <span className={k.soon ? '' : 'text-ink-muted'}>{k.hint}</span>
+                    <span className="text-ink-muted">{k.hint}</span>
                   </label>
                 ))}
               </div>
@@ -353,7 +391,9 @@ function AddColumnDrawer({
                   It fills from the records already collected for this Brief; the count and cost show after you save.
                 </span>
               </div>
-            ) : (
+            ) : null}
+
+            {kind === 'formula' ? (
               <div className="flex flex-col gap-2">
                 <label htmlFor="add-col-formula" className="si-label">Formula</label>
                 <textarea
@@ -372,7 +412,90 @@ function AddColumnDrawer({
                 ) : null}
                 <LivePreview rows={live} valueType={valueType} allowed={values} />
               </div>
-            )}
+            ) : null}
+
+            {kind === 'research' ? (
+              <div className="flex flex-col gap-3" data-add-column-research="">
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="add-col-question" className="si-label">Question</label>
+                  <textarea
+                    id="add-col-question"
+                    className={field}
+                    rows={3}
+                    maxLength={500}
+                    value={question}
+                    placeholder="What did this company announce about…?"
+                    onChange={(e) => setQuestion(e.target.value)}
+                  />
+                  <span className="text-[12px] text-ink-muted">{question.trim().length}/500. One grounded answer, with its pages cited.</span>
+                </div>
+                <fieldset className="m-0 flex flex-col gap-2 border-0 p-0">
+                  <legend className="si-label mb-1 p-0">Inputs</legend>
+                  {ctx.specs.length === 0 ? (
+                    <span className="text-[12px] text-ink-muted">This Brief has no other columns to read yet.</span>
+                  ) : (
+                    <div className="flex flex-wrap gap-2">
+                      {ctx.specs.map((s) => (
+                        <label
+                          key={s.key}
+                          className={`cursor-pointer rounded-full border px-2.5 py-1 text-[12px] ${
+                            researchInputs.includes(s.key) ? 'border-ink bg-signal-soft text-ink' : 'border-line text-ink-muted'
+                          }`}
+                        >
+                          <input
+                            type="checkbox"
+                            className="sr-only"
+                            checked={researchInputs.includes(s.key)}
+                            onChange={(e) =>
+                              setResearchInputs((prev) => (e.target.checked ? [...prev, s.key] : prev.filter((k) => k !== s.key)))
+                            }
+                          />
+                          {s.label}
+                        </label>
+                      ))}
+                    </div>
+                  )}
+                </fieldset>
+                <div className="grid grid-cols-2 gap-3">
+                  <label className="flex items-center gap-2 text-[13px] text-ink">
+                    <input id="add-col-web" type="checkbox" className="accent-[var(--ink)]" checked={web} onChange={(e) => setWeb(e.target.checked)} />
+                    Search the web
+                  </label>
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="add-col-max-pages" className="si-label">Max pages</label>
+                    <select id="add-col-max-pages" className={field} value={maxPages} onChange={(e) => setMaxPages(Number(e.target.value))}>
+                      {[1, 2, 3, 4, 5].map((n) => <option key={n} value={n}>{n}</option>)}
+                    </select>
+                  </div>
+                </div>
+                <span className="text-[12px] text-ink-muted">Paid per account. You confirm a 5-account preview before anything runs.</span>
+              </div>
+            ) : null}
+
+            {kind === 'provider' ? (
+              <div className="flex flex-col gap-2" data-add-column-provider="">
+                <div className="flex flex-col gap-1">
+                  <label htmlFor="add-col-provider" className="si-label">Provider</label>
+                  <select id="add-col-provider" className={field} value={provider} onChange={(e) => setProvider(e.target.value)}>
+                    {PROVIDERS.map((p) => <option key={p.key} value={p.key}>{p.label}</option>)}
+                  </select>
+                </div>
+                {provider === 'pdl_company' ? (
+                  <div className="flex flex-col gap-1">
+                    <label htmlFor="add-col-provider-field" className="si-label">Company field</label>
+                    <input
+                      id="add-col-provider-field"
+                      className={`${field} si-mono`}
+                      value={providerField}
+                      placeholder="employee_count"
+                      onChange={(e) => setProviderField(e.target.value)}
+                    />
+                    <span className="text-[12px] text-ink-muted">A dotted path such as employee_count or location.country.</span>
+                  </div>
+                ) : null}
+                <span className="text-[12px] text-ink-muted">Every lookup, including a not-found, is listed with its cost in the cell.</span>
+              </div>
+            ) : null}
 
             {label.trim() && problem ? <p className="m-0 text-[13px] text-caution" data-add-column-problem="">{problem}</p> : null}
             {err}
@@ -446,6 +569,7 @@ function AddColumnDrawer({
               briefId={briefId}
               filter={filter}
               free={step.fillMethod === 'formula'}
+              paid={kind === 'research' || kind === 'provider'}
               backfilled={step.queued}
               onDone={close}
             />
@@ -490,6 +614,7 @@ function RunChoices({
   briefId,
   filter,
   free,
+  paid,
   backfilled,
   onDone,
 }: {
@@ -499,6 +624,8 @@ function RunChoices({
   briefId: string;
   filter: Record<string, unknown> | null;
   free: boolean;
+  /** Research and waterfall runs spend money: offer the explicit five-account confirm first. */
+  paid: boolean;
   /** Runs publishing already queued (a formula column fills every empty cell by itself). */
   backfilled: number;
   onDone: () => void;
@@ -546,6 +673,17 @@ function RunChoices({
       {!estimate && !estError ? <p className="m-0 text-[13px] text-ink-muted">Estimating…</p> : null}
       {estimate && !outcome ? (
         <div className="flex flex-col gap-2">
+          {paid ? (
+            <button
+              type="button"
+              className="si-btn si-btn-primary si-btn-sm justify-between"
+              disabled={busy || estimate.count === 0}
+              onClick={() => go(Math.min(5, estimate.count))}
+              data-run-choice="preview5"
+            >
+              <span>{`Preview on ${Math.min(5, estimate.count)} accounts (est. ${usd(cost(Math.min(5, estimate.count)))})`}</span>
+            </button>
+          ) : null}
           <button type="button" className="si-btn si-btn-sm justify-between" disabled={busy || ten === 0} onClick={() => go(10)} data-run-choice="10">
             <span>Run on 10</span>
             <span className="text-ink-muted">{estimateText(ten, cost(ten))}</span>

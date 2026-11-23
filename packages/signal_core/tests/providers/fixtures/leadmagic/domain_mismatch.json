@@ -1,0 +1,11 @@
+{
+  "status_code": 200,
+  "json": {
+    "email": "jane@other.com",
+    "status": "valid",
+    "credits_consumed": 0,
+    "domain_mismatch": true,
+    "requested_domain": "acme.com",
+    "message": "Email found on a different domain."
+  }
+}

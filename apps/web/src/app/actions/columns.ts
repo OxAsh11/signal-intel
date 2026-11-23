@@ -14,6 +14,7 @@ import {
   TYPE_LABELS,
   type BriefConfig,
   type ColumnSpec,
+  type ProviderConfig,
   type ValueType,
 } from '@/lib/briefs';
 
@@ -54,12 +55,21 @@ export type AddColumnContext = {
 };
 
 export type NewColumn = {
-  kind: 'extract' | 'formula';
+  kind: 'extract' | 'formula' | 'research' | 'provider';
   label: string;
   value_type: ValueType;
   allowed_values: string[];
   hint: string;
   formula: string;
+  /** Research: 10–500 characters. */
+  question: string;
+  /** Research: the keys of other columns to show the model. */
+  research_inputs: string[];
+  web: boolean;
+  max_pages: number;
+  /** Provider waterfall or a PDL company field. */
+  provider: string;
+  provider_field: string;
 };
 
 /** The P2 preview of the draft, as the Add column form shows it. */
@@ -142,7 +152,7 @@ function buildSpec(input: NewColumn, config: BriefConfig, workspace: AddColumnCo
   const label = String(input.label ?? '').trim();
   if (!label || label.length > 80) return { error: 'Give the column a name of 1 to 80 characters.' };
   if (!(input.value_type in TYPE_LABELS)) return { error: 'Choose what kind of value the column holds.' };
-  if (input.kind !== 'extract' && input.kind !== 'formula') return { error: 'Choose how the column is filled.' };
+  if (!['extract', 'formula', 'research', 'provider'].includes(input.kind)) return { error: 'Choose how the column is filled.' };
   const all = Array.isArray(config.predicates) ? config.predicates : [];
   const specs = columnSpecs(config);
   if (all.length >= MAX_COLUMNS) return { error: `A Brief has at most ${MAX_COLUMNS} columns.` };
@@ -169,6 +179,31 @@ function buildSpec(input: NewColumn, config: BriefConfig, workspace: AddColumnCo
     if (problem) return { error: problem };
     spec.formula = formula;
     spec.inputs = formulaReads(formula) ?? [];
+  }
+  if (input.kind === 'research') {
+    const question = String(input.question ?? '').trim();
+    if (question.length < 10 || question.length > 500) return { error: 'Ask a question of 10 to 500 characters.' };
+    const known = new Set(specs.map((s) => s.key));
+    const inputs = [...new Set((input.research_inputs ?? []).filter((k) => typeof k === 'string' && known.has(k)))];
+    if (inputs.length > 10) return { error: 'A research column can read at most 10 other columns.' };
+    const pages = Number(input.max_pages);
+    if (!Number.isInteger(pages) || pages < 1 || pages > 5) return { error: 'Choose 1 to 5 pages.' };
+    spec.inputs = inputs;
+    spec.fill_config = { question, inputs, web: !!input.web, max_pages: pages };
+  }
+  if (input.kind === 'provider') {
+    const providers = ['leadmagic', 'findymail', 'prospeo', 'pdl_company', 'email_waterfall'];
+    const provider = String(input.provider ?? '').trim();
+    if (!providers.includes(provider)) return { error: 'Choose a provider.' };
+    const field = String(input.provider_field ?? '').trim();
+    if (field) {
+      if (provider !== 'pdl_company' || !/^[a-z][a-z0-9_]*(\.[a-z][a-z0-9_]*){0,4}$/.test(field)) {
+        return { error: 'Only PDL company columns take a dotted company field.' };
+      }
+      spec.fill_config = { provider: 'pdl_company', field };
+    } else {
+      spec.fill_config = { provider: provider as ProviderConfig['provider'] };
+    }
   }
   const keyProblem = columnKeyProblem(spec, specs, workspace.find((w) => w.key === key));
   if (keyProblem) return { error: keyProblem };

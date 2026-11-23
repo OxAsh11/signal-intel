@@ -46,6 +46,24 @@ export type CellDetail = {
     finished_at: string | null;
     error: string | null;
   }[];
+  /** P6: the last run's waterfall attempts, in provider order. Raw vendor errors stay in error_kind. */
+  attempts: {
+    ordinal: number;
+    provider: string;
+    status: 'found' | 'not_found' | 'error' | string;
+    cost_usd: number | string | null;
+    confidence: number | null;
+    raw_ref: string | null;
+    error_kind: string | null;
+  }[];
+  /** P6: a research run's stored receipt; null for every other fill method. */
+  receipt: {
+    queries: string[];
+    pages: { url: string; title: string }[];
+    answer: string;
+    cited_claim_ids: string[];
+    reasoning: string;
+  } | null;
 };
 
 export type Estimate = { count: number; cost_usd: number; within_budget: number };

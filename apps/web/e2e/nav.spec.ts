@@ -111,7 +111,7 @@ test.describe('journey navigation', () => {
     await page.screenshot({ path: 'test-results/shell-desktop-email-inbox.png', fullPage: true });
 
     await page.goto('/people');
-    await expect(main.getByText('Coming in P6', { exact: true })).toBeVisible();
+    await expect(main.getByRole('heading', { level: 1, name: 'People', exact: true })).toBeVisible();
 
     await page.goto('/crm');
     await expect(main.getByText('Coming with the CRM', { exact: true })).toBeVisible();

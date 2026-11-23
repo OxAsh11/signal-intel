@@ -4,7 +4,7 @@ import { formulaProblem, formulaReads, renameFormulaRef } from '@signal/formula'
 import { Button } from '@signal/ui';
 import { ChipField, fieldInput } from './chip-field';
 import {
-  columnKeyProblem, columnsFromWorkspace, columnSpecs, FILL_LABELS, isColumnSpec,
+  columnKeyProblem, columnsFromWorkspace, columnSpecs, EDITABLE_FILLS, FILL_LABELS, isColumnSpec,
   isFormulaColumn, keyFromLabel, LEGACY_SEED_NOTICE, MAX_COLUMNS, OPS_BY_TYPE, ROLE_LABELS, TYPE_LABELS,
   type BriefConfig, type ColumnSpec, type EvidenceRule, type FillMethod, type Role, type ValueType, type WorkspacePredicate,
 } from '@/lib/briefs';
@@ -19,7 +19,7 @@ type Row = { id: number; col: Column; keyFixed: boolean; stale?: Record<number, 
 
 const VALUE_TYPES = Object.keys(TYPE_LABELS) as ValueType[];
 const ROLES = Object.keys(ROLE_LABELS) as Role[];
-const FILLS = Object.keys(FILL_LABELS) as FillMethod[];
+const FILLS = EDITABLE_FILLS;
 
 /** Why a rule goes when the columns are saved. */
 type RuleLoss = 'removed' | 'changed' | 'formula';

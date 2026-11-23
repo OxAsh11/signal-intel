@@ -399,6 +399,75 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
               </ul>
             </section>
 
+            {detail.attempts.length > 0 ? (
+              <section aria-label="Attempts" data-panel-attempts="">
+                <p className="si-label m-0 mb-2">Attempts</p>
+                <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                  {detail.attempts.map((a) => (
+                    <li
+                      key={`${a.ordinal}-${a.provider}`}
+                      data-attempt-provider={a.provider}
+                      data-attempt-status={a.status}
+                      className="rounded-md border border-line p-2 text-[13px]"
+                    >
+                      <p className="m-0 text-ink">
+                        <span className="font-medium">{a.provider}</span>
+                        {' · '}
+                        {a.status === 'found' ? 'Found' : a.status === 'not_found' ? 'Not found' : a.status === 'error' ? 'Error' : a.status}
+                        {a.cost_usd != null ? ` · ${usd(Number(a.cost_usd))}` : ''}
+                      </p>
+                      {a.error_kind ? <p className="m-0 mt-1 text-[12px] text-ink-muted">{a.error_kind}</p> : null}
+                      {a.confidence != null ? <p className="m-0 mt-1 text-[12px] text-ink-muted">Confidence {a.confidence}</p> : null}
+                    </li>
+                  ))}
+                </ul>
+              </section>
+            ) : null}
+
+            {detail.receipt ? (
+              <section aria-label="Research receipt" data-panel-receipt="">
+                <p className="si-label m-0 mb-2">Research receipt</p>
+                <div className="flex flex-col gap-2 rounded-md border border-line p-3 text-[13px]">
+                  <div>
+                    <p className="m-0 text-[12px] text-ink-muted">Answer</p>
+                    <p className="m-0 mt-1 whitespace-pre-wrap text-ink" data-panel-receipt-answer="">
+                      {detail.receipt.answer}
+                    </p>
+                  </div>
+                  {detail.receipt.pages.length > 0 ? (
+                    <div>
+                      <p className="m-0 text-[12px] text-ink-muted">Pages</p>
+                      <ul className="m-0 mt-1 flex list-none flex-col gap-1 p-0" data-panel-receipt-pages="">
+                        {detail.receipt.pages.map((p, n) => (
+                          <li key={`${p.url}-${n}`}>
+                            {/^https?:\/\//.test(p.url) ? (
+                              <a href={p.url} target="_blank" rel="noreferrer" className="text-ink underline">
+                                {p.title || p.url}
+                              </a>
+                            ) : (
+                              <span className="text-ink">{p.title || p.url}</span>
+                            )}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  ) : null}
+                  {detail.receipt.queries.length > 0 ? (
+                    <div>
+                      <p className="m-0 text-[12px] text-ink-muted">Queries</p>
+                      <p className="m-0 mt-1 text-ink-muted">{detail.receipt.queries.join(' · ')}</p>
+                    </div>
+                  ) : null}
+                  {detail.receipt.reasoning ? (
+                    <div>
+                      <p className="m-0 text-[12px] text-ink-muted">Reasoning</p>
+                      <p className="m-0 mt-1 whitespace-pre-wrap text-ink-muted">{detail.receipt.reasoning}</p>
+                    </div>
+                  ) : null}
+                </div>
+              </section>
+            ) : null}
+
             <section aria-label="History" data-panel-history="">
               <p className="si-label m-0 mb-2">History</p>
               {detail.runs.length === 0 ? <p className="m-0 text-[13px] text-ink-muted">No runs yet.</p> : null}

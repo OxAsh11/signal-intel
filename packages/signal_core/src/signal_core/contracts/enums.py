@@ -19,6 +19,9 @@ class AliasType(StrEnum):
     DOMAIN = "domain"
     PROFILE_URL = "profile_url"
     NAME_COUNTRY = "name_country"
+    EMAIL = "email"
+    PHONE = "phone"
+    SITE = "site"
 
 
 class DataScope(StrEnum):
@@ -201,6 +204,7 @@ class EventType(StrEnum):
     BRIEF_PREVIEW_REQUESTED = "brief.preview_requested"
     PREDICATE_BACKFILL_REQUESTED = "predicate.backfill_requested"
     COLUMN_RUN_REQUESTED = "column.run_requested"
+    PEOPLE_FIND_REQUESTED = "people.find_requested"
 
 
 class UsageUnit(StrEnum):

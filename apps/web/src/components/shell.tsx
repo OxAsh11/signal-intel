@@ -142,7 +142,8 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Suspense fallback={<span className="si-label">Workspace</span>}>
             <WorkspaceSwitcher />
           </Suspense>
-          <div className="min-w-0 flex-1 md:max-w-[360px]">
+          {/* Phone: only the icon takes space here until it is opened; desktop keeps the field. */}
+          <div className="min-w-0 shrink-0 md:flex-1 md:max-w-[360px]">
             <Suspense fallback={null}>
               <Search />
             </Suspense>

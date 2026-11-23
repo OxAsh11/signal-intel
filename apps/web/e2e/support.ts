@@ -53,7 +53,13 @@ export async function sql<T = Record<string, unknown>>(text: string, params: unk
   const client = new Client({ connectionString: need('E2E_DB_URL') });
   await client.connect();
   try {
-    return (await client.query(text, params)).rows as T[];
+    const result = await client.query(text, params);
+    // pg returns one Result per statement for a multi-statement query. Seed helpers write in a
+    // transaction and return ids from a final SELECT, so use the last statement that produced rows.
+    const results = Array.isArray(result) ? result : [result];
+    const returning = results.filter((r) => r.rows.length > 0);
+    const last = returning[returning.length - 1] ?? results[results.length - 1];
+    return (last?.rows ?? []) as T[];
   } finally {
     await client.end();
   }

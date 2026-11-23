@@ -6,6 +6,7 @@ import { getBriefLens } from '@/lib/brief-lens';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import { AddColumn } from './_table/add-column';
+import type { WaterfallAttempt } from './_table/cell';
 import { BOARD_LIMIT, Board, ByCountry, LayoutSwitch } from './_table/board';
 import { UUID, resolveView, viewColumnIds } from './_table/server';
 import { Cards } from './_table/cards';
@@ -190,6 +191,19 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
   const table = data as TableData | null;
   if (!table) return <TableError retryHref={here} />;
 
+  // A waterfall header can expand into per-provider sub-columns. Read all visible attempts in one
+  // call instead of one RPC per cell; an RPC error just leaves the sub-columns in "Skipped".
+  let waterfallAttempts: Record<string, WaterfallAttempt[]> = {};
+  const waterfallColumns = table.columns.filter((c) => c.fill_method === 'provider');
+  if (waterfallColumns.length > 0) {
+    const { data: attempts } = await supabase.rpc('waterfall_attempts', {
+      p_ws: ws,
+      p_entity_ids: table.rows.map((r) => r.entity_id),
+      p_predicate_ids: waterfallColumns.map((c) => c.id),
+    });
+    if (attempts && typeof attempts === 'object') waterfallAttempts = attempts as Record<string, WaterfallAttempt[]>;
+  }
+
   if (table.total === 0) {
     if (filtered) return <NoMatch clearHref={clear(false)} />;
     const count = async (build: (qb: ReturnType<typeof radarCount>) => PromiseLike<{ count: number | null }>) => (await build(radarCount(supabase, ws))).count ?? 0;
@@ -237,6 +251,7 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
             canEdit={canEdit}
             briefId={briefId}
             filter={filtered ? filter : null}
+            waterfallAttempts={waterfallAttempts}
           />
           <CellPanel ws={ws} briefId={briefId} canEdit={canEdit} userName={userName} />
           <Cards ws={ws} rows={table.rows} columns={table.columns} />

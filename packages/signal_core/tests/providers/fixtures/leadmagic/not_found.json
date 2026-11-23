@@ -1,0 +1,9 @@
+{
+  "status_code": 200,
+  "json": {
+    "email": null,
+    "status": null,
+    "credits_consumed": 0,
+    "message": "No email found for this person at this company."
+  }
+}

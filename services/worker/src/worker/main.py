@@ -24,6 +24,7 @@ from signal_core.logging import configure_logging, get_logger
 from signal_core.metering import PgApprovalStore
 from worker.app import build_app
 from worker.health import HealthState, serve_health
+from worker.reveal import pool_lookup, serve_reveal
 
 log = get_logger("worker")
 
@@ -95,9 +96,21 @@ async def amain() -> None:
     conninfo = settings.database_url_session.get_secret_value()
 
     state = HealthState()
-    health = await serve_health(state, settings.port)
+    # The web app reveals a full contact value and reads provider status only through small,
+    # token-protected ports. Without the token both stay closed.
+    reveal_token = (
+        settings.worker_status_token.get_secret_value() if settings.worker_status_token else None
+    )
+    health = await serve_health(state, settings.port, token=reveal_token)
     pool = make_pool(conninfo)
     await pool.open()
+    reveal = (
+        await serve_reveal(pool_lookup(pool), reveal_token, settings.worker_reveal_port)
+        if reveal_token
+        else None
+    )
+    if reveal is None:
+        log.warning("worker.reveal_disabled", detail="WORKER_STATUS_TOKEN is not set")
     connector = PsycopgConnector(
         conninfo=conninfo, configure=configure_worker_connection, kwargs={"prepare_threshold": None}
     )
@@ -163,6 +176,8 @@ async def amain() -> None:
             if t in done and not t.cancelled() and t.exception() is not None:
                 log.error("worker.crashed", component=name, error=str(t.exception()))
     health.close()
+    if reveal is not None:
+        reveal.close()
     await pool.close()
     log.info("worker.stopped")
 

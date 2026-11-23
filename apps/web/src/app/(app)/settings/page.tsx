@@ -3,6 +3,7 @@ import { Suspense } from 'react';
 import { BudgetMeter } from '@/components/budget-meter';
 import { ApiAccess } from './api-access';
 import { MembersAndAccess } from './members';
+import { Providers } from './providers';
 import { UsageAndBudgets } from './usage';
 
 export const metadata: Metadata = { title: 'Settings' };
@@ -27,6 +28,9 @@ export default function SettingsPage({ searchParams }: PageProps<'/settings'>) {
       </Suspense>
       <Suspense fallback={<p className="m-0 text-ink-muted">Loading API access…</p>}>
         <ApiAccess />
+      </Suspense>
+      <Suspense fallback={<p className="m-0 text-ink-muted">Loading providers…</p>}>
+        <Providers />
       </Suspense>
       <Suspense fallback={<p className="m-0 text-ink-muted">Loading usage…</p>}>
         <UsageAndBudgets searchParams={searchParams} />

@@ -16,6 +16,9 @@ export async function createClient() {
   await connection();
   const cookieStore = await cookies();
   return createServerClient(env.url, env.anonKey, {
+    // Every read here runs under the signed-in user's RLS. Opt out of the server fetch cache so a
+    // write made in a Server Action is visible on the very next request (e.g. Settings order).
+    global: { fetch: (input, init) => fetch(input, { ...init, cache: 'no-store' }) },
     cookies: {
       getAll: () => cookieStore.getAll(),
       setAll: (toSet) => {

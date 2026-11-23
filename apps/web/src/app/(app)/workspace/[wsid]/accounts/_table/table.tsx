@@ -5,7 +5,7 @@ import { useCallback, useRef, useState, type KeyboardEvent } from 'react';
 import { BandChip, StageBadge, VerdictBadge } from '@signal/ui';
 import { Band, Stage, Verdict } from '@signal/contracts';
 import { BulkBar } from './bulk-bar';
-import { Cell, formatDate } from './cell';
+import { Cell, formatDate, WaterfallSubcolumns, type WaterfallAttempt } from './cell';
 import { ColumnMenu } from './column-menu';
 import { RunConfirm, type RunJob } from './run-confirm';
 import type { Column, TableRow } from './types';
@@ -28,6 +28,7 @@ const SYSTEM_COUNT = SYSTEM.length;
 const MID_COLUMNS = 2;
 
 const sticky = 'sticky left-0 z-[1] bg-surface';
+const waterfallKey = (entityId: string, predicateId: string) => `${entityId}:${predicateId}`;
 const arrow = (sorts: SortKey[], key: string | null) => {
   const s = sorts.find((x) => x.key === key);
   return s ? (s.dir === 'asc' ? ' ↑' : ' ↓') : '';
@@ -42,6 +43,7 @@ export function AccountsTable({
   canEdit = false,
   briefId = null,
   filter = null,
+  waterfallAttempts = {},
 }: {
   ws: string;
   rows: TableRow[];
@@ -55,9 +57,12 @@ export function AccountsTable({
   briefId?: string | null;
   /** The view's filter AST: a column menu runs on the accounts in view. */
   filter?: Record<string, unknown> | null;
+  /** One waterfall's last attempts per row, keyed `<entity_id>:<predicate_id>`. */
+  waterfallAttempts?: Record<string, WaterfallAttempt[]>;
 }) {
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
   const [active, setActive] = useState<{ r: number; c: number }>({ r: 0, c: 0 });
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
   const [drawer, setDrawer] = useState(false);
   const [confirm, setConfirm] = useState<{ title: string; jobs: RunJob[] } | null>(null);
   const gridRef = useRef<HTMLTableElement>(null);
@@ -70,6 +75,14 @@ export function AccountsTable({
       return next;
     });
   }, []);
+
+  const toggleWaterfall = (id: string) => {
+    setExpanded((prev) => {
+      const next = new Set(prev);
+      if (!next.delete(id)) next.add(id);
+      return next;
+    });
+  };
 
   const open = (row: TableRow, col: Column) =>
     window.dispatchEvent(
@@ -158,7 +171,19 @@ export function AccountsTable({
                         }
                       />
                     ) : null}
+                    {c.fill_method === 'provider' ? (
+                      <button
+                        type="button"
+                        className="ml-1 rounded-sm border border-line px-1 text-[11px] text-ink-muted"
+                        aria-label={`${expanded.has(c.id) ? 'Collapse' : 'Expand'} ${c.label} providers`}
+                        aria-expanded={expanded.has(c.id)}
+                        onClick={() => toggleWaterfall(c.id)}
+                      >
+                        {expanded.has(c.id) ? '−' : '+'} providers
+                      </button>
+                    ) : null}
                   </span>
+                  {c.fill_method === 'provider' && expanded.has(c.id) ? <WaterfallSubcolumns header /> : null}
                 </th>
               ))}
             </tr>
@@ -212,7 +237,12 @@ export function AccountsTable({
                       className={`cursor-pointer ${ci >= MID_COLUMNS ? 'max-lg:hidden' : ''}`}
                       onClick={() => open(r, c)}
                     >
-                      <Cell cell={r.cells[c.id]} column={c} />
+                      <span className="flex flex-col gap-1">
+                        <Cell cell={r.cells[c.id]} column={c} />
+                        {c.fill_method === 'provider' && expanded.has(c.id) ? (
+                          <WaterfallSubcolumns attempts={waterfallAttempts[waterfallKey(r.entity_id, c.id)] ?? []} />
+                        ) : null}
+                      </span>
                     </td>
                   ))}
                 </tr>

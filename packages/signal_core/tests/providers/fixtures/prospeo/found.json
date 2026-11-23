@@ -1,0 +1,26 @@
+{
+  "status_code": 200,
+  "json": {
+    "error": false,
+    "free_enrichment": false,
+    "person": {
+      "person_id": "p_1",
+      "first_name": "Jane",
+      "last_name": "Doe",
+      "full_name": "Jane Doe",
+      "current_job_title": "VP Operations",
+      "linkedin_url": "https://www.linkedin.com/in/janedoe",
+      "email": {
+        "status": "VERIFIED",
+        "revealed": true,
+        "email": "jane.doe@acme.com",
+        "verification_method": "SMTP",
+        "email_mx_provider": "Google"
+      }
+    },
+    "company": {
+      "name": "Acme",
+      "website": "acme.com"
+    }
+  }
+}
