@@ -6,6 +6,7 @@ import { MembersAndAccess } from './members';
 import { ApiAccess } from './api-access';
 import { Providers } from './providers';
 import { UsageAndBudgets } from './usage';
+import { DataSection } from './_data-section';
 
 export const metadata: Metadata = { title: 'Settings' };
 
@@ -60,7 +61,11 @@ export default async function SettingsPage({ searchParams }: PageProps<'/setting
       {section === 'business' ? <p className="m-0 text-ink-muted">Business context (coming soon).</p> : null}
       {section === 'mailboxes' ? <p className="m-0 text-ink-muted">Arrives with the Email engine.</p> : null}
       {section === 'integrations' ? <p className="m-0 text-ink-muted">Not set up yet.</p> : null}
-      {section === 'data' ? <p className="m-0 text-ink-muted">Data: labels, segments, column library, blocklist.</p> : null}
+      {section === 'data' ? (
+        <Suspense fallback={null}>
+          <DataSection ws={ctx?.workspace?.id ?? ''} />
+        </Suspense>
+      ) : null}
       {section === 'health' ? <p className="m-0 text-ink-muted">Health (radars, queue, providers, outbox).</p> : null}
     </>
   );
