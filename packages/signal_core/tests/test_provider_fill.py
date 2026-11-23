@@ -10,6 +10,10 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID, uuid4
 
+import pytest
+from cryptography.fernet import Fernet
+
+from signal_core.config import get_settings
 from signal_core.fill import provider_fill
 from signal_core.fill.base import (
     ALIAS_INSERT_SQL,
@@ -51,6 +55,15 @@ _PRICES = {
     "prospeo": Decimal("0.010"),
     "pdl_company": Decimal("0.10"),
 }
+
+
+@pytest.fixture(autouse=True)
+def secrets_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A generated, per-test key: CI has no encryption key, and no key means no stored contact."""
+    monkeypatch.setenv("SECRETS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    yield
+    get_settings.cache_clear()
 
 
 def _run(**over: Any) -> dict[str, Any]:
