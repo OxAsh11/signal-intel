@@ -108,6 +108,17 @@ export async function goLive(_: ActionState, form: FormData): Promise<ActionStat
   return { ok: true };
 }
 
+/** Admin override of the pilot publish gate, audited. */
+export async function goLiveOverride(_: ActionState, form: FormData): Promise<ActionState> {
+  const { error } = await rpc('go_live_override', {
+    p_brief: text(form, 'brief'),
+    p_reason: text(form, 'reason'),
+  });
+  if (error) return { error };
+  refresh();
+  return { ok: true };
+}
+
 /** Asks the worker what the current draft would change and cost (M1 edit preview). */
 export async function requestPreview(_: ActionState, form: FormData): Promise<ActionState> {
   const { error } = await rpc('request_brief_preview', { p_brief: text(form, 'brief') });
@@ -136,6 +147,8 @@ export async function markPilotVerdict(_: ActionState, form: FormData): Promise<
     p_action: mark === 'right' ? 'confirm' : 'correct',
     p_value: mark === 'right' ? null : mark,
     p_add_example: form.get('example') === 'on',
+    p_reason: text(form, 'reason') || null,
+    p_note: text(form, 'note') || null,
   });
   if (error) return { error };
   refresh();

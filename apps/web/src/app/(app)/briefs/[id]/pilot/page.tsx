@@ -5,6 +5,8 @@ import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import { AutoRefresh } from '../auto-refresh';
 import { MarkForm } from './mark-form';
+import { ActionForm } from '../action-form';
+import { goLive, goLiveOverride } from '@/app/actions/briefs';
 
 export const metadata: Metadata = { title: 'Pilot' };
 
@@ -135,9 +137,9 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
           Sample {rows.length} of {settings.pilot_sample_size}
         </span>
         <span>
-          {accuracy == null
-            ? 'No verdicts marked yet'
-            : `Accuracy ${accuracy}% of ${marked} marked · target ${settings.pilot_accuracy_target_pct}%`}
+          {marked < 5
+            ? 'Mark at least 5 to see accuracy'
+            : `${right} of ${marked} right (${accuracy}%) against target ${settings.pilot_accuracy_target_pct}%`}
         </span>
         {confirmedPct != null ? <span>Confirmed {confirmedPct}%</span> : null}
       </div>
@@ -153,6 +155,21 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
           Few Confirmed accounts in the pilot ({confirmedPct}%). This industry may leave little
           public trace.
         </p>
+      ) : null}
+
+      {brief.state === 'Pilot' && canEdit ? (
+        <div className="flex flex-wrap items-center gap-3">
+          {marked >= 5 && accuracy != null && accuracy >= settings.pilot_accuracy_target_pct ? (
+            <ActionForm action={goLive} fields={{ brief: id }} label="Go live" variant="primary" />
+          ) : (
+            <button type="button" disabled className="si-btn si-btn-primary opacity-50">
+              Go live
+            </button>
+          )}
+          {atLeast(ctx.workspaceRole, 'Admin') ? (
+            <ActionForm action={goLiveOverride} fields={{ brief: id, reason: 'override' }} label="Go live anyway" variant="quiet" />
+          ) : null}
+        </div>
       ) : null}
 
       {filling ? (
