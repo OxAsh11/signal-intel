@@ -17,8 +17,10 @@ import type { WorkspacePredicate } from '@/lib/briefs';
 
 export const metadata: Metadata = { title: 'Brief' };
 
-export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id]'>) {
+export default async function BriefDetailPage({ params, searchParams }: PageProps<'/briefs/[id]'>) {
   const { id } = await params;
+  const sp = await searchParams;
+  const tab = (sp?.tab as string) || 'overview';
   const [ctx, supabase] = await Promise.all([getOrgContext(), createClient()]);
   if (!ctx?.workspace || !supabase) return null;
 
@@ -78,10 +80,21 @@ export default async function BriefDetailPage({ params }: PageProps<'/briefs/[id
         </div>
         {canEdit && brief.state !== 'Draft' ? <StateControls brief={brief} /> : null}
       </div>
-      <nav aria-label="Brief" className="flex flex-wrap gap-4 text-[14px]">
-        {brief.state === 'Pilot' ? <Link href={`/briefs/${id}/pilot`} className="font-medium text-ink underline">Pilot results</Link> : null}
-        <Link href={`/briefs/${id}/radars`} className="text-ink underline">Radars</Link>
-        <Link href={`/briefs/${id}/versions`} className="text-ink underline">Version history</Link>
+      <nav aria-label="Brief tabs" className="flex flex-wrap gap-2 border-b border-line pb-2 text-[14px]">
+        {['overview', 'icp', 'columns', 'sources', 'versions'].map((t) => (
+          <Link
+            key={t}
+            href={`/briefs/${id}?tab=${t}`}
+            className={tab === t ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}
+          >
+            {t.charAt(0).toUpperCase() + t.slice(1)}
+          </Link>
+        ))}
+        {brief.state === 'Pilot' ? (
+          <Link href={`/briefs/${id}?tab=pilot`} className={tab === 'pilot' ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}>
+            Pilot
+          </Link>
+        ) : null}
       </nav>
 
       <div className="si-cols">
