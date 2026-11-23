@@ -1255,6 +1255,78 @@ async def test_dispatch_sourced_claim_still_queues_its_verdict() -> None:
     assert verdict["queueing_lock"] == f"verdict:{entity_id}:{ws}"
 
 
+def _retracted(org_id: str, ws: str, claim_id: str, entity_id: str, record: str) -> dict[str, Any]:
+    """claim.retracted as public.mark_claim_wrong (0043) emits it: for the workspace."""
+    return {
+        "event": "claim.retracted",
+        "org_id": org_id,
+        "workspace_id": ws,
+        "aggregate_type": "claim",
+        "aggregate_id": claim_id,
+        "payload": {
+            "claim_id": claim_id,
+            "entity_id": entity_id,
+            "predicate_id": str(uuid4()),
+            "source_record_id": record,
+            "reason": "Wrong company",
+        },
+    }
+
+
+async def test_dispatch_claim_retracted_rejudges_and_reruns_formulas() -> None:
+    """A person marking a sourced claim wrong takes evidence away: every workspace's verdict on the
+    entity is re-judged and the formulas reading its column re-run (app.queue_auto_runs)."""
+    org_id, entity_id, ws, claim_id, record = (str(uuid4()) for _ in range(5))
+    pool = _RoutedPool([(ws,)], [str(uuid4())], derived=False)
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool), [_retracted(org_id, ws, claim_id, entity_id, record)]
+    )
+    assert [j["status"] for j in _jobs(connector, DISPATCH_TASK)] == ["succeeded"]
+    (verdict,) = _jobs(connector, "verdict.compute")
+    assert verdict["queueing_lock"] == f"verdict:{entity_id}:{ws}"
+    assert _jobs(connector, "score.compute") == []
+    (auto_args,) = [a for sql, a in pool.queries if "app.queue_auto_runs" in sql]
+    assert auto_args == (UUID(claim_id),)
+
+
+async def test_dispatch_retracted_formula_claim_rescores_only() -> None:
+    org_id, entity_id, ws, claim_id, record, account = (str(uuid4()) for _ in range(6))
+    pool = _RoutedPool([(ws,)], [], derived=True, accounts=[(account, ws)])
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool), [_retracted(org_id, ws, claim_id, entity_id, record)]
+    )
+    assert _jobs(connector, "verdict.compute") == []
+    (score,) = _jobs(connector, "score.compute")
+    assert score["queueing_lock"] == f"score:{account}"
+    (check_sql,) = [sql for sql, _ in pool.queries if "derived:" in sql]
+    assert "'derived:formula'" in check_sql
+
+
+async def test_dispatch_manual_claim_rejudges_the_verdict() -> None:
+    """R5: only a formula's claim is not evidence; the derived-source check names derived:formula
+    alone, so a manual value (derived:manual) reaches the verdict."""
+    org_id, entity_id, ws = (str(uuid4()) for _ in range(3))
+    pool = _RoutedPool([(ws,)], [], derived=False)
+    connector = InMemoryConnector()
+    await _dispatch_events(
+        _pooled_app(connector, pool),
+        [
+            {
+                "event": "claim.created",
+                "org_id": org_id,
+                "workspace_id": None,
+                "aggregate_id": str(uuid4()),
+                "payload": {"entity_id": entity_id, "source_record_id": str(uuid4())},
+            }
+        ],
+    )
+    (check_sql,) = [sql for sql, _ in pool.queries if "derived:" in sql]
+    assert "connector_id = 'derived:formula'" in check_sql and "like" not in check_sql
+    assert len(_jobs(connector, "verdict.compute")) == 1
+
+
 async def test_dispatch_entity_merged_queues_the_winners_formula_runs() -> None:
     """After a merge the winner may hold two derived claims for a formula cell: its formula
     columns re-run (app.queue_entity_formula_runs commits the runs with their event)."""

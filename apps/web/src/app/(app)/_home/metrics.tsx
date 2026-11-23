@@ -22,7 +22,6 @@ export async function Metrics(props: HomeCardProps) {
   if (!m) return <CardError id="home-metrics" title="Key numbers" retry={props.retry} />;
   const spend = m.spend_month;
   return (
-    // Layout on a wrapper with no si-* class: components.css is unlayered and would win.
     <section aria-label="Key numbers" className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,160px),1fr))] gap-3">
       <MetricTile family="pool" label="Accounts found" value={fmt(m.accounts_found.count)} href={m.accounts_found.href} delta={props.brief ? 'judged under this Brief' : 'in this workspace'} version={VERSION} />
       <MetricTile family="mint" label="Confirmed" value={fmt(m.confirmed.count)} href={m.confirmed.href} delta="quoted evidence" version={VERSION} />

@@ -29,11 +29,12 @@ export async function SourcesCard(props: HomeCardProps) {
                     <span className="inline-flex items-center gap-2 text-[13px] text-ink-muted">
                       <span aria-hidden="true" className="h-2.5 w-2.5 flex-none rounded-full border-2 border-line-strong" />
                       <span className="font-semibold">{r.name}</span>
+                      <span className="text-[12px]">{r.type}</span>
                       <span>Paused</span>
                       <span className="text-[12px]">· {detail}</span>
                     </span>
                   ) : (
-                    <HealthIndicator name={r.name} status={r.health} detail={detail} />
+                    <HealthIndicator name={r.name} status={r.health} detail={`${r.type} · ${detail}`} />
                   )}
                 </Link>
               </li>

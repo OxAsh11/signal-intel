@@ -8,6 +8,7 @@ import { BriefLens } from './brief-lens';
 import { BudgetMeter } from './budget-meter';
 import { NavCount, NavLinks } from './nav-links';
 import { MembershipGate } from './membership-gate';
+import { SearchBox } from './search-box';
 import { UserMenu } from './user-menu';
 import { WorkspaceSwitcher } from './workspace-switcher';
 
@@ -27,8 +28,59 @@ async function ReviewCount() {
   if (!ctx?.workspace || !supabase) return null;
   const ws = ctx.workspace.id;
   const { data, error } = await supabase.rpc('sidebar_counts', { p_ws: ws });
-  if (error) console.error(`sidebar counts failed for workspace ${ws}: ${error.message}`);
+  if (error) {
+    console.error(`sidebar counts failed for workspace ${ws}: ${error.message}`);
+    return (
+      <span title="Couldn't load" className="font-mono text-[12px] text-ink-muted">
+        —
+      </span>
+    );
+  }
   return <NavCount n={Number((data as { review?: number } | null)?.review ?? 0)} />;
+}
+
+/**
+ * The member's pinned views under Accounts, each with the number of accounts it matches under the
+ * lens (`public.pinned_views`). Streams in on its own. A failed load shows a muted "—", never nothing.
+ */
+async function PinnedViews() {
+  const [ctx, supabase] = await Promise.all([getOrgContext(), createClient()]);
+  if (!ctx?.workspace || !supabase) return null;
+  const ws = ctx.workspace.id;
+  const lens = await getBriefLens();
+  const { data, error } = await supabase.rpc('pinned_views', { p_ws: ws, p_brief: lens.briefId });
+  if (error) {
+    console.error(`pinned views failed for workspace ${ws}: ${error.message}`);
+    return (
+      <span title="Couldn't load" className="py-1 pr-2.5 pl-[22px] font-mono text-[12px] text-ink-muted">
+        —
+      </span>
+    );
+  }
+  const pins = (Array.isArray(data) ? data : []) as { ref: string; name: string; count: number | null; href: string }[];
+  return pins.map((p) => (
+    <Link
+      key={p.ref}
+      href={p.href}
+      data-pinned-view=""
+      className="flex items-center justify-between gap-2 rounded-[4px] py-1 pr-2.5 pl-[22px] text-[13px] leading-[18px] text-ink-muted no-underline hover:bg-surface-sunken hover:text-ink hover:no-underline"
+    >
+      <span className="truncate">{p.name}</span>
+      {p.count === null ? (
+        <span title="Couldn't load" className="font-mono text-[12px]">—</span>
+      ) : p.ref === 'errored' || p.ref === 'stale' ? (
+        <NavCount n={p.count} />
+      ) : (
+        <span className="font-mono text-[12px]">{p.count}</span>
+      )}
+    </Link>
+  ));
+}
+
+/** The top-bar search: needs the workspace, so it renders only inside one. */
+async function Search() {
+  const ctx = await getOrgContext();
+  return ctx?.workspace ? <SearchBox ws={ctx.workspace.id} /> : null;
 }
 
 /**
@@ -77,7 +129,10 @@ export function AppShell({ children }: { children: ReactNode }) {
         <Suspense fallback={null}>
           <NavLinks
             nav={navLinks()}
-            counts={{ review: <Suspense fallback={null}><ReviewCount /></Suspense> }}
+            counts={{
+              review: <Suspense fallback={null}><ReviewCount /></Suspense>,
+              pinned: <Suspense fallback={null}><PinnedViews /></Suspense>,
+            }}
             footer={<Suspense fallback={null}><BudgetMeter /></Suspense>}
           />
         </Suspense>
@@ -87,6 +142,11 @@ export function AppShell({ children }: { children: ReactNode }) {
           <Suspense fallback={<span className="si-label">Workspace</span>}>
             <WorkspaceSwitcher />
           </Suspense>
+          <div className="min-w-0 flex-1 md:max-w-[360px]">
+            <Suspense fallback={null}>
+              <Search />
+            </Suspense>
+          </div>
           <Suspense fallback={<span className="text-ink-faint">…</span>}>
             <UserMenu />
           </Suspense>

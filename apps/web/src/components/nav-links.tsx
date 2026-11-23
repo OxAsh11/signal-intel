@@ -7,7 +7,7 @@ import { cx } from '@signal/ui';
 import { GROUP_LABELS, navPath, type NavLink } from '@/lib/nav';
 
 /** Counts shown beside an item: server-rendered nodes (see NavCount), so they can stream in. */
-type Counts = { review?: ReactNode };
+type Counts = { review?: ReactNode; /** The member's pinned views, listed under Accounts. */ pinned?: ReactNode };
 
 const ORDER = ['find', 'work', 'engage', 'measure'] as const;
 
@@ -60,6 +60,7 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
           <span>{item.label}</span>
           {item.key === 'review' ? counts.review : null}
         </Link>
+        {item.key === 'accounts' && counts.pinned ? <div className="hidden md:contents">{counts.pinned}</div> : null}
         {item.children?.map((c) => (
           <Link
             key={c.key}

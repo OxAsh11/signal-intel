@@ -50,6 +50,8 @@ export type BriefConfig = {
 };
 
 export const MAX_COLUMNS = 12;
+/** R9: Add column refuses while a published Brief has other unpublished draft changes. */
+export const PENDING_CHANGES = 'This Brief has unpublished changes. Publish or discard them on the Brief page first.';
 export const MAX_RULES = 10;
 
 export const ROLE_LABELS: Record<Role, string> = {

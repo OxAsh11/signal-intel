@@ -17,6 +17,8 @@ async function call(fn: string, args: Record<string, unknown>): Promise<void> {
 const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim();
 
 // ── Identity matches (M4) ─────────────────────────────────────────────────────
+// Merge and Create new are for identity items only: the page offers them on identity cards, and
+// app.resolve_review_item refuses them (22023) for any other kind of item.
 
 export async function mergeAction(itemId: string): Promise<void> {
   await call('resolve_review_item', { p_id: itemId, p_action: 'merge' });
@@ -30,6 +32,18 @@ export async function createNewAction(itemId: string, form: FormData): Promise<v
   const newName = text(form, 'new_name');
   if (!newName) throw new Error('Enter a name for the new entity.');
   await call('resolve_review_item', { p_id: itemId, p_action: 'create_new', p_new_entity_name: newName });
+}
+
+// ── Values marked wrong (P5) ──────────────────────────────────────────────────
+
+/** Dismiss: the person was right, the claim stays retracted. */
+export async function dismissWrongAction(itemId: string): Promise<void> {
+  await call('resolve_review_item', { p_id: itemId, p_action: 'skip' });
+}
+
+/** Restore: the value was right after all; the claim is active again and verdicts recompute. */
+export async function restoreWrongAction(itemId: string): Promise<void> {
+  await call('resolve_review_item', { p_id: itemId, p_action: 'restore' });
 }
 
 // ── Verdicts (M5) ─────────────────────────────────────────────────────────────

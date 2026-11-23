@@ -11,7 +11,7 @@ const usd = (n: number) =>
 /**
  * AI spend this month against the workspace's monthly cap, from `public.budget_meter` (the sum the
  * budget guard uses). Mustard at 80% or more, lava at 100% or more; `· no cap` when no monthly cap
- * is set. Links to Settings, where budgets are changed. Renders nothing if the read fails.
+ * is set. Links to Settings, where budgets are changed. Shows a muted "—" (title "Couldn't load") if the read fails.
  */
 export async function BudgetMeter({ className }: { className?: string }) {
   const [ctx, supabase] = await Promise.all([getOrgContext(), createClient()]);
@@ -19,8 +19,13 @@ export async function BudgetMeter({ className }: { className?: string }) {
   const ws = ctx.workspace.id;
   const { data, error } = await supabase.rpc('budget_meter', { p_ws: ws });
   if (error || !data) {
+    // A failed read is shown, not swallowed: a muted dash that says so (the shell still renders).
     if (error) console.error(`budget meter: failed for workspace ${ws}: ${error.message}`);
-    return null;
+    return (
+      <span title="Couldn't load" className="block px-2.5 py-2 font-mono text-[13px] text-ink-muted">
+        —
+      </span>
+    );
   }
   const m = data as Meter;
   const spent = Number(m.spent_usd ?? 0);

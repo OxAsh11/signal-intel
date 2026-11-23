@@ -1,7 +1,10 @@
 @import 'tailwindcss';
 @import '@signal/ui/tokens.css';
 @import '@signal/ui/theme.css';
-@import '@signal/ui/components.css';
+/* Layered with Tailwind's own `components` layer, which sits below `utilities`: a utility on an
+   si-* element beats the si-* rule on the same property. Compound si-* selectors keep their
+   specificity within the layer; preflight is in `base`, so si-* still beats it. */
+@import '@signal/ui/components.css' layer(components);
 
 /* next/font self-hosts the faces; put them first in each stack from tokens.json. */
 :root {

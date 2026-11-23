@@ -117,7 +117,9 @@ export default async function HomePage({ searchParams }: PageProps<'/'>) {
         <Metrics {...card} />
       </Suspense>
 
-      {/* Two columns on desktop, one below 1180px (the phone included). Layout on wrappers only. */}
+      {/* Two columns from 1180px, one below (the phone included). Not 768px: beside the 236px sidebar
+          and 32px page padding that leaves ~470px, and a 300px right column would squeeze the left
+          one to ~145px. */}
       <div className="grid grid-cols-1 items-start gap-6 min-[1180px]:grid-cols-[minmax(0,1fr)_minmax(300px,380px)]">
         <div className="flex min-w-0 flex-col gap-6">
           <Suspense fallback={<CardSkeleton title="Needs you" lines={4} />}>
