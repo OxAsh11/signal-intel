@@ -39,6 +39,7 @@ from signal_core.jobs import KillSwitch, job
 from signal_core.logging import get_logger
 from signal_core.metering import ApprovalStore, CallContext
 from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
+from signal_core.modules.m01_generate import BriefGenerateInput, run_brief_generate
 from signal_core.modules.m02_radar import (
     create_source_records,
     load_query_ids,
@@ -267,6 +268,21 @@ def build_app(
         assert pool is not None and gateway is not None, "pool and gateway required"
         await run_brief_intake(inp, gateway, pool)
         log.info("brief.intake.done", brief_id=brief_id)
+
+    @job(app, type="brief.generate", kill_switch=kill_switch, queue="briefs", retry=1)
+    async def brief_generate(
+        brief_id: str, domain: str, description: str, org_id: str, workspace_id: str, **_: Any
+    ) -> None:
+        inp = BriefGenerateInput(
+            brief_id=UUID(brief_id),
+            domain=domain,
+            description=description,
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
+        )
+        assert pool is not None and gateway is not None, "pool and gateway required"
+        await run_brief_generate(inp, gateway, pool)
+        log.info("brief.generate.done", brief_id=brief_id)
 
     # ------------------------------------------------------------------
     # Brief pilot and edit preview (M1)
@@ -1725,6 +1741,14 @@ def build_app(
             await brief_intake.configure(queueing_lock=payload["brief_id"]).defer_async(
                 brief_id=payload["brief_id"],
                 description=payload.get("description", payload.get("name", "")),
+                org_id=payload["org_id"],
+                workspace_id=payload["workspace_id"],
+            )
+        elif evt == "brief.generate_requested":
+            await brief_generate.configure(queueing_lock=payload["brief_id"]).defer_async(
+                brief_id=payload["brief_id"],
+                domain=payload["domain"],
+                description=payload.get("description", ""),
                 org_id=payload["org_id"],
                 workspace_id=payload["workspace_id"],
             )
