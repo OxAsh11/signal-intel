@@ -1,4 +1,5 @@
 -- ── P8: Reports and Settings ─────────────────────────────────────────────────
+alter type public.event_type add value if not exists 'business.generate_requested';
 
 -- ── 1. Hand labels: tag definition + link ────────────────────────────────────
 drop table if exists public.account_tag cascade;
@@ -298,14 +299,42 @@ begin
 end $$;
 
 -- ── 10. Business context ─────────────────────────────────────────────────────
+-- Trigger: create an event so the worker generates business context from a domain.
+create or replace function app.generate_business_context(p_ws uuid, p_domain text) returns void
+language plpgsql security definer set search_path = ''
+as $$
+declare v_org uuid;
+begin
+  if not app.has_workspace_role(p_ws, 'Editor') then raise exception 'permission denied' using errcode = '42501'; end if;
+  select org_id into v_org from public.workspace where id = p_ws;
+  if v_org is null then raise exception 'workspace not found' using errcode = 'P0002'; end if;
+  perform app.emit('business.generate_requested'::public.event_type, v_org, p_ws, 'workspace', p_ws,
+                   jsonb_build_object('workspace_id', p_ws, 'domain', p_domain, 'org_id', v_org));
+end $$;
+
+create or replace function public.generate_business_context(p_ws uuid, p_domain text) returns void
+language plpgsql security definer set search_path = ''
+as $$ begin perform app.generate_business_context(p_ws, p_domain); end $$;
+
+create or replace function app.set_business_context(p_ws uuid, p_context jsonb) returns void
+language plpgsql security definer set search_path = ''
+as $$
+begin
+  update public.workspace_settings set business_context = coalesce(p_context, '{}'::jsonb), updated_at = now()
+   where workspace_id = p_ws;
+end $$;
+
 create or replace function public.set_business_context(p_ws uuid, p_context jsonb) returns void
 language plpgsql security definer set search_path = ''
 as $$
 begin
   if not app.has_workspace_role(p_ws, 'Admin') then raise exception 'permission denied' using errcode = '42501'; end if;
-  update public.workspace_settings set business_context = coalesce(p_context, '{}'::jsonb), updated_at = now()
-   where workspace_id = p_ws;
+  perform app.set_business_context(p_ws, p_context);
 end $$;
+
+-- kill-switch seed
+insert into public.job_type_config (job_type, enabled) values ('business.generate', true)
+  on conflict (job_type) do nothing;
 
 -- ── Grants ───────────────────────────────────────────────────────────────────
 revoke all on function public.report_funnel(uuid, uuid) from public, anon;
@@ -340,4 +369,13 @@ grant execute on function public.save_column_template(uuid, text, jsonb) to auth
 grant execute on function public.delete_column_template(uuid) to authenticated;
 grant execute on function public.list_column_templates(uuid) to authenticated;
 grant execute on function public.set_business_context(uuid, jsonb) to authenticated;
+revoke all on function app.set_business_context(uuid, jsonb) from public, anon, authenticated;
+grant execute on function app.set_business_context(uuid, jsonb) to service_role;
+revoke all on function public.generate_business_context(uuid, text) from public, anon;
+grant execute on function public.generate_business_context(uuid, text) to authenticated;
+revoke all on function app.generate_business_context(uuid, text) from public, anon, authenticated;
+grant execute on function app.generate_business_context(uuid, text) to authenticated;
 revoke all on function app.check_budget_thresholds(uuid) from public, anon, authenticated;
+
+insert into public.job_type_config (job_type, enabled) values ('business.generate', true)
+  on conflict (job_type) do nothing;

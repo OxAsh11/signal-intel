@@ -206,6 +206,7 @@ class EventType(StrEnum):
     COLUMN_RUN_REQUESTED = "column.run_requested"
     PEOPLE_FIND_REQUESTED = "people.find_requested"
     BRIEF_GENERATE_REQUESTED = "brief.generate_requested"
+    BUSINESS_GENERATE_REQUESTED = "business.generate_requested"
 
 
 class UsageUnit(StrEnum):

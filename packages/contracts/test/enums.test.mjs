@@ -12,7 +12,7 @@ test('enums match PRD Appendix A', () => {
   // Appendix A.4's twenty, plus six reviewed additions that queue work from the interface:
   // brief.intake_requested (0015), radar.fetch_queued (0017), brief.preview_requested (0032),
   // predicate.backfill_requested (0038), column.run_requested (0041), people.find_requested (0044).
-  assert.equal(enums.EventType.values.length, 27);
+  assert.equal(enums.EventType.values.length, 28);
   assert.deepEqual(enums.GateOutcome.values, ['applied', 'review queue', 'digest']);
 });
 

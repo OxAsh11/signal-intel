@@ -1,5 +1,5 @@
 import { createClient } from '@/lib/supabase/server';
-import { setBusinessContext } from '@/app/actions/business';
+import { setBusinessContext, generateBusinessContext } from '@/app/actions/business';
 
 export async function BusinessSection({ ws }: { ws: string }) {
   const supabase = await createClient();
@@ -14,6 +14,11 @@ export async function BusinessSection({ ws }: { ws: string }) {
         <input type="hidden" name="workspace" value={ws} />
         <textarea name="context" defaultValue={initial} rows={6} className="w-full rounded-sm border border-line-strong bg-surface px-3 py-2 text-[14px]" />
         <button type="submit" className="si-btn si-btn-sm self-start">Save</button>
+      </form>
+      <form action={generateBusinessContext} className="mt-3 flex items-center gap-2">
+        <input type="hidden" name="workspace" value={ws} />
+        <input name="domain" placeholder="example.com" className="rounded-sm border border-line-strong bg-surface px-2 py-1 text-[13px]" />
+        <button type="submit" className="si-btn si-btn-sm">Generate from domain</button>
       </form>
     </section>
   );

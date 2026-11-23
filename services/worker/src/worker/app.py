@@ -39,6 +39,7 @@ from signal_core.jobs import KillSwitch, job
 from signal_core.logging import get_logger
 from signal_core.metering import ApprovalStore, CallContext
 from signal_core.modules.m01_brief import BriefIntakeInput, run_brief_intake
+from signal_core.modules.m01_business_context import BusinessContextInput, run_business_context
 from signal_core.modules.m01_generate import BriefGenerateInput, run_brief_generate
 from signal_core.modules.m02_radar import (
     create_source_records,
@@ -283,6 +284,15 @@ def build_app(
         assert pool is not None and gateway is not None, "pool and gateway required"
         await run_brief_generate(inp, gateway, pool)
         log.info("brief.generate.done", brief_id=brief_id)
+
+    @job(app, type="business.generate", kill_switch=kill_switch, queue="briefs", retry=1)
+    async def business_generate(workspace_id: str, domain: str, org_id: str, **_: Any) -> None:
+        inp = BusinessContextInput(
+            workspace_id=UUID(workspace_id), domain=domain, org_id=UUID(org_id)
+        )
+        assert pool is not None and gateway is not None
+        await run_business_context(inp, gateway, pool)
+        log.info("business.generate.done", workspace_id=workspace_id)
 
     # ------------------------------------------------------------------
     # Brief pilot and edit preview (M1)
@@ -1751,6 +1761,12 @@ def build_app(
                 description=payload.get("description", ""),
                 org_id=payload["org_id"],
                 workspace_id=payload["workspace_id"],
+            )
+        elif evt == "business.generate_requested":
+            await business_generate.configure(queueing_lock=payload["workspace_id"]).defer_async(
+                workspace_id=payload["workspace_id"],
+                domain=payload["domain"],
+                org_id=payload["org_id"],
             )
         elif evt == "radar.fetch_queued":
             await _queue_fetch(
