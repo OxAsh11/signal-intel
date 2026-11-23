@@ -205,6 +205,7 @@ class EventType(StrEnum):
     PREDICATE_BACKFILL_REQUESTED = "predicate.backfill_requested"
     COLUMN_RUN_REQUESTED = "column.run_requested"
     PEOPLE_FIND_REQUESTED = "people.find_requested"
+    BRIEF_GENERATE_REQUESTED = "brief.generate_requested"
 
 
 class UsageUnit(StrEnum):
