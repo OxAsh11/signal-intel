@@ -21,7 +21,7 @@ const text = (form: FormData, key: string) => String(form.get(key) ?? '').trim()
 export async function generateBrief(form: FormData): Promise<void> {
   const workspace = text(form, 'workspace');
   const domain = text(form, 'domain');
-  const description = text(form, 'description');
+  const description = text(form, 'description') || text(form, 'notes');
   if (!workspace || !domain) return;
   const { data, error } = await rpc('generate_brief', {
     p_ws: workspace,
