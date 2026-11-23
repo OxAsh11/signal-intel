@@ -528,8 +528,8 @@ select is(jsonb_array_length(public.search_accounts(pg_temp.w(), 'zed')), 8, '10
 reset role;
 
 -- ── Grants ───────────────────────────────────────────────────────────────────
-select ok(not has_function_privilege('anon', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int)', 'execute')
-          and has_function_privilege('authenticated', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int)', 'execute')
+select ok(not has_function_privilege('anon', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int, public.entity_type)', 'execute')
+          and has_function_privilege('authenticated', 'public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int, public.entity_type)', 'execute')
           and has_function_privilege('authenticated', 'public.search_accounts(uuid, text, uuid)', 'execute'),
   '101. account_table is for signed-in users');
 select ok(not has_function_privilege('authenticated', 'app.table_brief_columns(uuid, uuid)', 'execute'), '102. app helpers are not granted');

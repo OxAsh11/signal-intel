@@ -4,7 +4,7 @@ import { z } from 'zod';
 export const EntityType = z.enum(["company","person","site","digital_asset","query"]);
 export type EntityType = z.infer<typeof EntityType>;
 
-export const AliasType = z.enum(["registry_id","domain","profile_url","name_country"]);
+export const AliasType = z.enum(["registry_id","domain","profile_url","name_country","email","phone","site"]);
 export type AliasType = z.infer<typeof AliasType>;
 
 export const DataScope = z.enum(["shared","tenant"]);

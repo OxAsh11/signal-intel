@@ -398,8 +398,10 @@ check('memory_chunk full-text search works', (await one(
   const day = async (ws) => Number((await one(`select app.period_spend($1, null, 'day') v`, [ws])).v);
 
   // Seeds.
-  check('model_price seeded for the default models', (await one(`select count(*)::int n from public.model_price where provider <> 'brave'`)).n === 5);
-  check('model_price is readable by authenticated', (await rpc(C, `select count(*)::int n from public.model_price where provider <> 'brave'`)).rows[0].n === 5);
+  // P6 adds six provider price keys (find, verify and four other vendors) to the five AI/embedding ones.
+  check('model_price seeded for the default models and providers', (await one(`select count(*)::int n from public.model_price where provider <> 'brave'`)).n === 11);
+  check('model_price is readable by authenticated', (await rpc(C, `select count(*)::int n from public.model_price where provider <> 'brave'`)).rows[0].n === 11);
+  check('model_price seeded for the P6 providers', (await one(`select count(*)::int n from public.model_price where model in ('leadmagic','findymail','findymail_verify','prospeo','pdl_company','pdl_person') and unit = 'enrichment_lookup'`)).n === 6);
   check('job types for AI status and budget resume are seeded', (await one(`select count(*)::int n from public.job_type_config where job_type in ('system.ai_status','budget.resume')`)).n === 2);
   check('editor approval limit defaults to 25', Number((await one(`select editor_approval_limit_usd v from public.workspace_settings where workspace_id = $1`, [wsA])).v) === 25);
 

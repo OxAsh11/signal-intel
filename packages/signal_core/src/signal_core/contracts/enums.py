@@ -19,6 +19,9 @@ class AliasType(StrEnum):
     DOMAIN = "domain"
     PROFILE_URL = "profile_url"
     NAME_COUNTRY = "name_country"
+    EMAIL = "email"
+    PHONE = "phone"
+    SITE = "site"
 
 
 class DataScope(StrEnum):

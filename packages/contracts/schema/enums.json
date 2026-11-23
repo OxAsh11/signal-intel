@@ -2,7 +2,7 @@
   "$comment": "Canonical closed value lists — PRD Appendix A.2, A.3, A.4. The ONLY source of these values in code. Postgres enums in supabase/migrations must match (checked by `pnpm db:check`). Changing a list = a reviewed change + a migration.",
   "enums": {
     "EntityType":                { "pg": "entity_type",                 "values": ["company", "person", "site", "digital_asset", "query"] },
-    "AliasType":                 { "pg": "alias_type",                  "values": ["registry_id", "domain", "profile_url", "name_country"], "note": "Listed in matching priority order." },
+    "AliasType":                 { "pg": "alias_type",                  "values": ["registry_id", "domain", "profile_url", "name_country", "email", "phone", "site"], "note": "Listed in matching priority order." },
     "DataScope":                 { "pg": "data_scope",                  "values": ["shared", "tenant"] },
     "ClaimStatus":               { "pg": "claim_status",                "values": ["active", "superseded", "retracted"] },
     "ExtractionStatus":          { "pg": "extraction_status",           "values": ["pending", "extracted", "irrelevant", "failed"] },

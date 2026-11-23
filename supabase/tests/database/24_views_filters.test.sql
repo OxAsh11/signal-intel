@@ -306,9 +306,10 @@ select throws_ok(format('select * from public.view_entities(%L::uuid, null, %L::
   '22023', 'a page has at most 500 rows', '100. a page larger than 500 is refused');
 
 -- ── Person views ─────────────────────────────────────────────────────────────
-select throws_ok(format('select * from public.view_entities(%L::uuid, null, %L::jsonb, null, 10, 0, %L)',
-    (select v from ids where k = 'ws'), '{}', 'person'),
-  '22023', 'person views come with People (P6)', '101. a person view returns the P6 message');
+-- P6: person mode is available; this fixture has no people, so it returns no rows. Other entity
+-- types are still refused (tested in suite 28).
+select is((select count(*)::int from public.view_entities((select v from ids where k = 'ws'), null, '{}', null, 10, 0, 'person')),
+  0, '101. a person view is available (empty until people are found)');
 
 -- ── Access ───────────────────────────────────────────────────────────────────
 select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-00000000ce05","role":"authenticated"}', true);
