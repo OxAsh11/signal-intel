@@ -8,6 +8,7 @@ import { Providers } from './providers';
 import { UsageAndBudgets } from './usage';
 import { DataSection } from './_data-section';
 import { HealthSection } from './_health-section';
+import { BusinessSection } from './_business-section';
 
 export const metadata: Metadata = { title: 'Settings' };
 
@@ -59,7 +60,11 @@ export default async function SettingsPage({ searchParams }: PageProps<'/setting
           </Suspense>
         </>
       ) : null}
-      {section === 'business' ? <p className="m-0 text-ink-muted">Business context (coming soon).</p> : null}
+      {section === 'business' ? (
+        <Suspense fallback={null}>
+          <BusinessSection ws={ctx?.workspace?.id ?? ''} />
+        </Suspense>
+      ) : null}
       {section === 'mailboxes' ? <p className="m-0 text-ink-muted">Arrives with the Email engine.</p> : null}
       {section === 'integrations' ? <p className="m-0 text-ink-muted">Not set up yet.</p> : null}
       {section === 'data' ? (
