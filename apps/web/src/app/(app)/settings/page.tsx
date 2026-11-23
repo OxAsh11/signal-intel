@@ -40,7 +40,7 @@ export default async function SettingsPage({ searchParams }: PageProps<'/setting
           </Suspense>
         </>
       ) : null}
-      {section === 'providers' ? (
+      {section === 'workspace' || section === 'providers' ? (
         <Suspense fallback={<p className="m-0 text-ink-muted">Loading providers…</p>}>
           <Providers />
         </Suspense>
