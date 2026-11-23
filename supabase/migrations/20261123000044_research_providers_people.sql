@@ -24,6 +24,12 @@ alter type public.alias_type add value if not exists 'email';
 alter type public.alias_type add value if not exists 'phone';
 alter type public.alias_type add value if not exists 'site';
 
+-- A request to find people is announced in the outbox like a column run; the worker defers one
+-- `people.find` job under a people:<account> lock.
+alter type public.event_type add value if not exists 'people.find_requested';
+insert into public.job_type_config (job_type, enabled) values ('people.find', true)
+  on conflict do nothing;
+
 -- ── 2. One row per provider attempt in a run ─────────────────────────────────
 create table if not exists public.predicate_run_attempt (
   id             uuid primary key default gen_random_uuid(),
@@ -570,6 +576,169 @@ LANGUAGE sql SECURITY DEFINER SET search_path = '' AS $$
   SELECT app.resolve_review_item(p_id, p_action, p_new_entity_name, p_account);
 $$;
 
+-- ── 6b. Find people: receipt, estimate and request ───────────────────────────
+-- A person found by PDL is matched by profile URL or email digest before a new entity is made.
+-- The email value stays encrypted (and the digest opaque); only the web panel's worker-backed
+-- reveal can decrypt it. Every found person gets a works_at link, a source receipt and the aliases
+-- the People page needs. The worker flags a location mismatch separately.
+create or replace function app.upsert_found_person(
+  p_org uuid, p_ws uuid, p_account uuid, p_name text, p_title text, p_persona text,
+  p_profile_url text, p_email_encrypted text, p_email_hash text, p_email_masked text,
+  p_location jsonb, p_source uuid
+) returns uuid
+  language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_company uuid;
+  v_person  uuid;
+  v_cp      uuid;
+  v_country text := nullif(btrim(coalesce(p_location ->> 'country', '')), '');
+  v_city    text := nullif(btrim(coalesce(p_location ->> 'locality', '')), '');
+begin
+  select a.entity_id into v_company from public.account a
+   where a.id = p_account and a.org_id = p_org and a.workspace_id = p_ws;
+  if v_company is null then
+    raise exception 'account % is not in this workspace', p_account using errcode = '42501';
+  end if;
+
+  if p_email_hash is not null then
+    select cp.entity_id into v_person from public.contact_point cp
+     where cp.org_id = p_org and cp.type = 'email' and cp.value_hash = p_email_hash limit 1;
+  end if;
+  if v_person is null and p_profile_url is not null then
+    select ea.entity_id into v_person from public.entity_alias ea
+     where ea.org_id = p_org and ea.alias_type = 'profile_url'
+       and ea.value_normalised = p_profile_url limit 1;
+  end if;
+  if v_person is null then
+    v_person := app.create_entity(p_org, 'person'::public.entity_type,
+                                  coalesce(nullif(btrim(p_name), ''), 'Unknown contact'));
+  end if;
+
+  if not exists (select 1 from public.relationship r
+                  where r.from_entity_id = v_person and r.to_entity_id = v_company
+                    and r.relation = 'works_at' and r.valid_to is null) then
+    insert into public.relationship
+      (org_id, from_entity_id, relation, to_entity_id, source_record_id, confidence, attributes, scope)
+    values
+      (p_org, v_person, 'works_at', v_company, p_source, 80,
+       jsonb_strip_nulls(jsonb_build_object('title', p_title, 'persona', p_persona,
+                                            'discovered_by', 'pdl_person')), 'tenant');
+  end if;
+
+  if p_profile_url is not null then
+    perform app.create_entity_alias(p_org, v_person, 'profile_url'::public.alias_type,
+                                    p_profile_url, 80::smallint, p_source);
+  end if;
+  if p_email_hash is not null then
+    perform app.create_entity_alias(p_org, v_person, 'email'::public.alias_type,
+                                    p_email_hash, 80::smallint, p_source);
+    select cp.id into v_cp from public.contact_point cp
+     where cp.org_id = p_org and cp.type = 'email' and cp.value_hash = p_email_hash limit 1;
+    if v_cp is null then
+      insert into public.contact_point
+        (org_id, workspace_id, entity_id, account_id, type, value_encrypted, value_hash,
+         masked_hint, status, provider)
+      values
+        (p_org, p_ws, v_person, p_account, 'email', p_email_encrypted, p_email_hash,
+         p_email_masked, 'unknown', 'pdl_person');
+    end if;
+  end if;
+  if v_country is not null then
+    perform app.create_entity_alias(p_org, v_person, 'name_country'::public.alias_type,
+                                    coalesce(nullif(btrim(p_name), ''), 'Unknown contact') || ', ' || v_country,
+                                    70::smallint, p_source);
+  end if;
+  if v_city is not null then
+    perform app.create_entity_alias(p_org, v_person, 'site'::public.alias_type,
+                                    v_city || coalesce(', ' || v_country, ''), 70::smallint, p_source);
+  end if;
+  return v_person;
+end $$;
+revoke all on function app.upsert_found_person(uuid, uuid, uuid, text, text, text, text, text, text, text, jsonb, uuid)
+  from public, anon, authenticated;
+grant execute on function app.upsert_found_person(uuid, uuid, uuid, text, text, text, text, text, text, text, jsonb, uuid)
+  to service_role;
+
+-- {count, per_person_usd, cost_usd, remaining_usd, within_budget, max_per_request}. The price is
+-- read from model_price, never hard-coded here; the limit is 1–10 and defaults to 5 people.
+create or replace function public.estimate_find_people(p_ws uuid, p_account uuid, p_limit int default 5)
+returns jsonb
+  language plpgsql stable security definer set search_path = ''
+as $$
+declare
+  v_per  numeric;
+  v_left numeric;
+begin
+  if not app.has_workspace_role(p_ws, 'Viewer') then
+    raise exception 'permission denied' using errcode = '42501';
+  end if;
+  if p_limit is null or p_limit < 1 or p_limit > 10 then
+    raise exception 'find people takes a limit of 1 to 10' using errcode = '22023';
+  end if;
+  if not exists (select 1 from public.account where id = p_account and workspace_id = p_ws) then
+    raise exception 'account not found in this workspace' using errcode = '22023';
+  end if;
+  select usd_per_million / 1000000 into v_per from public.model_price
+   where model = 'pdl_person' and unit = 'enrichment_lookup';
+  v_per := coalesce(v_per, 0);
+  v_left := app.remaining_budget_usd(p_ws, null);
+  return jsonb_build_object(
+    'count', p_limit,
+    'per_person_usd', v_per,
+    'cost_usd', p_limit * v_per,
+    'remaining_usd', v_left,
+    'within_budget', least(10, case when v_left is null or v_per = 0 then p_limit
+                                    else least(p_limit, floor(v_left / v_per)::int) end),
+    'max_per_request', 10);
+end $$;
+
+-- Editor+: checks the same budget the worker will reserve, then announces one locked job on the
+-- outbox. The P3 55000 message names the largest N that fits, never more than the asked limit.
+create or replace function public.request_find_people(p_ws uuid, p_account uuid, p_limit int default 5,
+                                                     p_brief uuid default null)
+returns jsonb
+  language plpgsql security definer set search_path = ''
+as $$
+declare
+  v_org   uuid;
+  v_bv    uuid;
+  v_per   numeric;
+  v_cost  numeric;
+  v_left  numeric;
+  v_n     int;
+begin
+  select org_id into v_org from public.workspace where id = p_ws;
+  if v_org is null or not app.has_workspace_role(p_ws, 'Editor') then
+    raise exception 'permission denied' using errcode = '42501';
+  end if;
+  if p_limit is null or p_limit < 1 or p_limit > 10 then
+    raise exception 'find people takes a limit of 1 to 10' using errcode = '22023';
+  end if;
+  if not exists (select 1 from public.account where id = p_account and workspace_id = p_ws) then
+    raise exception 'account not found in this workspace' using errcode = '22023';
+  end if;
+
+  select usd_per_million / 1000000 into v_per from public.model_price
+   where model = 'pdl_person' and unit = 'enrichment_lookup';
+  v_per := coalesce(v_per, 0);
+  v_cost := p_limit * v_per;
+  v_left := app.remaining_budget_usd(p_ws, null);
+  if v_left is not null and v_cost > v_left then
+    v_n := least(p_limit, floor(v_left / v_per)::int);
+    raise exception 'this run needs $% but $% is left in the budget; find the first % within budget',
+      app.usd_text(v_cost), app.usd_text(v_left), v_n using errcode = '55000';
+  end if;
+
+  v_bv := app.home_lens(p_ws, p_brief);
+  perform app.emit('people.find_requested'::public.event_type, v_org, p_ws, 'account', p_account,
+                   jsonb_build_object('account_id', p_account, 'workspace_id', p_ws,
+                                      'org_id', v_org, 'limit', p_limit, 'brief_id', v_bv));
+  perform app.audit(v_org, p_ws, 'people.find_requested', 'account', p_account, null,
+                    jsonb_build_object('limit', p_limit, 'cost_usd', v_cost, 'brief_id', v_bv));
+  return jsonb_build_object('queued', 1, 'cost_usd', v_cost, 'brief_id', v_bv);
+end $$;
+
 -- ── 7. Provider order and status ────────────────────────────────────────────
 alter table public.workspace_settings
   add column if not exists provider_order jsonb not null default '["leadmagic","findymail","prospeo"]'::jsonb;
@@ -854,3 +1023,8 @@ grant execute on function public.set_provider_order(uuid, jsonb) to authenticate
 grant execute on function public.provider_status(uuid) to authenticated;
 grant execute on function public.account_table(uuid, uuid, jsonb, jsonb, uuid[], int, int, public.entity_type)
   to authenticated;
+
+revoke all on function public.estimate_find_people(uuid, uuid, int) from public, anon;
+revoke all on function public.request_find_people(uuid, uuid, int, uuid) from public, anon;
+grant execute on function public.estimate_find_people(uuid, uuid, int) to authenticated;
+grant execute on function public.request_find_people(uuid, uuid, int, uuid) to authenticated;

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(66);
+select plan(75);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- A owns Alpha, E is an Editor, K a Viewer, F is signed in but a member of nothing.
@@ -273,6 +273,40 @@ select ok(has_function_privilege('authenticated', 'public.person_email(uuid, uui
           and has_function_privilege('authenticated', 'public.resolve_review_item(uuid, text, text, uuid)', 'execute')
           and not has_function_privilege('anon', 'public.provider_status(uuid)', 'execute'),
   '63. client RPCs are signed-in only');
+
+-- ── Find people: estimate, budget refusal and request ───────────────────────
+-- The fixture has spent $0.50 of a $1 workspace day cap, leaving room for one $0.28 lookup.
+reset role;
+insert into public.budget (org_id, workspace_id, period, cap_usd)
+values (pg_temp.id('org'), pg_temp.w(), 'day', 1.00);
+select is((public.estimate_find_people(pg_temp.w(), pg_temp.id('ac'), 3) ->> 'cost_usd')::numeric,
+  0.84, '67. an estimate is the limit times the person price');
+select is((public.estimate_find_people(pg_temp.w(), pg_temp.id('ac'), 3) ->> 'per_person_usd')::numeric,
+  0.28, '68. the price comes from model_price');
+select is((public.estimate_find_people(pg_temp.w(), pg_temp.id('ac'), 3) ->> 'within_budget')::int,
+  1, '69. the estimate names the largest count that fits');
+
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000028a2","role":"authenticated"}', true);
+select is((public.estimate_find_people(pg_temp.w(), pg_temp.id('ac'), 3) ->> 'count')::int, 3,
+  '70. a Viewer can see the estimate');
+select throws_ok(format('select public.request_find_people(%L::uuid, %L::uuid, 1, null)',
+                         pg_temp.w(), pg_temp.id('ac')),
+  '42501', 'permission denied', '71. a Viewer cannot ask to find people');
+
+set local role authenticated;
+select set_config('request.jwt.claims', '{"sub":"00000000-0000-4000-8000-0000000028a3","role":"authenticated"}', true);
+select throws_ok(format('select public.request_find_people(%L::uuid, %L::uuid, 3, null)',
+                         pg_temp.w(), pg_temp.id('ac')),
+  '55000', 'this run needs $0.84 but $0.50 is left in the budget; find the first 1 within budget',
+  '72. a refusal names the first N that fit the budget');
+select is((public.request_find_people(pg_temp.w(), pg_temp.id('ac'), 1, null) ->> 'cost_usd')::numeric,
+  0.28, '73. an Editor can request one lookup within budget');
+reset role;  -- the outbox is a worker table, never readable by a signed-in member
+select is((select count(*)::int from public.outbox where event = 'people.find_requested'), 1,
+  '74. the request announces exactly one find job');
+select is((select payload ->> 'limit' from public.outbox where event = 'people.find_requested'),
+  '1', '75. the event carries the requested limit');
 
 -- ── Cross-workspace isolation ────────────────────────────────────────────────
 set local role authenticated;

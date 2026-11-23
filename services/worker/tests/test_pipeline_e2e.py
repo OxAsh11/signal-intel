@@ -61,8 +61,9 @@ from signal_core.modules.m09_activation import push_campaign_batch
 from signal_core.modules.m11_stage import mark_dormant_accounts
 from signal_core.modules.m12_meetings import confirm_meeting, sync_meeting
 from signal_core.modules.m16_reporting import compute_metric, get_funnel
+from signal_core.people import find_people as people_fill
 from signal_core.providers.base import DEFAULT_PRICES
-from signal_core.providers.pdl import PdlCompany
+from signal_core.providers.pdl import PdlCompany, PdlPerson
 from worker.app import build_app
 from worker.health import HealthState
 
@@ -368,11 +369,11 @@ class Db:
         rows = await self.admin(sql, params)
         return rows[0][0] if rows else None
 
-    async def as_user(self, sql: str, params: tuple[Any, ...] = ()) -> Any:
+    async def as_user(self, sql: str, params: tuple[Any, ...] = (), user: UUID = USER) -> Any:
         """Run as the signed-in member through the interface's public.* entry points."""
         async with self.pool.connection() as conn:
             await conn.execute("reset role")
-            await conn.execute("select set_config('request.jwt.claim.sub', %s, true)", (str(USER),))
+            await conn.execute("select set_config('request.jwt.claim.sub', %s, true)", (str(user),))
             await conn.execute("set local role authenticated")
             cur = await conn.execute(sql, params)
             rows = await cur.fetchall() if cur.description else []
@@ -2131,6 +2132,14 @@ ORG_P6 = UUID("00000000-0000-4000-8000-0000000e6002")
 WS_P6 = UUID("00000000-0000-4000-8000-0000000e6003")
 MEMBER_P6 = UUID("00000000-0000-4000-8000-0000000e6004")
 BRIEF_P6 = UUID("00000000-0000-4000-8000-0000000e6005")
+
+# The Find-people scenario runs in its own tenant.
+USER_P6_PEOPLE = UUID("00000000-0000-4000-8000-0000000e6101")
+ORG_P6_PEOPLE = UUID("00000000-0000-4000-8000-0000000e6102")
+WS_P6_PEOPLE = UUID("00000000-0000-4000-8000-0000000e6103")
+MEMBER_P6_PEOPLE = UUID("00000000-0000-4000-8000-0000000e6104")
+BRIEF_P6_PEOPLE = UUID("00000000-0000-4000-8000-0000000e6105")
+
 P6_PAGE = "P6 Grid runs drones across 40 substations."
 P6_QUESTION = "How many substations does the company inspect with drones?"
 
@@ -2385,3 +2394,279 @@ async def _provider_research_scenario(
         ("pdl_company", False),
         ("brave-search", True),
     ]
+
+
+class _PdlPersonHttp:
+    """A fake PDL Person Search edge: one request, no network, no key leaving the worker."""
+
+    def __init__(self, people: list[dict[str, Any]]) -> None:
+        self.people = people
+        self.requests: list[dict[str, Any]] = []
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        self.requests.append(body)
+        assert request.headers["X-Api-Key"] == "fake-person-key"
+        return httpx.Response(
+            200, json={"status": "ok", "data": self.people, "total": len(self.people)}
+        )
+
+
+async def _seed_people_tenant(db: Db) -> tuple[UUID, UUID, UUID]:
+    """An Editor, an Active Brief with persona titles and an account with a Delhi site."""
+    await db.admin(
+        "insert into auth.users (id, email) values (%s, 'editor@people.test')", (USER_P6_PEOPLE,)
+    )
+    await db.admin(
+        "insert into public.organisation (id, name) values (%s, 'P6 People Org')", (ORG_P6_PEOPLE,)
+    )
+    await db.admin(
+        "insert into public.workspace (id, org_id, name) values (%s, %s, 'P6 People')",
+        (WS_P6_PEOPLE, ORG_P6_PEOPLE),
+    )
+    await db.admin(
+        "insert into public.member (id, org_id, user_id, email)"
+        " values (%s, %s, %s, 'editor@people.test')",
+        (MEMBER_P6_PEOPLE, ORG_P6_PEOPLE, USER_P6_PEOPLE),
+    )
+    await db.admin(
+        "insert into public.role_assignment (org_id, member_id, workspace_id, role)"
+        " values (%s, %s, %s, 'Editor')",
+        (ORG_P6_PEOPLE, MEMBER_P6_PEOPLE, WS_P6_PEOPLE),
+    )
+    await db.admin(
+        "insert into public.brief (id, org_id, workspace_id, name, state)"
+        " values (%s, %s, %s, 'People at P6', 'Active')",
+        (BRIEF_P6_PEOPLE, ORG_P6_PEOPLE, WS_P6_PEOPLE),
+    )
+    version = await db.one(
+        "insert into public.brief_version"
+        " (brief_id, org_id, workspace_id, version, config, rubric, weights)"
+        " values (%s, %s, %s, 1, %s::jsonb, '{}', '{}'::jsonb) returning id",
+        (
+            BRIEF_P6_PEOPLE,
+            ORG_P6_PEOPLE,
+            WS_P6_PEOPLE,
+            json.dumps(
+                {
+                    "personas": {
+                        "buyer": ["VP Engineering"],
+                        "user": ["Engineer"],
+                        "influencer": ["CTO"],
+                    }
+                }
+            ),
+        ),
+    )
+    await db.admin(
+        "update public.brief set current_version_id = %s where id = %s",
+        (version, BRIEF_P6_PEOPLE),
+    )
+    company = await db.one(
+        "select app.create_entity(%s, 'company', 'P6 People Grid')", (ORG_P6_PEOPLE,)
+    )
+    account = await db.one(
+        "select app.create_account(%s, %s, %s)", (ORG_P6_PEOPLE, WS_P6_PEOPLE, company)
+    )
+    source = await db.one(
+        "select app.create_source_record(%s, %s, 'provider:pdl_company', 'api', null, now(),"
+        " %s, null, 'en')",
+        (ORG_P6_PEOPLE, WS_P6_PEOPLE, hashlib.sha256(b"p6 people domain").hexdigest()),
+    )
+    await db.admin(
+        "select app.create_entity_alias(%s, %s, 'domain'::public.alias_type,"
+        " 'peoplegrid.example', 90::smallint, %s)",
+        (ORG_P6_PEOPLE, company, source),
+    )
+    await db.admin(
+        "select app.create_entity_alias(%s, %s, 'site'::public.alias_type,"
+        " 'Delhi, India', 80::smallint, %s)",
+        (ORG_P6_PEOPLE, company, source),
+    )
+    await db.admin(
+        "insert into public.mention"
+        " (org_id, source_record_id, entity_type, raw_name, raw_domain, raw_country,"
+        "  entity_id, match_method, match_confidence)"
+        " values (%s, %s, 'company', 'P6 People Grid', 'peoplegrid.example', 'India',"
+        " %s, 'manual', 100)",
+        (ORG_P6_PEOPLE, source, company),
+    )
+    # Jane was already found: SQL must attach this entity, not create a duplicate.
+    existing = await db.one("select app.create_entity(%s, 'person', 'Jane Roe')", (ORG_P6_PEOPLE,))
+    await db.admin(
+        "select app.create_entity_alias(%s, %s, 'profile_url'::public.alias_type,"
+        " 'linkedin.com/in/jane', 90::smallint, %s)",
+        (ORG_P6_PEOPLE, existing, source),
+    )
+    return UUID(str(account)), UUID(str(company)), UUID(str(existing))
+
+
+@pytest.mark.asyncio
+async def test_find_people_end_to_end(conninfo: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SECRETS_ENCRYPTION_KEY", Fernet.generate_key().decode())
+    get_settings.cache_clear()
+    pool = AsyncConnectionPool(
+        conninfo,
+        min_size=1,
+        max_size=1,
+        open=False,
+        configure=_configure,
+        kwargs={"autocommit": False, "prepare_threshold": None},
+    )
+    await pool.open()
+    try:
+        db = Db(pool)
+        account, company, existing = await _seed_people_tenant(db)
+        http = _PdlPersonHttp(
+            [
+                {
+                    "full_name": "Jane Roe",
+                    "job_title": "VP Engineering",
+                    "work_email": "jane@peoplegrid.example",
+                    "linkedin_url": "linkedin.com/in/jane",
+                    "job_company_name": "P6 People Grid",
+                    "job_company_website": "peoplegrid.example",
+                    "location_locality": "Delhi",
+                    "location_country": "India",
+                },
+                {
+                    "full_name": "Mike Mumbai",
+                    "job_title": "Engineer",
+                    "work_email": "mike@peoplegrid.example",
+                    "linkedin_url": "linkedin.com/in/mike",
+                    "job_company_name": "P6 People Grid",
+                    "job_company_website": "peoplegrid.example",
+                    "location_locality": "Mumbai",
+                    "location_country": "India",
+                },
+                {
+                    "full_name": "Ada CTO",
+                    "job_title": "CTO",
+                    "work_email": "ada@peoplegrid.example",
+                    "linkedin_url": "linkedin.com/in/ada",
+                    "job_company_name": "P6 People Grid",
+                    "job_company_website": "peoplegrid.example",
+                    "location_locality": "Delhi",
+                    "location_country": "India",
+                },
+                {
+                    "full_name": "Sam Other",
+                    "job_title": "Engineer",
+                    "work_email": "sam@other.example",
+                    "linkedin_url": "linkedin.com/in/sam",
+                    "job_company_name": "Other Grid",
+                    "job_company_website": "other.example",
+                },
+            ]
+        )
+        gateway = FakeGateway()
+        connector = InMemoryConnector()
+        app = build_app(
+            connector,
+            _Switch(DbKillSwitch(pool)),
+            HealthState(),
+            PgHealthStore(pool),
+            ai_configured=gateway.configured,
+            approvals=PgApprovalStore(pool),
+            gateway=gateway,  # type: ignore[arg-type]
+            pool=pool,
+        )
+        async with httpx.AsyncClient(transport=httpx.MockTransport(http)) as client:
+
+            async def _provider(pool: AsyncConnectionPool) -> PdlPerson:
+                return PdlPerson(
+                    "fake-person-key",
+                    unit_price=DEFAULT_PRICES["pdl_person"],
+                    client=client,
+                )
+
+            monkeypatch.setattr(people_fill, "default_provider", _provider)
+            async with app.open_async():
+                estimate = await db.as_user(
+                    "select public.estimate_find_people(%s, %s, 4)",
+                    (WS_P6_PEOPLE, account),
+                    user=USER_P6_PEOPLE,
+                )
+                assert Decimal(str(estimate["cost_usd"])) == Decimal("1.12")
+                await db.as_user(
+                    "select public.request_find_people(%s, %s, 4, %s)",
+                    (WS_P6_PEOPLE, account, BRIEF_P6_PEOPLE),
+                    user=USER_P6_PEOPLE,
+                )
+                await _drain(app, connector, pool)
+
+        assert _failed_jobs(connector) == [], _failed_jobs(connector)
+        assert len(http.requests) == 1
+        should = http.requests[0]["query"]["bool"]["must"][1]["bool"]["should"]
+        assert [clause["match_phrase"]["job_title"] for clause in should] == [
+            "vp engineering",
+            "engineer",
+            "cto",
+        ]
+
+        # Three people are linked to the account; the seed entity was attached, not duplicated.
+        links = await db.admin(
+            "select r.from_entity_id from public.relationship r"
+            " where r.to_entity_id = %s and r.relation = 'works_at'",
+            (company,),
+        )
+        assert {row[0] for row in links} == {
+            existing,
+            *[
+                row[0]
+                for row in await db.admin(
+                    "select id from public.entity where display_name in ('Mike Mumbai', 'Ada CTO')"
+                )
+            ],
+        }
+        assert len(links) == 3
+        assert (
+            await db.one(
+                "select count(*) from public.entity where entity_type = 'person'"
+                " and display_name = 'Jane Roe'",
+            )
+            == 1
+        )
+
+        table = await db.as_user(
+            "select public.account_table(%s, null, null, null, null, 50, 0, 'person')",
+            (WS_P6_PEOPLE,),
+            user=USER_P6_PEOPLE,
+        )
+        rows = {row["name"]: row for row in table["rows"]}
+        assert set(rows) == {"Jane Roe", "Mike Mumbai", "Ada CTO"}
+        assert rows["Jane Roe"]["work_email"] == "j•••@peoplegrid.example"
+        assert rows["Mike Mumbai"]["location_mismatch"] is True
+        assert rows["Jane Roe"]["location_mismatch"] is False
+        assert "enc:v1:" not in json.dumps(table)
+        flag = await db.admin(
+            "select reason from public.entity_flag where workspace_id = %s",
+            (WS_P6_PEOPLE,),
+        )
+        assert flag[0][0] == "Possibly a different office (Mumbai vs India)"
+
+        review = await db.admin(
+            "select type, person_entity_id from public.review_item"
+            " where workspace_id = %s and status = 'pending'",
+            (WS_P6_PEOPLE,),
+        )
+        assert [row[0] for row in review] == ["unlinked_person"]
+        assert (
+            await db.one(
+                "select count(*) from public.relationship where from_entity_id = %s"
+                " and relation = 'works_at'",
+                (review[0][1],),
+            )
+            == 0
+        )
+
+        ledger = await db.admin(
+            "select model, quantity, cost_usd from public.usage_ledger"
+            " where workspace_id = %s and model = 'pdl_person' and status = 'ok'",
+            (WS_P6_PEOPLE,),
+        )
+        assert [(row[0], row[1], row[2]) for row in ledger] == [
+            ("pdl_person", 4, Decimal("1.120000"))
+        ]
+    finally:
+        await pool.close()

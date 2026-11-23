@@ -72,6 +72,7 @@ from signal_core.modules.m13_integrations import (
     subscriptions_for_event as _subscriptions_for_event,
 )
 from signal_core.modules.m16_reporting import compute_metric as _compute_metric
+from signal_core.people import find_people as _find_people
 from worker.health import HealthState
 
 log = get_logger(__name__)
@@ -796,6 +797,50 @@ def build_app(
         take the abandoned run back."""
         assert pool is not None, "pool required for column.run"
         return await _column_runtime.execute_run(pool, gateway, UUID(run_id))
+
+    @job(app, type="people.find", kill_switch=kill_switch, queue="compute", retry=1)
+    async def people_find_task(
+        *,
+        account_id: str,
+        workspace_id: str,
+        org_id: str,
+        limit: int,
+        brief_id: str | None = None,
+        approval_id: str | None = None,
+        **_: Any,
+    ) -> dict[str, Any]:
+        """One PDL person search per account (P6), locked by the account in the dispatcher."""
+        assert pool is not None, "pool required for people.find"
+        provider = await _find_people.default_provider(pool)
+        if provider is None:
+            log.info("people.find.not_configured", account_id=account_id)
+            return {"found": 0, "reason": "not_configured"}
+        job_args: dict[str, Any] = {
+            "account_id": account_id,
+            "workspace_id": workspace_id,
+            "org_id": org_id,
+            "limit": limit,
+        }
+        if brief_id:
+            job_args["brief_id"] = brief_id
+        if approval_id:
+            job_args["approval_id"] = approval_id
+        ctx = CallContext(
+            org_id=UUID(org_id),
+            workspace_id=UUID(workspace_id),
+            brief_id=UUID(brief_id) if brief_id else None,
+            job_id=None,
+            job_type="people.find",
+            job_args=job_args,
+        )
+        return await _find_people.find_people(
+            pool,
+            ctx,
+            UUID(account_id),
+            limit,
+            provider=provider,
+            brief_id=UUID(brief_id) if brief_id else None,
+        )
 
     # Wire the deferrable handles so m03 can call defer_async via the module attrs.
     _m03_extraction.extract_relevance_judge_job = extract_relevance_judge_job
@@ -1717,6 +1762,23 @@ def build_app(
                     UUID(str(payload["brief_id"])),
                     UUID(str(payload["workspace_id"])),
                     [str(k) for k in keys],
+                )
+        elif evt == "people.find_requested":
+            # Editor+ asked for people at one account (P6); the lock covers the whole account.
+            account_id = payload.get("account_id")
+            if not isinstance(account_id, str) or not _is_uuid(account_id):
+                log.warning(
+                    "dispatch.malformed_find_people", event_type=evt, event_id=event.get("event_id")
+                )
+            else:
+                await _enqueue(
+                    "people.find",
+                    f"people:{account_id}",
+                    account_id=account_id,
+                    workspace_id=str(payload["workspace_id"]),
+                    org_id=str(payload["org_id"]),
+                    limit=int(payload.get("limit") or 5),
+                    brief_id=payload.get("brief_id"),
                 )
         elif evt == "column.run_requested":
             # A person asked for runs (P3): one job per run, locked by the run id.

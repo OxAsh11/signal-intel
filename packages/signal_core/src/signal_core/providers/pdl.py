@@ -54,6 +54,8 @@ PERSON_FIELDS = (
     "location_locality",
     "location_region",
     "location_country",
+    "job_company_name",
+    "job_company_website",
 )
 
 
