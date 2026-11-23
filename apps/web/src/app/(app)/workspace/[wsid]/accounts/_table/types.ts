@@ -19,6 +19,8 @@ export type Column = {
   value_type: ValueType | string;
   fill_method: string | null;
   auto_run: boolean | null;
+  /** An enum column's values; null for any other type. */
+  allowed_values?: unknown;
 };
 
 export type TableRow = {

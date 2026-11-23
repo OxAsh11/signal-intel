@@ -9,6 +9,14 @@ const field = 'w-full rounded-sm border border-line-strong bg-surface px-3 py-2 
 const REASON_MAX = 500;
 const usd = (n: number) => `$${n.toFixed(2)}`;
 const stamp = (v: string | null) => (v ? (formatDate(v) ?? v) : '—');
+// Run history shows the time too: "5 Mar 2026, 14:03" (the viewer's local time).
+const timeFmt = new Intl.DateTimeFormat('en-GB', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+const stampTime = (v: string | null) => {
+  if (!v) return '—';
+  const t = Date.parse(v);
+  return Number.isNaN(t) ? v : timeFmt.format(t);
+};
+const strings = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : []);
 
 type Mode = 'view' | 'edit' | 'wrong' | 'rerun';
 type Target = { entityId: string; predicateId: string };
@@ -75,8 +83,11 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
   };
 
   if (!target) return null;
-  const active = detail?.claims.find((c) => c.status === 'active') ?? null;
+  // The claim the cell shows. Other active claims of the cell are overridden by it (shown struck
+  // through), and Mark wrong acts on it, never on whichever active claim happens to sort first.
+  const current = detail?.claim_id ? (detail.claims.find((c) => c.id === detail.claim_id && c.status === 'active') ?? null) : null;
   const type = detail?.column.value_type ?? 'text';
+  const options = strings(detail?.column.allowed_values);
   const runnable = detail?.column.fill_method === 'extract' || detail?.column.fill_method === 'formula';
 
   const go = (m: Mode) => {
@@ -126,9 +137,9 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
   }
 
   async function saveWrong() {
-    if (!active) return;
+    if (!current) return;
     setBusy(true);
-    const res = await markCellWrong(ws, active.id, reason);
+    const res = await markCellWrong(ws, current.id, reason);
     setBusy(false);
     if (!res.ok) return setError(res.error);
     setReason('');
@@ -215,7 +226,7 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
                     >
                       Edit
                     </button>
-                    {active ? (
+                    {current ? (
                       <button type="button" className="si-btn si-btn-sm" onClick={() => go('wrong')}>
                         Mark wrong
                       </button>
@@ -262,12 +273,23 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
                         <option value="true">Yes</option>
                         <option value="false">No</option>
                       </select>
+                    ) : type === 'enum' ? (
+                      <select id="cell-edit" className={field} value={draft} onChange={(e) => setDraft(e.target.value)}>
+                        <option value="">Choose…</option>
+                        {/* A value no longer allowed stays choosable, so opening Edit never silently changes it. */}
+                        {[...options, ...(draft && !options.includes(draft) ? [draft] : [])].map((o) => (
+                          <option key={o} value={o}>
+                            {o}
+                          </option>
+                        ))}
+                      </select>
                     ) : (
                       <input
                         id="cell-edit"
                         className={field}
                         type={type === 'number' ? 'number' : type === 'date' ? 'date' : 'text'}
                         step={type === 'number' ? 'any' : undefined}
+                        placeholder={type === 'entity_ref' ? 'Entity id' : undefined}
                         value={draft}
                         onChange={(e) => setDraft(e.target.value)}
                         autoFocus
@@ -276,6 +298,9 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
                     <p className="m-0 rounded-sm bg-surface-sunken p-2 text-[12px] text-ink-muted" data-panel-note="evidence">
                       This counts as evidence. A value you enter can change this account&apos;s verdict and score. It&apos;s shown as &quot;Entered by {userName}&quot;, and you can undo it any time with Mark wrong.
                     </p>
+                    {type === 'entity_ref' ? (
+                      <p className="m-0 text-[12px] text-ink-muted">The id of a company or person in this workspace; it is checked when you save.</p>
+                    ) : null}
                     {err}
                     <div className="flex gap-2">
                       <button type="submit" className="si-btn si-btn-primary si-btn-sm" disabled={busy}>
@@ -342,12 +367,20 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
               <ul className="m-0 flex list-none flex-col gap-2 p-0">
                 {detail.claims.map((c) => {
                   const manual = c.quote?.startsWith('Entered by ') ?? false;
-                  const struck = c.status !== 'active';
+                  // An active claim that is not the cell's is overridden by the cell's value: struck, like a superseded one.
+                  const overridden = c.status === 'active' && current != null && c.id !== current.id;
+                  const status = overridden ? 'superseded' : c.status;
+                  const struck = status !== 'active';
                   return (
-                    <li key={c.id} data-claim-status={c.status} className="rounded-md border border-line p-2 text-[13px]">
+                    <li
+                      key={c.id}
+                      data-claim-status={status}
+                      data-claim-current={c.id === current?.id ? '' : undefined}
+                      className="rounded-md border border-line p-2 text-[13px]"
+                    >
                       <p className={`m-0 font-medium text-ink ${struck ? 'line-through' : ''}`}>{formatValue(c.value, type)}</p>
                       {c.quote ? <p className={`m-0 mt-1 text-ink-muted ${struck ? 'line-through' : ''}`}>&ldquo;{c.quote}&rdquo;</p> : null}
-                      {manual ? <p className="m-0 mt-1 text-[12px] text-ink-muted">Counts as evidence · undo with Mark wrong</p> : null}
+                      {manual && !struck ? <p className="m-0 mt-1 text-[12px] text-ink-muted">Counts as evidence · undo with Mark wrong</p> : null}
                       <p className="m-0 mt-1 text-[12px] text-ink-muted">
                         {c.source_url && /^https?:\/\//.test(c.source_url) ? (
                           <a href={c.source_url} target="_blank" rel="noreferrer" className="text-ink underline">
@@ -357,6 +390,7 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
                         {c.source_url ? ' · ' : ''}
                         {stamp(c.observed_at)}
                         {c.status === 'superseded' ? ` · superseded ${stamp(c.superseded_at)}` : ''}
+                        {overridden ? ` · overridden by the newer value ${formatValue(current.value, type)} (${stamp(current.observed_at)})` : ''}
                         {c.status === 'retracted' ? ' · marked wrong' : ''}
                       </p>
                     </li>
@@ -377,7 +411,7 @@ export function CellPanel({ ws, briefId, canEdit, userName }: { ws: string; brie
                       {r.brief_version != null ? ` · Brief v${r.brief_version}` : ''}
                     </p>
                     <p className="m-0 text-[12px] text-ink-muted">
-                      Started {stamp(r.started_at ?? r.queued_at)} · finished {stamp(r.finished_at)}
+                      Started {stampTime(r.started_at ?? r.queued_at)} · finished {stampTime(r.finished_at)}
                     </p>
                     {r.error ? <p className="m-0 mt-1 text-[12px] text-danger">{r.error}</p> : null}
                   </li>

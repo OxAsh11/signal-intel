@@ -358,6 +358,8 @@ test.describe('Accounts table', () => {
       await page.keyboard.press('Escape');
       await cell(page, 'Bravo Power', s.sites).click();
       await expect(panel(page).locator('[data-panel-history]')).toContainText('succeeded');
+      // Started and finished times, not just dates.
+      await expect(panel(page).locator('[data-panel-history]')).toContainText(/Started \d{1,2} \w{3,4} \d{4}, \d{2}:\d{2} · finished \d{1,2} \w{3,4} \d{4}, \d{2}:\d{2}/);
     });
 
     test('a derived cell lists its inputs', async ({ page }) => {
@@ -388,8 +390,25 @@ test.describe('Accounts table', () => {
       const old = panel(page).locator('[data-claim-status="superseded"]').filter({ hasText: '12' });
       await expect(old).toHaveCount(1);
       await expect(old.locator('.line-through').first()).toBeVisible();
+      await expect(old).toContainText('overridden by the newer value 40');
       await page.keyboard.press('Escape');
       await expect(cell(page, 'Alpha Grid', s.sites)).toContainText('40');
+
+      // Mark wrong acts on the value the cell shows (the manual 40), not on the overridden source.
+      await cell(page, 'Alpha Grid', s.sites).click();
+      await expect(panel(page).locator('[data-claim-current]')).toContainText('40');
+      await panel(page).getByRole('button', { name: 'Mark wrong' }).click();
+      await panel(page).getByLabel('Why is this value wrong?').fill('Typed the wrong number.');
+      await panel(page).getByRole('button', { name: 'Confirm mark wrong' }).click();
+      await expect(panel(page).locator('[data-claim-status="retracted"]')).toContainText('40');
+      await expect(panel(page).locator('[data-panel-value]')).toContainText('12');
+      await expect(panel(page).locator('[data-claim-current]')).toContainText('Alpha runs twelve sites');
+      const [{ status }] = await sql<{ status: string }>(
+        `select c.status::text as status from public.claim c join public.predicate p on p.id = c.predicate_id
+          where p.workspace_id = $1 and p.key = $2 and c.quote = 'Alpha runs twelve sites'`,
+        [w.ws, s.sites],
+      );
+      expect(status, 'the sourced claim was left alone').toBe('active');
     });
 
     test('Mark wrong needs a reason and creates a Review item', async ({ page }) => {
@@ -549,6 +568,26 @@ test.describe('Accounts table', () => {
       await expect(add.getByRole('status').filter({ hasText: 'Queued 8 runs' })).toBeVisible();
       expect(await runsOf(w.ws, 'site_operator')).toBe(8);
       await expect(table(page).locator('thead th', { hasText: 'Site operator' })).toBeVisible();
+    });
+
+    test('R9: Add column refuses while the Brief has other unpublished changes, and links to the Brief', async ({ page }) => {
+      const w = await workspaceOf(userId);
+      const s = await seed(w);
+      // Someone's half-finished edit: the draft is the published config with another offer.
+      await sql(
+        `update public.brief b set draft_config = jsonb_set(v.config, '{offer}', '"A different offer, not yet published."')
+           from public.brief_version v where v.id = b.current_version_id and b.id = $1`,
+        [s.brief],
+      );
+      await openTable(page, w.ws, s.brief);
+      await page.getByRole('button', { name: 'Add column' }).click();
+      const add = addPanel(page);
+      const pending = add.locator('[data-add-column-pending]');
+      await expect(pending).toContainText('This Brief has unpublished changes. Publish or discard them on the Brief page first.');
+      await expect(pending.getByRole('link', { name: 'Open the Brief' })).toHaveAttribute('href', `/briefs/${s.brief}`);
+      await expect(add.getByRole('button', { name: 'Save and preview' })).toHaveCount(0);
+      const [{ offer }] = await sql<{ offer: string }>(`select draft_config ->> 'offer' as offer from public.brief where id = $1`, [s.brief]);
+      expect(offer, 'the draft is untouched').toBe('A different offer, not yet published.');
     });
 
     test('Run empty shows N accounts · est. $X, then queues N runs; Pause auto-run switches a formula off', async ({ page }) => {
@@ -766,6 +805,33 @@ test.describe('Filters, views, pins and search', () => {
     await expect(aside(page).locator('[data-pinned-view]')).toHaveCount(0);
   });
 
+  test('R10: a saved view opens under its own Brief whatever the lens; export agrees; a missing view says so', async ({ page }) => {
+    const w = await workspaceOf(userId);
+    const s = await seed(w);
+    const [{ other }] = await sql<{ other: string }>(
+      `insert into public.brief (org_id, workspace_id, name, state, intake_status) values ($1, $2, 'Other Brief', 'Draft', 'done') returning id as other`,
+      [w.org, w.ws],
+    );
+    const [{ id }] = await sql<{ id: string }>(
+      `insert into public.saved_view (org_id, workspace_id, brief_id, name, filter, visibility, created_by)
+       values ($1, $2, $3, 'Confirmed here', '{"field": {"system": "verdict"}, "op": "one_of", "value": ["Confirmed"]}', 'personal', $4) returning id`,
+      [w.org, w.ws, s.brief, w.member],
+    );
+    // Opened under the other Brief (as a pinned link or an old URL would), it moves to its own.
+    await openTable(page, w.ws, `brief=${other}&view=${id}`);
+    await expect(page).toHaveURL(new RegExp(`brief=${s.brief}`));
+    await expect.poll(() => rowNames(page)).toEqual(['Alpha Grid']);
+    const res = await page.request.get(`/workspace/${w.ws}/accounts/export?brief=${other}&view=${id}`);
+    expect(res.status()).toBe(200);
+    const lines = (await res.text()).split('\r\n').filter(Boolean);
+    expect(lines).toHaveLength(2);
+    expect(lines[1]).toMatch(/^Alpha Grid,/);
+
+    await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}&view=${randomUUID()}`);
+    await expect(page.locator('[data-table-state="view-missing"]')).toContainText("This view isn't available");
+    expect((await page.request.get(`/workspace/${w.ws}/accounts/export?brief=${s.brief}&view=${randomUUID()}`)).status()).toBe(404);
+  });
+
   test('a Viewer saves and pins a personal view but is not offered a workspace one (Review Focus 5)', async ({ browser }) => {
     const w = await workspaceOf(userId);
     const s = await seed(w);
@@ -850,8 +916,9 @@ test.describe('Filters, views, pins and search', () => {
     await page.goto(`/workspace/${w.ws}/accounts?brief=${s.brief}`);
     await expect(table(page)).toHaveAttribute('data-ready', '');
     await box.fill('0% S');
-    await expect(page.getByRole('option', { name: /100% Solar Co/ })).toBeVisible();
-    await expect(page.getByRole('option')).toHaveCount(1); // 100 Solar Co is not a match: % is not a wildcard
+    const results = page.getByRole('listbox', { name: 'Search results' });
+    await expect(results.getByRole('option', { name: /100% Solar Co/ })).toBeVisible();
+    await expect(results.getByRole('option')).toHaveCount(1); // 100 Solar Co is not a match: % is not a wildcard
   });
 });
 
@@ -867,8 +934,9 @@ test.describe('Board, By country and export', () => {
     expect(res.status()).toBe(200);
     return res.text();
   };
-  /** RFC 4180 parse (quoted fields may hold commas, quotes and newlines). */
-  const parse = (text: string): string[][] => {
+  /** RFC 4180 parse (quoted fields may hold commas, quotes and newlines). The route's UTF-8 BOM (for Excel) is dropped. */
+  const parse = (raw: string): string[][] => {
+    const text = raw.replace(/^\uFEFF/, '');
     const rows: string[][] = [];
     let row: string[] = [];
     let f = '';
@@ -947,7 +1015,9 @@ test.describe('Board, By country and export', () => {
   test('Export: the header is the visible columns and the row count matches the view', async ({ page }) => {
     const w = await workspaceOf(userId);
     const s = await seed(w);
-    const rows = parse(await csv(page, w.ws, `brief=${s.brief}`));
+    const raw = await csv(page, w.ws, `brief=${s.brief}`);
+    expect(raw.charCodeAt(0), 'a UTF-8 BOM, so Excel reads the names right').toBe(0xfeff);
+    const rows = parse(raw);
     expect(rows[0]).toEqual(['Account', 'Country', 'Verdict', 'Score', 'Band', 'Stage', 'Owner', 'Last signal', 'Sites', 'Double', 'Note']);
     expect(rows).toHaveLength(ROWS.length + 1);
     const alpha = rows.find((r) => r[0] === 'Alpha Grid');

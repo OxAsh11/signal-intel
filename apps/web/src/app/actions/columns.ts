@@ -10,6 +10,7 @@ import {
   isColumnSpec,
   keyFromLabel,
   MAX_COLUMNS,
+  PENDING_CHANGES,
   TYPE_LABELS,
   type BriefConfig,
   type ColumnSpec,
@@ -42,8 +43,11 @@ export type RunEstimate = {
 /** What the Add column form needs to check a new column as the database will. */
 export type AddColumnContext = {
   state: string;
-  /** The Brief already has unpublished changes: they publish together with the column. */
-  hasDraft: boolean;
+  /**
+   * R9: the published Brief has other unpublished draft changes. Add column refuses until they are
+   * published or discarded on the Brief page, so nobody's half-finished edits publish by accident.
+   */
+  pending: boolean;
   specs: Pick<ColumnSpec, 'key' | 'label' | 'value_type' | 'fill_method'>[];
   legacyKeys: string[];
   workspace: { key: string; value_type: string; fill_method: string | null }[];
@@ -72,11 +76,28 @@ export type ColumnPreview = {
 };
 
 const NOT_CONFIGURED = { ok: false as const, error: 'Supabase is not configured.' };
+/** R9's refusal: the code is 55000 (object not in prerequisite state), as the database would say. */
+const pendingRefusal = { ok: false as const, error: PENDING_CHANGES, code: '55000' };
+
+/** JSON with object keys sorted, so two configs compare by content (jsonb reorders keys). */
+function canonical(v: unknown): string {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  if (v !== null && typeof v === 'object') {
+    const o = v as Record<string, unknown>;
+    return `{${Object.keys(o)
+      .filter((k) => o[k] !== undefined)
+      .sort()
+      .map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`)
+      .join(',')}}`;
+  }
+  return JSON.stringify(v ?? null);
+}
+const sameConfig = (a: unknown, b: unknown) => canonical(a) === canonical(b);
 const fail = (message: string | undefined, code?: string) => ({ ok: false as const, error: friendlyError(message), code });
 
 async function loadBrief(ws: string, brief: string) {
   const supabase = await createClient();
-  if (!supabase) return { supabase: null, brief: null, config: null } as const;
+  if (!supabase) return { supabase: null, brief: null, config: null, published: null, pending: false } as const;
   const { data } = await supabase
     .from('brief')
     .select('id, state, draft_config, current_version_id')
@@ -84,18 +105,22 @@ async function loadBrief(ws: string, brief: string) {
     .eq('workspace_id', ws)
     .maybeSingle();
   const b = data as { id: string; state: string; draft_config: BriefConfig | null; current_version_id: string | null } | null;
-  let config: BriefConfig = b?.draft_config ?? {};
-  if (b && !b.draft_config && b.current_version_id) {
+  let published: BriefConfig | null = null;
+  if (b?.current_version_id) {
     const { data: ver } = await supabase.from('brief_version').select('config').eq('id', b.current_version_id).maybeSingle();
-    config = ((ver as { config: BriefConfig } | null)?.config ?? {}) as BriefConfig;
+    published = ((ver as { config: BriefConfig } | null)?.config ?? {}) as BriefConfig;
   }
-  return { supabase, brief: b, config } as const;
+  const config: BriefConfig = b?.draft_config ?? published ?? {};
+  // R9: a published Brief whose draft differs from its current version has someone's unpublished
+  // changes. A Brief that was never published is all draft: a column just joins it.
+  const pending = !!b && published !== null && b.draft_config != null && !sameConfig(b.draft_config, published);
+  return { supabase, brief: b, config, published, pending } as const;
 }
 
 /** Reads only: the lens Brief's columns and the workspace's, so the form can check a column as you type. */
 export async function loadAddColumnContext(ws: string, brief: string): Promise<Result<AddColumnContext>> {
   if (!UUID.test(ws) || !UUID.test(brief)) return { ok: false, error: 'Choose a Brief in the lens to add a column.' };
-  const { supabase, brief: b, config } = await loadBrief(ws, brief);
+  const { supabase, brief: b, config, pending } = await loadBrief(ws, brief);
   if (!supabase) return NOT_CONFIGURED;
   if (!b) return { ok: false, error: 'That Brief was not found in this workspace.' };
   const { data: preds } = await supabase.from('predicate').select('key, value_type, fill_method').eq('workspace_id', ws);
@@ -104,7 +129,7 @@ export async function loadAddColumnContext(ws: string, brief: string): Promise<R
     ok: true,
     data: {
       state: b.state,
-      hasDraft: b.draft_config != null,
+      pending,
       specs: columnSpecs(config).map((s) => ({ key: s.key, label: s.label, value_type: s.value_type, fill_method: s.fill_method })),
       legacyKeys: all.filter((p): p is string => !isColumnSpec(p)),
       workspace: (preds ?? []) as AddColumnContext['workspace'],
@@ -153,7 +178,9 @@ function buildSpec(input: NewColumn, config: BriefConfig, workspace: AddColumnCo
 /**
  * Add column, steps 1 and 2: appends the spec to the lens Brief's draft config
  * (save_brief_draft_ui) and asks for the P2 preview (request_brief_preview). A Draft Brief has no
- * published version to preview: the column waits in its draft until the pilot starts.
+ * published version to preview: the column waits in its draft until the pilot starts. R9: a
+ * published Brief with other unpublished changes is refused (55000) until they are published or
+ * discarded on the Brief page.
  */
 export async function addColumn(
   ws: string,
@@ -161,10 +188,11 @@ export async function addColumn(
   input: NewColumn,
 ): Promise<Result<{ key: string; previewId: string | null }>> {
   if (!UUID.test(ws) || !UUID.test(brief)) return { ok: false, error: 'Choose a Brief in the lens to add a column.' };
-  const { supabase, brief: b, config } = await loadBrief(ws, brief);
+  const { supabase, brief: b, config, pending } = await loadBrief(ws, brief);
   if (!supabase) return NOT_CONFIGURED;
   if (!b) return { ok: false, error: 'That Brief was not found in this workspace.' };
   if (b.state === 'Archived') return { ok: false, error: 'An archived Brief takes no new columns.' };
+  if (pending) return pendingRefusal;
   const { data: preds } = await supabase.from('predicate').select('key, value_type, fill_method').eq('workspace_id', ws);
   const built = buildSpec(input, config, (preds ?? []) as AddColumnContext['workspace']);
   if ('error' in built) return { ok: false, error: built.error };
@@ -239,7 +267,11 @@ export async function requestColumnApproval(preview: string): Promise<Result> {
   return { ok: true, data: undefined };
 }
 
-/** Add column, step 4: publishes through the existing path (publish_brief needs the matching preview). */
+/**
+ * Add column, step 4: publishes through the existing path (publish_brief needs the matching preview).
+ * R9: only when the draft is still the published version plus exactly this one column; anything
+ * else (someone edited the Brief since the preview) is refused (55000), not published.
+ */
 export async function publishColumn(
   ws: string,
   brief: string,
@@ -247,8 +279,14 @@ export async function publishColumn(
   label: string,
 ): Promise<Result<{ predicateId: string | null; fillMethod: string | null; queued: number }>> {
   if (!UUID.test(ws) || !UUID.test(brief)) return { ok: false, error: 'That Brief was not found.' };
-  const supabase = await createClient();
+  const { supabase, brief: b, published } = await loadBrief(ws, brief);
   if (!supabase) return NOT_CONFIGURED;
+  if (!b) return { ok: false, error: 'That Brief was not found.' };
+  const draft = b.draft_config;
+  const added = draft?.predicates?.filter((p) => isColumnSpec(p) && p.key === key) ?? [];
+  const expected: BriefConfig | null =
+    published && added.length === 1 ? { ...published, predicates: [...(published.predicates ?? []), added[0]] } : null;
+  if (!draft || !expected || !sameConfig(draft, expected)) return pendingRefusal;
   const { error } = await supabase.rpc('publish_brief', { p_brief: brief, p_change_note: `Added column "${label.slice(0, 80)}"` });
   if (error) return fail(error.message, error.code);
   const { data } = await supabase.from('predicate').select('id, fill_method').eq('workspace_id', ws).eq('key', key).maybeSingle();

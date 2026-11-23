@@ -1,5 +1,6 @@
 'use client';
 
+import Link from 'next/link';
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { checkResult, evaluate, formulaProblem, parse, type Scalar } from '@signal/formula';
 import {
@@ -14,7 +15,7 @@ import {
   type RunEstimate,
   type RunTarget,
 } from '@/app/actions/columns';
-import { columnKeyProblem, keyFromLabel, TYPE_LABELS, type ColumnSpec, type ValueType } from '@/lib/briefs';
+import { columnKeyProblem, keyFromLabel, PENDING_CHANGES, TYPE_LABELS, type ColumnSpec, type ValueType } from '@/lib/briefs';
 import { formatValue } from './cell';
 import { estimateText, RunOutcome, usd, useRun } from './run-confirm';
 import type { Column, TableRow } from './types';
@@ -269,7 +270,16 @@ function AddColumnDrawer({
         {ctxError ? <p role="alert" className="m-0 text-[13px] text-danger">{ctxError}</p> : null}
         {!ctx && !ctxError ? <p className="m-0 text-[13px] text-ink-muted">Loading…</p> : null}
 
-        {ctx && (step.at === 'form' || step.at === 'saving') ? (
+        {ctx?.pending && (step.at === 'form' || step.at === 'saving') ? (
+          <div className="flex flex-col gap-2 rounded-md border border-line p-3" role="alert" data-add-column-pending="">
+            <p className="m-0 text-[13px] text-ink">{PENDING_CHANGES}</p>
+            <Link href={`/briefs/${briefId}`} className="si-btn si-btn-sm self-start no-underline">
+              Open the Brief
+            </Link>
+          </div>
+        ) : null}
+
+        {ctx && !ctx.pending && (step.at === 'form' || step.at === 'saving') ? (
           <form
             className="flex flex-col gap-4"
             onSubmit={(e) => {
@@ -364,11 +374,6 @@ function AddColumnDrawer({
               </div>
             )}
 
-            {ctx.hasDraft ? (
-              <p className="m-0 rounded-sm bg-surface-sunken p-2 text-[12px] text-ink-muted">
-                This Brief already has unpublished changes. They are previewed and published together with this column.
-              </p>
-            ) : null}
             {label.trim() && problem ? <p className="m-0 text-[13px] text-caution" data-add-column-problem="">{problem}</p> : null}
             {err}
             <div className="flex gap-2">

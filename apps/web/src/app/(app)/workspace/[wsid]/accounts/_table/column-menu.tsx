@@ -4,6 +4,9 @@ import { useEffect, useRef, useState } from 'react';
 import { setAutoRun, type RunMode } from '@/app/actions/columns';
 import type { Column } from './types';
 
+/** The menu's spot: fixed to the viewport, under its button, right-aligned, kept on screen. */
+const placeBelow = (r: DOMRect) => ({ top: r.bottom + 4, left: Math.max(8, r.right - 192) });
+
 const ITEMS: { mode: Exclude<RunMode, 'selected'>; label: string }[] = [
   { mode: 'empty', label: 'Run empty' },
   { mode: 'stale', label: 'Run stale' },
@@ -21,23 +24,37 @@ export function ColumnMenu({ ws, column, onRun }: { ws: string; column: Column; 
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const boxRef = useRef<HTMLDivElement>(null);
+  const btnRef = useRef<HTMLButtonElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
   const runnable = column.fill_method === 'extract' || column.fill_method === 'formula';
   const formula = column.fill_method === 'formula';
 
+  const isOpen = open !== null;
   useEffect(() => {
-    if (!open) return;
+    if (!isOpen) return;
     const onDoc = (e: MouseEvent) => {
       if (!boxRef.current?.contains(e.target as Node)) setOpen(null);
     };
-    const onScroll = () => setOpen(null);
+    // A scroll (the table box sideways, the page, or the browser bringing the button into view)
+    // moves the menu with its button. It closes only once the button has left the viewport, and a
+    // scroll inside the menu itself is ignored.
+    const onScroll = (e: Event) => {
+      if (e.target instanceof Node && menuRef.current?.contains(e.target)) return;
+      const btn = btnRef.current;
+      if (!btn) return setOpen(null);
+      const r = btn.getBoundingClientRect();
+      if (r.bottom < 0 || r.top > window.innerHeight || r.right < 0 || r.left > window.innerWidth) return setOpen(null);
+      setOpen((o) => (o ? placeBelow(r) : o));
+    };
     document.addEventListener('mousedown', onDoc);
     window.addEventListener('scroll', onScroll, true);
-    boxRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus();
+    boxRef.current?.querySelector<HTMLElement>('[role="menuitem"]')?.focus({ preventScroll: true });
     return () => {
       document.removeEventListener('mousedown', onDoc);
       window.removeEventListener('scroll', onScroll, true);
     };
-  }, [open]);
+    // Only opening or closing re-runs this, not each reposition.
+  }, [isOpen]);
 
   if (!runnable) return null;
 
@@ -54,14 +71,15 @@ export function ColumnMenu({ ws, column, onRun }: { ws: string; column: Column; 
   return (
     <div ref={boxRef} className="relative inline-block">
       <button
+        ref={btnRef}
         type="button"
         className="ml-1 rounded-sm p-1 text-ink-muted hover:bg-surface-sunken hover:text-ink"
         aria-haspopup="menu"
-        aria-expanded={open !== null}
+        aria-expanded={isOpen}
         aria-label={`Column actions for ${column.label}`}
         onClick={(e) => {
           const r = e.currentTarget.getBoundingClientRect();
-          setOpen((o) => (o ? null : { top: r.bottom + 4, left: Math.max(8, r.right - 192) }));
+          setOpen((o) => (o ? null : placeBelow(r)));
         }}
       >
         {/* An icon, not a glyph: the header's text stays the column's label. */}
@@ -73,6 +91,7 @@ export function ColumnMenu({ ws, column, onRun }: { ws: string; column: Column; 
       </button>
       {open ? (
         <div
+          ref={menuRef}
           role="menu"
           aria-label={`${column.label} actions`}
           style={{ top: open.top, left: open.left }}

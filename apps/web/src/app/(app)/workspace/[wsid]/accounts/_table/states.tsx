@@ -41,6 +41,19 @@ export function NoMatch({ clearHref }: { clearHref: string }) {
   );
 }
 
+/** `?view=` names a view that is gone, not visible to this member, or under an archived Brief. */
+export function ViewMissing({ clearHref }: { clearHref: string }) {
+  return (
+    <div className={box} data-table-state="view-missing">
+      <p className="m-0 font-medium text-ink">This view isn&apos;t available</p>
+      <p className="m-0 mt-1 text-[13px] text-ink-muted">It was deleted, it is someone else&apos;s personal view, or its Brief was archived.</p>
+      <Link href={clearHref} className="si-btn si-btn-sm mt-3 no-underline">
+        Show all accounts
+      </Link>
+    </div>
+  );
+}
+
 export function PastLastPage({ href }: { href: string }) {
   return (
     <div className={box} data-table-state="past-end">

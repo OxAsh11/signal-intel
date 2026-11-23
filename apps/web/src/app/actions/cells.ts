@@ -9,10 +9,21 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const REASON_MAX = 500;
 
 export type CellDetail = {
-  column: { id: string; key: string; label: string; value_type: string; fill_method: string | null; auto_run: boolean | null };
+  column: {
+    id: string;
+    key: string;
+    label: string;
+    value_type: string;
+    fill_method: string | null;
+    auto_run: boolean | null;
+    /** An enum column's values; null for any other type. */
+    allowed_values?: unknown;
+  };
   state: string;
   value: unknown;
   confidence: number | null;
+  /** The claim the cell shows. Any other active claim of the cell is overridden by it; Mark wrong acts on it. */
+  claim_id: string | null;
   fill_label: string;
   claims: {
     id: string;

@@ -1,14 +1,15 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
+import { redirect } from 'next/navigation';
 import { Suspense } from 'react';
 import { getBriefLens } from '@/lib/brief-lens';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import { AddColumn } from './_table/add-column';
 import { BOARD_LIMIT, Board, ByCountry, LayoutSwitch } from './_table/board';
-import { UUID, viewColumnIds } from './_table/server';
+import { UUID, resolveView, viewColumnIds } from './_table/server';
 import { Cards } from './_table/cards';
-import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton } from './_table/states';
+import { BadFilter, NoAccounts, NoMatch, PastLastPage, TableError, TableSkeleton, ViewMissing } from './_table/states';
 import { CellPanel } from './_table/panel';
 import type { FilterColumn } from './_table/filter-builder';
 import { ViewBar, type ViewRow } from './_table/view-bar';
@@ -31,7 +32,6 @@ import {
 
 export const metadata: Metadata = { title: 'Accounts' };
 
-type SavedView = { id: string | null; preset: string | null; filter: unknown; sort: unknown; columns: unknown; layout?: string | null };
 const nf = new Intl.NumberFormat('en');
 const isEmptyFilter = (f: unknown) => f == null || (typeof f === 'object' && Object.keys(f as object).length === 0);
 
@@ -66,11 +66,14 @@ async function ViewBarSection({ ws, sp }: { ws: string; sp: Record<string, strin
   if (!supabase) return null;
   const lens = await getBriefLens(sp);
   const ctx = await getOrgContext();
+  // A saved view reads under its own Brief (R10); the table section puts that Brief in the URL.
+  const resolved = await resolveView(supabase, ws, q.view, lens.briefId);
+  const view = resolved.status === 'ok' ? resolved.view : null;
+  const briefId = resolved.status === 'ok' ? resolved.briefId : lens.briefId;
 
-  const { data: viewData } = await supabase.rpc('list_views', { p_ws: ws, p_brief: lens.briefId });
-  const all = (viewData ?? []) as (SavedView & { name: string; visibility: string })[];
+  const { data: viewData } = await supabase.rpc('list_views', { p_ws: ws, p_brief: briefId });
+  const all = (viewData ?? []) as { id: string | null; preset: string | null; name: string; visibility: string }[];
   const views: ViewRow[] = all.map((v) => ({ id: v.id, preset: v.preset, name: v.name, visibility: v.visibility }));
-  const view = q.view ? (all.find((v) => v.preset === q.view || v.id === q.view) ?? null) : null;
 
   let filter: Record<string, unknown> | null = null;
   if (q.f !== undefined) {
@@ -81,12 +84,13 @@ async function ViewBarSection({ ws, sp }: { ws: string; sp: Record<string, strin
   const sorts: SortKey[] = q.sort ? (urlSort ?? []) : sortKeysFromAst(view?.sort);
 
   // The columns the table shows (a view's own, else the lens Brief's), then every workspace column, for the field picker.
+  const viewCols = view ? await viewColumnIds(supabase, ws, view.columns) : null;
   const shown = await supabase.rpc('account_table', {
     p_ws: ws,
-    p_brief: lens.briefId,
+    p_brief: briefId,
     p_filter: {},
     p_sort: [],
-    p_columns: view ? await viewColumnIds(supabase, ws, view.columns) : null,
+    p_columns: viewCols,
     p_limit: 1,
     p_offset: 0,
   });
@@ -115,8 +119,10 @@ async function ViewBarSection({ ws, sp }: { ws: string; sp: Record<string, strin
       columns={columns}
       filter={filter}
       sort={sortAst(sorts)}
-      columnKeys={shownCols.map((c) => c.key)}
-      briefId={lens.briefId}
+      // The Brief's own columns are saved as none (the Brief's, whenever the view opens), so a column
+      // added to the Brief later shows in the view too; only a view's own column choice is stored.
+      columnKeys={viewCols ? shownCols.map((c) => c.key) : []}
+      briefId={briefId}
     />
   );
 }
@@ -142,11 +148,15 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
   const lens = await getBriefLens(sp);
 
   // A view supplies the filter (unless `f` replaces it), the sort (unless `sort` does) and the columns.
-  let view: SavedView | null = null;
-  if (q.view) {
-    const { data } = await supabase.rpc('list_views', { p_ws: ws, p_brief: lens.briefId });
-    view = ((data ?? []) as SavedView[]).find((v) => v.preset === q.view || v.id === q.view) ?? null;
+  // A saved view keeps its own Brief (R10): opened under another lens, the URL moves to its Brief.
+  const resolved = await resolveView(supabase, ws, q.view, lens.briefId);
+  if (resolved.status === 'missing') return <ViewMissing clearHref={tableHref(ws, q, { view: null, page: 1 })} />;
+  if (resolved.status === 'error') {
+    console.error(`accounts: list_views failed for workspace ${ws}: ${resolved.message}`);
+    return <TableError retryHref={here} message={resolved.message} />;
   }
+  const { view, briefId } = resolved;
+  if (briefId !== lens.briefId) redirect(tableHref(ws, q, { brief: briefId }));
   const filter = urlFilter ?? (view && !isEmptyFilter(view.filter) ? (view.filter as Record<string, unknown>) : {});
   const sorts: SortKey[] = q.sort ? urlSort : sortKeysFromAst(view?.sort);
   const columnIds = view ? await viewColumnIds(supabase, ws, view.columns) : null;
@@ -156,7 +166,7 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
   if (!q.layout && view?.layout) q = { ...q, layout: view.layout };
   const layout = layoutOf(q);
   const call = (limit: number, offset: number) =>
-    supabase.rpc('account_table', { p_ws: ws, p_brief: lens.briefId, p_filter: filter, p_sort: sortAst(sorts), p_columns: columnIds, p_limit: limit, p_offset: offset });
+    supabase.rpc('account_table', { p_ws: ws, p_brief: briefId, p_filter: filter, p_sort: sortAst(sorts), p_columns: columnIds, p_limit: limit, p_offset: offset });
   const res = await call(layout === 'table' ? PAGE_SIZE : 200, layout === 'table' ? (q.page - 1) * PAGE_SIZE : 0);
   const data = res.data;
   let error = res.error;
@@ -215,7 +225,7 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
         <>
           {canEdit ? (
             <div className="flex justify-end" data-table-tools="">
-              <AddColumn ws={ws} briefId={lens.briefId} filter={filtered ? filter : null} rows={table.rows} columns={table.columns} />
+              <AddColumn ws={ws} briefId={briefId} filter={filtered ? filter : null} rows={table.rows} columns={table.columns} />
             </div>
           ) : null}
           <AccountsTable
@@ -225,10 +235,10 @@ async function TableSection({ ws, sp }: { ws: string; sp: Record<string, string 
             sorts={sorts}
             sortHrefs={sortHrefs}
             canEdit={canEdit}
-            briefId={lens.briefId}
+            briefId={briefId}
             filter={filtered ? filter : null}
           />
-          <CellPanel ws={ws} briefId={lens.briefId} canEdit={canEdit} userName={userName} />
+          <CellPanel ws={ws} briefId={briefId} canEdit={canEdit} userName={userName} />
           <Cards ws={ws} rows={table.rows} columns={table.columns} />
           <Pager ws={ws} q={q} pages={pages} from={from} to={from + table.rows.length - 1} total={table.total} />
         </>

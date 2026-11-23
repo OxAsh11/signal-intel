@@ -1,36 +1,13 @@
 import { getBriefLens } from '@/lib/brief-lens';
 import { createClient } from '@/lib/supabase/server';
-import { formatDate, formatValue } from '../_table/cell';
-import { UUID, viewColumnIds } from '../_table/server';
-import type { Column, TableData, TableRow } from '../_table/types';
+import { formatDate } from '../_table/cell';
+import { cellText, csvCell } from '../_table/csv';
+import { UUID, resolveView, viewColumnIds } from '../_table/server';
+import type { TableData, TableRow } from '../_table/types';
 import { decodeFilter, parseSort, sortAst, sortKeysFromAst } from '../_table/url';
 
 const PAGE = 200;
 const MAX_ROWS = 10_000;
-
-/** RFC 4180 quoting; a cell a spreadsheet would run as a formula (= + - @) gets a leading '. */
-function csvCell(v: string): string {
-  const safe = /^[=+\-@]/.test(v) ? `'${v}` : v;
-  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-}
-
-function cellText(row: TableRow, c: Column): string {
-  const cell = row.cells[c.id];
-  switch (cell?.state) {
-    case 'value':
-    case 'derived':
-    case 'stale':
-      return formatValue(cell.value, c.value_type);
-    case 'no_data':
-      return 'No data';
-    case 'skipped':
-      return 'Skipped';
-    case 'error':
-      return `Error: ${cell.error ?? 'error'}`;
-    default:
-      return '';
-  }
-}
 
 const isEmpty = (f: unknown) => f == null || (typeof f === 'object' && Object.keys(f as object).length === 0);
 const text = (status: number, body: string) => new Response(body, { status, headers: { 'content-type': 'text/plain; charset=utf-8' } });
@@ -64,18 +41,17 @@ export async function GET(request: Request, { params }: { params: Promise<{ wsid
   const urlSort = parseSort(sp.sort || undefined);
   if (urlSort === null) return text(400, 'The sort is not valid');
 
-  let view: { filter: unknown; sort: unknown; columns: unknown } | null = null;
-  if (sp.view) {
-    const { data, error } = await supabase.rpc('list_views', { p_ws: ws, p_brief: lens.briefId });
-    if (error) return error.code === '42501' ? text(403, 'Forbidden') : text(500, 'Export failed');
-    view = ((data ?? []) as { id: string | null; preset: string | null; filter: unknown; sort: unknown; columns: unknown }[]).find((v) => v.preset === sp.view || v.id === sp.view) ?? null;
-  }
+  // The same view and Brief the page reads: a saved view keeps its own Brief (R10).
+  const resolved = await resolveView(supabase, ws, sp.view || undefined, lens.briefId);
+  if (resolved.status === 'error') return resolved.code === '42501' ? text(403, 'Forbidden') : text(500, 'Export failed');
+  if (resolved.status === 'missing') return text(404, "This view isn't available");
+  const { view, briefId } = resolved;
   const filter = urlFilter ?? (view && !isEmpty(view.filter) ? (view.filter as Record<string, unknown>) : {});
   const sorts = sp.sort ? urlSort : sortKeysFromAst(view?.sort);
   const columnIds = view ? await viewColumnIds(supabase, ws, view.columns) : null;
 
   const page = (offset: number) =>
-    supabase.rpc('account_table', { p_ws: ws, p_brief: lens.briefId, p_filter: filter, p_sort: sortAst(sorts), p_columns: columnIds, p_limit: PAGE, p_offset: offset });
+    supabase.rpc('account_table', { p_ws: ws, p_brief: briefId, p_filter: filter, p_sort: sortAst(sorts), p_columns: columnIds, p_limit: PAGE, p_offset: offset });
   const first = await page(0);
   if (first.error) {
     if (first.error.code === '42501') return text(403, 'Forbidden');

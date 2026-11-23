@@ -1,7 +1,8 @@
 'use client';
 
 import { useState } from 'react';
-import { formatDate, formatValue } from './cell';
+import { formatDate } from './cell';
+import { cellText, csvCell } from './csv';
 import type { RunJob } from './run-confirm';
 import type { Column, TableRow } from './types';
 
@@ -10,30 +11,6 @@ const SOON: { label: string; why: string }[] = [
   { label: 'Find people', why: 'Arrives in P6' },
   { label: 'Merge', why: 'Arrives in P6' },
 ];
-
-/** RFC 4180 quoting; a cell a spreadsheet would run as a formula (= + - @) gets a leading '. */
-function csvCell(v: string): string {
-  const safe = /^[=+\-@]/.test(v) ? `'${v}` : v;
-  return /[",\r\n]/.test(safe) ? `"${safe.replace(/"/g, '""')}"` : safe;
-}
-
-function cellText(row: TableRow, c: Column): string {
-  const cell = row.cells[c.id];
-  switch (cell?.state) {
-    case 'value':
-    case 'derived':
-    case 'stale':
-      return formatValue(cell.value, c.value_type);
-    case 'no_data':
-      return 'No data';
-    case 'skipped':
-      return 'Skipped';
-    case 'error':
-      return `Error: ${cell.error ?? 'error'}`;
-    default:
-      return '';
-  }
-}
 
 /** The selected rows as CSV: the columns as shown, values formatted as in the cells. */
 function exportSelected(rows: TableRow[], columns: Column[]) {
@@ -111,7 +88,7 @@ export function BulkBar({
         </button>
         {canEdit ? (
           <>
-            <button type="button" className="si-btn si-btn-sm" disabled title="Hand labels arrive with the CRM; labels now come from scoring">
+            <button type="button" className="si-btn si-btn-sm" disabled title="Arrives with saved segments">
               Label
             </button>
             {SOON.map((s) => (
