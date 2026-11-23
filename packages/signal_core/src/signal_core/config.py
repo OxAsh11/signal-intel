@@ -13,6 +13,10 @@ class Settings(BaseSettings):
     app_env: Literal["local", "staging", "production", "test"] = "local"
     log_level: str = "info"
     port: int = 8080
+    # Shared with the web app: the small worker HTTP server exposes contact-value reveals and
+    # (later) provider status. No token means the port stays closed.
+    worker_status_token: SecretStr | None = None
+    worker_reveal_port: int = 8081
 
     # Session pooler / direct connection: required for LISTEN/NOTIFY and Procrastinate.
     database_url_session: SecretStr | None = None

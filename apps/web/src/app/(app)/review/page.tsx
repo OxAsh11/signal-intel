@@ -1,6 +1,7 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
 import { Button, EvidenceQuote, FamilyTag } from '@signal/ui';
+import { dismissUnlinkedPersonForm, linkPersonFromReviewForm } from '@/app/actions/people';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import {
@@ -58,6 +59,11 @@ type VerdictReviewRow = {
     entity: One<{ display_name: string | null }>;
     brief_version: One<{ brief: One<{ name: string | null }> }>;
   }>;
+};
+type UnlinkedRow = {
+  id: string;
+  created_at: string;
+  person: One<{ display_name: string | null }>;
 };
 type ClaimRow = {
   id: string;
@@ -186,7 +192,7 @@ export default async function ReviewPage() {
   const canTriage = isAdmin || atLeast(ctx.workspaceRole, 'Operator'); // replies and meetings
   const cutoff = await overdueCutoff();
 
-  const [identityRes, wrongRes, verdictRes, replyRes, meetingRes] = await Promise.all([
+  const [identityRes, wrongRes, verdictRes, replyRes, meetingRes, unlinkedRes] = await Promise.all([
     supabase
       .from('review_item')
       .select(
@@ -243,14 +249,23 @@ export default async function ReviewPage() {
       .is('account_id', null)
       .order('scheduled_at', { ascending: false })
       .limit(50),
+    supabase
+      .from('review_item')
+      .select('id, created_at, person:person_entity_id ( display_name )')
+      .eq('workspace_id', ws)
+      .eq('type', 'unlinked_person')
+      .eq('status', 'pending')
+      .order('created_at')
+      .limit(50),
   ]);
 
-  const failed = [identityRes, wrongRes, verdictRes, replyRes, meetingRes].find((r) => r.error);
+  const failed = [identityRes, wrongRes, verdictRes, replyRes, meetingRes, unlinkedRes].find((r) => r.error);
   const identity = (identityRes.data ?? []) as unknown as IdentityRow[];
   const wrong = (wrongRes.data ?? []) as unknown as WrongClaimRow[];
   const verdictReviews = (verdictRes.data ?? []) as unknown as VerdictReviewRow[];
   const replies = (replyRes.data ?? []) as unknown as ReplyRow[];
   const meetings = (meetingRes.data ?? []) as unknown as MeetingRow[];
+  const unlinked = (unlinkedRes.data ?? []) as unknown as UnlinkedRow[];
 
   // The claims each verdict question is about: the ones that disagree, or the ones it rests on.
   const claimIdsFor = (r: VerdictReviewRow) => (r.reason === 'conflict' ? r.claim_ids : (one(r.verdict)?.claim_ids ?? []));
@@ -262,7 +277,7 @@ export default async function ReviewPage() {
           .select('id, value, quote, confidence, observed_at, predicate:predicate_id ( label, key ), source:source_record_id ( url )')
           .in('id', claimIds)
       : Promise.resolve({ data: [] }),
-    meetings.length && canTriage
+    (meetings.length && canTriage) || (unlinked.length && canDecide)
       ? supabase.from('account').select('id, entity:entity_id ( display_name )').eq('workspace_id', ws).limit(500)
       : Promise.resolve({ data: [] }),
   ]);
@@ -274,7 +289,7 @@ export default async function ReviewPage() {
 
   const conflicts = verdictReviews.filter((r) => r.reason === 'conflict');
   const samples = verdictReviews.filter((r) => r.reason === 'sample');
-  const total = identity.length + wrong.length + verdictReviews.length + replies.length + meetings.length;
+  const total = identity.length + wrong.length + verdictReviews.length + replies.length + meetings.length + unlinked.length;
 
   const verdictCard = (r: VerdictReviewRow) => {
     const v = one(r.verdict);
@@ -514,6 +529,54 @@ export default async function ReviewPage() {
         hint="A sample of this week's new Confirmed verdicts. Your marks measure how accurate the verdicts are."
       >
         {samples.map(verdictCard)}
+      </Section>
+
+      <Section
+        title="People without an account"
+        count={unlinked.length}
+        hint="Every person must work at an account. Link one to an account, or dismiss it if it was never a real contact."
+      >
+        {unlinked.map((item) => (
+          <Card key={item.id}>
+            <div data-review-item="unlinked_person" className="flex flex-col gap-3">
+              <div className="flex flex-col gap-1">
+                <span className="text-[14px] font-medium">{one(item.person)?.display_name ?? 'Unknown person'}</span>
+                <span className="text-[13px] text-ink-muted">Waiting since {day(item.created_at)}</span>
+              </div>
+              {canDecide ? (
+                accounts.length === 0 ? (
+                  <p className="m-0 text-[13px] text-ink-muted">There are no accounts in this workspace to link to yet.</p>
+                ) : (
+                  <div className="flex flex-wrap items-end gap-2">
+                    <form action={linkPersonFromReviewForm.bind(null, item.id, ws)} className="flex items-end gap-2">
+                      <label className="flex min-w-[200px] flex-1 flex-col gap-1">
+                        <span className="si-label">Account</span>
+                        <select name="account" required defaultValue="" aria-label="Account" className={field}>
+                          <option value="" disabled>
+                            Choose an account…
+                          </option>
+                          {accounts.map((a) => (
+                            <option key={a.id} value={a.id}>
+                              {a.name}
+                            </option>
+                          ))}
+                        </select>
+                      </label>
+                      <Button type="submit" variant="primary" size="sm">
+                        Link
+                      </Button>
+                    </form>
+                    <form action={dismissUnlinkedPersonForm.bind(null, item.id, ws)}>
+                      <Button type="submit" variant="quiet" size="sm">
+                        Dismiss
+                      </Button>
+                    </form>
+                  </div>
+                )
+              ) : null}
+            </div>
+          </Card>
+        ))}
       </Section>
     </>
   );

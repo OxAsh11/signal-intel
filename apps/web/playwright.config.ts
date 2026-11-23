@@ -16,6 +16,8 @@ export default defineConfig({
   timeout: 60_000,
   expect: { timeout: 15_000 },
   reporter: process.env.CI ? [['list'], ['html', { open: 'never' }]] : 'list',
+  globalSetup: './e2e/global-setup.ts',
+  globalTeardown: './e2e/global-teardown.ts',
   use: {
     baseURL: `http://localhost:${PORT}`,
     trace: 'retain-on-failure',
@@ -27,6 +29,12 @@ export default defineConfig({
     url: `http://localhost:${PORT}/api/health`,
     reuseExistingServer: !process.env.CI,
     timeout: 120_000,
-    env: { PORT: String(PORT) },
+    // The People panel's reveal action talks to this fake worker, never a vendor or a real key.
+    env: {
+      ...process.env,
+      PORT: String(PORT),
+      WORKER_REVEAL_URL: 'http://127.0.0.1:3101',
+      WORKER_STATUS_TOKEN: 'e2e-reveal-token',
+    },
   },
 });

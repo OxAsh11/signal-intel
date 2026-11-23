@@ -141,5 +141,7 @@ jobs:
             apps/web/test-results/home-*.png
             apps/web/test-results/screens-*.png
             apps/web/test-results/accounts-*.png
+            apps/web/test-results/people-*.png
+            apps/web/test-results/account-people-tab.png
           if-no-files-found: warn
           retention-days: 14
