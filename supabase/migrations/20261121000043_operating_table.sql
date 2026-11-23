@@ -103,12 +103,14 @@ as $$
            group by v.id) x
 $$;
 
--- A column's shape: {id, key, label, value_type, fill_method, auto_run}.
+-- A column's shape: {id, key, label, value_type, fill_method, auto_run, allowed_values (an enum's
+-- values, else null)}.
 create or replace function app.table_column_json(p_predicate uuid) returns jsonb
   language sql stable security definer set search_path = ''
 as $$
   select jsonb_build_object('id', p.id, 'key', p.key, 'label', p.label, 'value_type', p.value_type,
-                            'fill_method', p.fill_method, 'auto_run', p.auto_run)
+                            'fill_method', p.fill_method, 'auto_run', p.auto_run,
+                            'allowed_values', case when p.value_type = 'enum' then p.allowed_values end)
     from public.predicate p where p.id = p_predicate
 $$;
 
@@ -155,13 +157,16 @@ end $$;
 
 -- A view a member can pin: a preset (its name and filter from public.list_views) or a saved view
 -- of the workspace that is a workspace view or the member's own. No row when it is neither.
+-- brief_id is the saved view's own Brief (R10: a view keeps its Brief); null for a preset or a view
+-- saved under all Briefs.
+drop function if exists app.view_ref(uuid, uuid, text);
 create or replace function app.view_ref(p_ws uuid, p_member uuid, p_ref text)
-returns table (name text, filter jsonb)
+returns table (name text, filter jsonb, brief_id uuid)
   language sql stable security definer set search_path = ''
 as $$
-  select v.name, v.filter from public.list_views(p_ws, null) v where v.id is null and v.preset = p_ref
+  select v.name, v.filter, null::uuid from public.list_views(p_ws, null) v where v.id is null and v.preset = p_ref
   union all
-  select sv.name, sv.filter from public.saved_view sv
+  select sv.name, sv.filter, sv.brief_id from public.saved_view sv
    where sv.id = case when p_ref ~ '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
                       then p_ref::uuid end
      and sv.workspace_id = p_ws
@@ -278,8 +283,10 @@ begin
 end $$;
 
 -- ── 6. The cell panel (Viewer+) ──────────────────────────────────────────────
--- {column: {id, key, label, value_type, fill_method, auto_run},
+-- {column: {id, key, label, value_type, fill_method, auto_run, allowed_values},
 --  state, value: jsonb | null, confidence: int | null   (as public.cells shows the cell),
+--  claim_id: uuid | null (the claim the cell shows; any other active claim of the cell is
+--            overridden by it, and Mark wrong acts on it),
 --  fill_label: 'Found in sources' | 'Formula' | 'Entered by you' | 'Entered by <name>'
 --              (from the cell's claim: a derived:manual claim this member entered is "Entered by
 --              you", someone else's carries its quote; derived:formula is "Formula"; a sourced one
@@ -388,7 +395,7 @@ begin
            limit 50) x;
 
   return jsonb_build_object('column', app.table_column_json(p.id), 'state', c.state, 'value', c.value,
-                            'confidence', c.confidence, 'fill_label', v_label, 'claims', v_claims,
+                            'confidence', c.confidence, 'claim_id', c.claim_id, 'fill_label', v_label, 'claims', v_claims,
                             'inputs', v_inputs, 'runs', v_runs);
 end $$;
 
@@ -400,7 +407,9 @@ end $$;
 -- It supersedes the cell's earlier manual claims; sourced claims stay as they are (the newest
 -- claim is the cell's value). Entering a value that was marked wrong is a person's explicit
 -- choice: app.create_claim hands back the retracted manual claim, which is made active again
--- (claim.created emitted). Audited as claim.manual_value_set on the claim.
+-- (claim.created emitted), and its pending claim_wrong Review item is resolved as 'restored'
+-- (audited as claim.restored), so Review never lists an active value as marked wrong.
+-- Audited as claim.manual_value_set on the claim.
 create or replace function public.set_manual_value(p_ws uuid, p_entity uuid, p_predicate uuid, p_value jsonb) returns uuid
   language plpgsql security definer set search_path = ''
 as $$
@@ -442,6 +451,12 @@ begin
     update public.claim set status = 'active' where id = v_id;
     perform app.emit('claim.created'::public.event_type, v_org, null, 'claim', v_id,
                      jsonb_build_object('entity_id', p_entity, 'predicate_id', p_predicate, 'source_record_id', v_sr));
+    perform app.audit(v_org, p_ws, 'claim.restored', 'claim', v_id, null,
+                      jsonb_build_object('review_item_id', ri.id, 'by', 'manual_value'))
+       from public.review_item ri
+      where ri.type = 'claim_wrong' and ri.claim_id = v_id and ri.status = 'pending';
+    update public.review_item set status = 'restored', resolved_by = v_me, resolved_at = now()
+     where type = 'claim_wrong' and claim_id = v_id and status = 'pending';
   end if;
   update public.claim set status = 'superseded', superseded_by = v_id
    where entity_id = p_entity and predicate_id = p_predicate and source_record_id = v_sr
@@ -538,9 +553,11 @@ end $$;
 -- [{ref (preset name or saved view id), name,
 --   count: int | null (the view's matches under the lens, the total of public.view_entities;
 --          null when its filter no longer compiles),
---   href: '/workspace/<ws>/accounts?view=<ref>' (+ '&brief=<id>' when the lens is a Brief)}]
+--   href: '/workspace/<ws>/accounts?view=<ref>' (+ '&brief=<id>' when the view's Brief is one)}]
 --  the caller's pins in pin order. A pin whose saved view was
--- deleted (or is no longer visible) is left out. p_brief is the lens (app.home_lens).
+-- deleted (or is no longer visible) is left out. p_brief is the lens (app.home_lens). R10: a saved
+-- view keeps its own Brief, so its count and href use that Brief whatever the lens (an archived
+-- one reads as all Briefs, as the lens would); a preset, or a view saved under all Briefs, uses the lens.
 create or replace function public.pinned_views(p_ws uuid, p_brief uuid default null) returns jsonb
   language plpgsql stable security definer set search_path = ''
 as $$
@@ -550,6 +567,7 @@ declare
   r       record;
   v       record;
   v_count int;
+  v_vb    uuid;
   v_out   jsonb := '[]'::jsonb;
 begin
   for r in select vp.view_ref from public.view_pin vp
@@ -557,14 +575,15 @@ begin
             order by vp.position, vp.view_ref loop
     select * into v from app.view_ref(p_ws, v_me, r.view_ref) limit 1;
     continue when not found;
+    v_vb := case when v.brief_id is null then v_brief else app.home_lens(p_ws, v.brief_id) end;
     begin
-      v_count := app.home_count(p_ws, v_brief, v.filter);
+      v_count := app.home_count(p_ws, v_vb, v.filter);
     exception when sqlstate '22023' then
       v_count := null;
     end;
     v_out := v_out || jsonb_build_array(jsonb_build_object('ref', r.view_ref, 'name', v.name, 'count', v_count,
                                                            'href', '/workspace/' || p_ws || '/accounts?view=' || r.view_ref
-                                                                   || coalesce('&brief=' || v_brief, '')));
+                                                                   || coalesce('&brief=' || v_vb, '')));
   end loop;
   return v_out;
 end $$;
@@ -870,6 +889,9 @@ end $$;
 --                                claim.created is emitted so verdicts, scores and formulas
 --                                recompute, and the item is 'restored' (so its fact can be
 --                                written again, app.create_claim).
+--                                A restored manual value (derived:manual) is the cell's one
+--                                manual value again: any other active manual claim of the cell
+--                                is superseded by it, as set_manual_value does.
 --                      merge / create_new are refused (22023).
 -- Editor+ (42501). The identity feedback label is written for identity items only; a
 -- claim_wrong decision is audited (claim.restored / claim.wrong_dismissed).
@@ -919,6 +941,12 @@ begin
         perform app.emit('claim.created'::public.event_type, v_item.org_id, null, 'claim', v_claim.id,
                          jsonb_build_object('entity_id', v_claim.entity_id, 'predicate_id', v_claim.predicate_id,
                                             'source_record_id', v_claim.source_record_id));
+        if exists (select 1 from public.source_record sr
+                    where sr.id = v_claim.source_record_id and sr.connector_id = 'derived:manual') then
+          update public.claim set status = 'superseded', superseded_by = v_claim.id
+           where entity_id = v_claim.entity_id and predicate_id = v_claim.predicate_id
+             and source_record_id = v_claim.source_record_id and status = 'active' and id <> v_claim.id;
+        end if;
       end if;
     end if;
     update public.review_item

@@ -1,6 +1,6 @@
 begin;
 create extension if not exists pgtap with schema extensions;
-select plan(138);
+select plan(149);
 
 -- ── Fixture ──────────────────────────────────────────────────────────────────
 -- Alpha: A owner (Ann Owner), K Viewer. Beta: B owner, with its own account and claim. X is
@@ -147,8 +147,8 @@ create function pg_temp.t(f jsonb default null, s jsonb default null, c uuid[] d
 select is((select string_agg(k, ',' order by k) from jsonb_object_keys(pg_temp.t()) k), 'columns,rows,total', '2. the page has total, rows and columns');
 select is(pg_temp.t() -> 'columns',
   jsonb_build_array(
-    jsonb_build_object('id', pg_temp.id('p_sites'), 'key', 'ot_sites', 'label', 'Sites', 'value_type', 'number', 'fill_method', 'extract', 'auto_run', false),
-    jsonb_build_object('id', pg_temp.id('p_dbl'), 'key', 'ot_double', 'label', 'Double', 'value_type', 'number', 'fill_method', 'formula', 'auto_run', true)),
+    jsonb_build_object('id', pg_temp.id('p_sites'), 'key', 'ot_sites', 'label', 'Sites', 'value_type', 'number', 'fill_method', 'extract', 'auto_run', false, 'allowed_values', null),
+    jsonb_build_object('id', pg_temp.id('p_dbl'), 'key', 'ot_double', 'label', 'Double', 'value_type', 'number', 'fill_method', 'formula', 'auto_run', true, 'allowed_values', null)),
   '3. no p_columns: the Brief''s columns in spec order, each with its shape');
 select is(pg_temp.t() -> 'total', '3'::jsonb, '4. total counts every match');
 select is((select string_agg(r ->> 'name', ',' order by o) from jsonb_array_elements(pg_temp.t() -> 'rows') with ordinality x(r, o)),
@@ -217,11 +217,12 @@ select is(pg_temp.t(f => '{"field": {"system": "name"}, "op": "contains", "value
 -- ── cell_detail ──────────────────────────────────────────────────────────────
 create function pg_temp.cd(e text, p text) returns jsonb language sql as $$ select public.cell_detail(pg_temp.w(), pg_temp.id(e), pg_temp.id(p)) $$;
 select is((select string_agg(k, ',' order by k) from jsonb_object_keys(pg_temp.cd('e1', 'p_sites')) k),
-  'claims,column,confidence,fill_label,inputs,runs,state,value', '32. the panel''s keys');
+  'claim_id,claims,column,confidence,fill_label,inputs,runs,state,value', '32. the panel''s keys');
 select is(pg_temp.cd('e1', 'p_sites') - 'claims' - 'runs',
   jsonb_build_object('column', jsonb_build_object('id', pg_temp.id('p_sites'), 'key', 'ot_sites', 'label', 'Sites', 'value_type', 'number',
-                                                  'fill_method', 'extract', 'auto_run', false),
-                     'state', 'value', 'value', 12, 'confidence', 80, 'fill_label', 'Found in sources', 'inputs', '[]'::jsonb),
+                                                  'fill_method', 'extract', 'auto_run', false, 'allowed_values', null),
+                     'state', 'value', 'value', 12, 'confidence', 80, 'claim_id', pg_temp.id('c1_sites'), 'fill_label', 'Found in sources',
+                     'inputs', '[]'::jsonb),
   '33. a sourced value');
 select is(pg_temp.cd('e1', 'p_sites') -> 'claims',
   jsonb_build_array(jsonb_build_object('id', pg_temp.id('c1_sites'), 'value', 12, 'quote', 'E1 runs twelve sites',
@@ -242,7 +243,7 @@ select is((pg_temp.cd('e3', 'p_sites') #> '{runs,0}') - 'queued_at' - 'started_a
   jsonb_build_object('id', pg_temp.id('r3_err'), 'status', 'error', 'cost_usd', 0.01, 'brief_version', 1, 'error', 'boom'),
   '39. an errored run with its cost and reason');
 select is(pg_temp.cd('e3', 'p_sites') - 'column' - 'runs',
-  '{"state": "error", "value": null, "confidence": null, "fill_label": "Found in sources", "claims": [], "inputs": []}'::jsonb,
+  '{"state": "error", "value": null, "confidence": null, "claim_id": null, "fill_label": "Found in sources", "claims": [], "inputs": []}'::jsonb,
   '40. an error cell with no value');
 select is(jsonb_array_length(pg_temp.cd('e2', 'p_note') -> 'runs'), 50, '41. at most 50 runs');
 select is(jsonb_array_length(pg_temp.cd('e2', 'p_note') -> 'claims'), 50, '42. at most 50 claims');
@@ -274,6 +275,26 @@ select is((select jsonb_agg(p ->> 'ref') from jsonb_array_elements(public.pinned
   '54. unpinned; all Briefs as the lens');
 select is(public.pinned_views(pg_temp.w(), null) -> 0 ->> 'href', '/workspace/' || pg_temp.w() || '/accounts?view=stale',
   '54b. all Briefs: the canonical href carries no brief');
+-- R10 (I4): a saved view keeps its own Brief. Under a second Active Brief (B2, no verdicts) the
+-- view saved under B1 still counts, and opens, under B1.
+reset role;
+insert into ids values ('b2', gen_random_uuid()), ('bv2', gen_random_uuid());
+insert into public.brief (id, org_id, workspace_id, name, state, intake_status)
+values (pg_temp.id('b2'), pg_temp.id('org'), pg_temp.w(), 'Second', 'Draft', 'done');
+insert into public.brief_version (id, brief_id, org_id, workspace_id, version, config, rubric, weights, published_at)
+values (pg_temp.id('bv2'), pg_temp.id('b2'), pg_temp.id('org'), pg_temp.w(), 1, '{}', '{}', '{}', now());
+update public.brief set state = 'Active', current_version_id = pg_temp.id('bv2') where id = pg_temp.id('b2');
+set local role authenticated;
+insert into ids select 'sv_b1', public.save_view(pg_temp.w(), p_name => 'Confirmed (B1)', p_brief => pg_temp.b(), p_visibility => 'personal',
+                                                p_filter => '{"field": {"system": "verdict"}, "op": "one_of", "value": ["Confirmed"]}');
+select lives_ok(format('select public.pin_view(%L::uuid, %L, true)', pg_temp.w(), pg_temp.id('sv_b1')), '54c. pin a view saved under B1');
+select is((select p - 'name' - 'ref' from jsonb_array_elements(public.pinned_views(pg_temp.w(), pg_temp.id('b2'))) p
+            where p ->> 'ref' = pg_temp.id('sv_b1')::text),
+  jsonb_build_object('count', 1, 'href', '/workspace/' || pg_temp.w() || '/accounts?view=' || pg_temp.id('sv_b1') || '&brief=' || pg_temp.b()),
+  '54d. under another lens it counts, and links, under its own Brief');
+select is((select p -> 'count' from jsonb_array_elements(public.pinned_views(pg_temp.w(), null)) p where p ->> 'ref' = pg_temp.id('sv_b1')::text),
+  '1'::jsonb, '54e. and under all Briefs too');
+select lives_ok(format('select public.pin_view(%L::uuid, %L, false)', pg_temp.w(), pg_temp.id('sv_b1')), '54f. unpin it');
 select throws_ok(format('select public.pin_view(%L::uuid, ''nope'', true)', pg_temp.w()), '22023', null, '55. an unknown preset is refused');
 select throws_ok(format('select public.pin_view(%L::uuid, %L, true)', pg_temp.w(), pg_temp.id('sv_priv')), '22023', null,
   '56. someone else''s personal view is refused');
@@ -346,8 +367,10 @@ select is((select count(*)::int from public.claim c join public.source_record sr
   1, '79. one active manual claim per cell');
 select is((select status::text from public.claim where id = pg_temp.id('c2_sites')), 'active', '80. the sourced claim is left alone');
 set local role authenticated;
-select is(pg_temp.cd('e2', 'p_sites') - 'column' - 'claims' - 'runs' - 'state',
+select is(pg_temp.cd('e2', 'p_sites') - 'column' - 'claims' - 'runs' - 'state' - 'claim_id',
   '{"value": 8, "confidence": 100, "fill_label": "Entered by you", "inputs": []}'::jsonb, '81. the panel: the manual value, entered by you');
+select is(pg_temp.cd('e2', 'p_sites') ->> 'claim_id', pg_temp.id('m2')::text,
+  '81b. I2: the panel names the cell''s claim (the manual value), so the other active claims show as overridden and Mark wrong acts on it');
 select is((select jsonb_agg(jsonb_build_object('value', c -> 'value', 'status', c -> 'status', 'struck', c -> 'superseded_at' <> 'null'::jsonb) order by o)
              from jsonb_array_elements(pg_temp.cd('e2', 'p_sites') -> 'claims') with ordinality x(c, o)),
   '[{"value": 8, "status": "active", "struck": false}, {"value": 4, "status": "active", "struck": false},
@@ -445,6 +468,25 @@ insert into ids select 'ri3', app.create_review_item(pg_temp.id('org'), pg_temp.
   (select id from public.mention where raw_name = 'OT Identity'), pg_temp.id('e1'), 'fuzzy', 70::smallint);
 set local role authenticated;
 select throws_ok(format('select public.resolve_review_item(%L::uuid, ''restore'')', pg_temp.id('ri3')), '22023', null, '92q. an identity item cannot be restored');
+-- M1: entering a value that was marked wrong again resolves its Review item (restored).
+insert into ids select 'ri4', public.mark_claim_wrong(pg_temp.w(), pg_temp.id('m2'), 'Typo');
+select is(pg_temp.mv('e2', 'p_sites', '8'), pg_temp.id('m2'), '92r. entering the value again brings back the same claim');
+reset role;
+select is((select status from public.review_item where id = pg_temp.id('ri4')) || '/' || (select status::text from public.claim where id = pg_temp.id('m2')),
+  'restored/active', '92s. its Review item is no longer pending: restored, the value active');
+select is((select count(*)::int from public.audit_log where action = 'claim.restored' and target_id = pg_temp.id('m2')), 1, '92t. audited as restored');
+-- M2: restoring an older manual value while a newer one is active: the restored one wins (the newer is superseded).
+set local role authenticated;
+insert into ids select 'ri5', public.mark_claim_wrong(pg_temp.w(), pg_temp.id('m2'), 'Typo again');
+insert into ids select 'm5', pg_temp.mv('e2', 'p_sites', '9');
+select lives_ok(format('select public.resolve_review_item(%L::uuid, ''restore'')', pg_temp.id('ri5')), '92u. restore the older manual value');
+reset role;
+select is((select status::text || ':' || superseded_by from public.claim where id = pg_temp.id('m5')), 'superseded:' || pg_temp.id('m2'),
+  '92v. the newer manual value is superseded by the restored one');
+select is((select count(*)::int from public.claim c join public.source_record sr on sr.id = c.source_record_id
+            where c.entity_id = pg_temp.id('e2') and c.predicate_id = pg_temp.id('p_sites') and c.status = 'active' and sr.connector_id = 'derived:manual'),
+  1, '92w. still one active manual claim per cell');
+set local role authenticated;
 
 -- ── set_auto_run (A) ─────────────────────────────────────────────────────────
 select lives_ok(format('select public.set_auto_run(%L::uuid, %L::uuid, false)', pg_temp.w(), pg_temp.id('p_dbl')), '93. pause auto-run');
