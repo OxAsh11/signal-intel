@@ -96,7 +96,7 @@ export default async function AccountDetailPage({
   const entity = one(account.entity as { id: string; display_name: string } | { id: string; display_name: string }[] | null);
   const entityId = entity?.id ?? null;
 
-  const [{ data: scores }, { data: cards }, { data: research }, { data: contacts }, { data: stageEvents }, { data: activities }, { data: domains }, { data: countryRows }] =
+  const [{ data: scores }, { data: cards }, { data: research }, { data: contacts }, { data: stageEvents }, { data: activities }, { data: domains }, { data: countryRows }, { data: firmographicRows }] =
     await Promise.all([
       supabase.from('score').select('band, fit, evidence, scale, timing, priority, readiness, gates, computed_at, brief_version_id').eq('account_id', aid).order('computed_at', { ascending: false }).limit(1),
       supabase.from('account_card').select('content, computed_at').eq('account_id', aid).order('computed_at', { ascending: false }).limit(1),
@@ -106,6 +106,7 @@ export default async function AccountDetailPage({
       supabase.from('activity').select('id, kind, occurred_at, person:person_entity_id(display_name)').eq('account_id', aid).order('occurred_at', { ascending: false }).limit(20),
       entityId ? supabase.from('entity_alias').select('value_normalised').eq('entity_id', entityId).eq('alias_type', 'domain').limit(1) : Promise.resolve({ data: null }),
       entityId ? supabase.from('mention').select('raw_country').eq('entity_id', entityId).not('raw_country', 'is', null).neq('raw_country', '').order('created_at', { ascending: false }).limit(1) : Promise.resolve({ data: null }),
+      supabase.from('account_firmographic').select('industry, sub_industry, size_band, employee_count, revenue_range, founded_year, hq_city, hq_state, hq_country, tech_stack, enriched_at, source').eq('account_id', aid).maybeSingle(),
     ]);
 
   const score = scores?.[0] ?? null;
@@ -140,6 +141,7 @@ export default async function AccountDetailPage({
   const version = one(verdict?.brief_version as { version: number } | { version: number }[] | null)?.version;
   const domain = domains?.[0]?.value_normalised as string | undefined;
   const country = countryRows?.[0]?.raw_country as string | undefined;
+  const firmographic = firmographicRows ?? null;
 
   const timeline = [
     ...(stageEvents ?? []).map((e) => ({ id: `s${e.id}`, at: e.occurred_at as string, text: `Stage moved to ${e.to_stage}` })),
@@ -291,6 +293,65 @@ export default async function AccountDetailPage({
               <Card><span className="text-ink-muted">Not scored yet.</span></Card>
             )}
           </div>
+
+          {firmographic ? (
+            <Card aria-labelledby="firmo-h">
+              <h2 id="firmo-h" className="si-h2">Company profile</h2>
+              <dl className="m-0 grid grid-cols-2 gap-x-4 gap-y-3">
+                {firmographic.industry ? (
+                  <div className="col-span-2 flex flex-col gap-0.5">
+                    <dt className="si-label">Industry</dt>
+                    <dd className="m-0 font-medium text-ink">
+                      {firmographic.industry}{firmographic.sub_industry ? ` · ${firmographic.sub_industry}` : ''}
+                    </dd>
+                  </div>
+                ) : null}
+                {firmographic.size_band ? (
+                  <div className="flex flex-col gap-0.5">
+                    <dt className="si-label">Size</dt>
+                    <dd className="m-0 font-medium text-ink">{firmographic.size_band}</dd>
+                  </div>
+                ) : null}
+                {firmographic.employee_count ? (
+                  <div className="flex flex-col gap-0.5">
+                    <dt className="si-label">Employees</dt>
+                    <dd className="m-0 font-medium text-ink">{firmographic.employee_count.toLocaleString()}</dd>
+                  </div>
+                ) : null}
+                {firmographic.revenue_range ? (
+                  <div className="flex flex-col gap-0.5">
+                    <dt className="si-label">Revenue</dt>
+                    <dd className="m-0 font-medium text-ink">{firmographic.revenue_range}</dd>
+                  </div>
+                ) : null}
+                {firmographic.founded_year ? (
+                  <div className="flex flex-col gap-0.5">
+                    <dt className="si-label">Founded</dt>
+                    <dd className="m-0 font-medium text-ink">{firmographic.founded_year}</dd>
+                  </div>
+                ) : null}
+                {(firmographic.hq_city || firmographic.hq_state || firmographic.hq_country) ? (
+                  <div className="col-span-2 flex flex-col gap-0.5">
+                    <dt className="si-label">Headquarters</dt>
+                    <dd className="m-0 font-medium text-ink">
+                      {[firmographic.hq_city, firmographic.hq_state, firmographic.hq_country].filter(Boolean).join(', ')}
+                    </dd>
+                  </div>
+                ) : null}
+                {(firmographic.tech_stack as string[]).length > 0 ? (
+                  <div className="col-span-2 flex flex-col gap-1">
+                    <dt className="si-label">Tech stack</dt>
+                    <dd className="m-0 flex flex-wrap gap-1.5">
+                      {(firmographic.tech_stack as string[]).map((t) => (
+                        <span key={t} className="si-chip">{t}</span>
+                      ))}
+                    </dd>
+                  </div>
+                ) : null}
+              </dl>
+              <span className="si-meta">Enriched {ago(firmographic.enriched_at as string, now)} · {String(firmographic.source).replace(/_/g, ' ')}</span>
+            </Card>
+          ) : null}
 
           <Card family="grass" aria-labelledby="people-h">
             <FamilyTag family="grass">Engagement · people</FamilyTag>
