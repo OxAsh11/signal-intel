@@ -40,9 +40,31 @@ const host = (url: string | null) => {
   }
 };
 
-/** Strip [CLAIM:uuid] inline markers from AI-generated bullet text. */
-function stripClaims(text: string): string {
-  return text.replace(/\[CLAIM:[a-f0-9-]+\]/gi, '').replace(/  +/g, ' ').trim();
+/** Extract all claim UUIDs from AI-generated bullet text. */
+function extractClaimIds(bullets: string[] | undefined): string[] {
+  if (!bullets?.length) return [];
+  const ids = new Set<string>();
+  for (const b of bullets) {
+    for (const m of b.matchAll(/\[CLAIM:([a-f0-9-]+)\]/gi)) ids.add(m[1]!);
+  }
+  return [...ids];
+}
+
+/** Render bullet text, replacing [CLAIM:uuid] markers with clickable source links. */
+function BulletWithSources({ text, claimMap }: { text: string; claimMap: Map<string, { url: string | null; name: string }> }) {
+  return (
+    <>
+      {text.split(/(\[CLAIM:[a-f0-9-]+\])/i).map((part, i) => {
+        const m = part.match(/^\[CLAIM:([a-f0-9-]+)\]$/i);
+        if (!m) return part;
+        const info = claimMap.get(m[1]!);
+        if (!info) return null;
+        return info.url
+          ? <a key={i} href={info.url} target="_blank" rel="noopener noreferrer" className="font-medium text-signal underline underline-offset-2">{info.name}</a>
+          : <span key={i} className="font-medium text-ink">{info.name}</span>;
+      })}
+    </>
+  );
 }
 
 /**
@@ -98,15 +120,23 @@ export default async function AccountDetailPage({
 
   const verdict = verdicts?.[0] ?? null;
   const card = (cards?.[0]?.content ?? null) as { bullets?: string[]; next_step?: string } | null;
-  const claimIds = (verdict?.claim_ids as string[] | null) ?? [];
-  const { data: claimRows } = claimIds.length
+  const verdictClaimIds = (verdict?.claim_ids as string[] | null) ?? [];
+  const bulletClaimIds = extractClaimIds(card?.bullets);
+  const allClaimIds = [...new Set([...verdictClaimIds, ...bulletClaimIds])];
+  const { data: claimRows } = allClaimIds.length
     ? await supabase
         .from('claim')
         .select('id, quote, observed_at, predicate:predicate_id(key, label), source:source_record_id(id, url, source_type)')
-        .in('id', claimIds)
+        .in('id', allClaimIds)
         .order('observed_at', { ascending: false })
     : { data: [] };
   const claims = (claimRows ?? []) as ClaimRow[];
+  const claimMap = new Map(
+    claims.map((c) => {
+      const src = one(c.source);
+      return [c.id, { url: src?.url ?? null, name: host(src?.url ?? null) }];
+    })
+  );
   const version = one(verdict?.brief_version as { version: number } | { version: number }[] | null)?.version;
   const domain = domains?.[0]?.value_normalised as string | undefined;
   const country = countryRows?.[0]?.raw_country as string | undefined;
@@ -168,7 +198,7 @@ export default async function AccountDetailPage({
             <h2 id="why-h" className="si-h3">Why this account, now</h2>
             {card?.bullets?.length ? (
               <ul className="m-0 flex max-w-[80ch] flex-col gap-1.5 pl-5 text-[14px] leading-[1.6]">
-                {card.bullets.map((b, i) => <li key={i}>{stripClaims(b)}</li>)}
+                {card.bullets.map((b, i) => <li key={i}><BulletWithSources text={b} claimMap={claimMap} /></li>)}
               </ul>
             ) : (
               <p className="m-0">The account summary is written once the account has a verdict and a score.</p>
@@ -179,9 +209,9 @@ export default async function AccountDetailPage({
                 <DerivedValue
                   label="Verdict"
                   versions={version ? `brief v${version}` : undefined}
-                  explanation={`Rests on ${claimIds.length} claim${claimIds.length === 1 ? '' : 's'}. Each quote below is the exact text the verdict uses.`}
+                  explanation={`Rests on ${verdictClaimIds.length} claim${verdictClaimIds.length === 1 ? '' : 's'}. Each quote below is the exact text the verdict uses.`}
                 >
-                  {verdict.value} · {claimIds.length} claim{claimIds.length === 1 ? '' : 's'}
+                  {verdict.value} · {verdictClaimIds.length} claim{verdictClaimIds.length === 1 ? '' : 's'}
                 </DerivedValue>
               </div>
             ) : null}
