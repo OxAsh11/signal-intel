@@ -161,3 +161,13 @@ export async function resetRadarLexicon(_: ActionState, form: FormData): Promise
   revalidatePath(`/briefs/${text(form, 'brief')}/radars`);
   return { ok: true };
 }
+
+/** Queue an immediate re-fetch for a radar. Field: `id` (radar UUID). */
+export async function triggerRadarFetch(_: ActionState, form: FormData): Promise<ActionState> {
+  const id = text(form, 'id');
+  if (!id) return { error: 'Missing radar ID.' };
+  const { error } = await rpc('trigger_radar_fetch', { p_radar: id });
+  if (error) return { error };
+  revalidatePath('/sources', 'layout');
+  return { ok: true };
+}
