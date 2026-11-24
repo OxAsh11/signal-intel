@@ -1,6 +1,6 @@
 import { notFound } from 'next/navigation';
 import Link from 'next/link';
-import { Card, FamilyTag, HealthIndicator } from '@signal/ui';
+import { Card, HealthIndicator } from '@signal/ui';
 import type { HealthStatus } from '@signal/ui';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgContext, atLeast } from '@/lib/org';
@@ -89,7 +89,7 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
   return (
     <>
       {/* Header */}
-      <div className="flex flex-wrap items-start justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
           <div className="flex items-center gap-3">
             <h1 className="si-h1 m-0">{radar.name}</h1>
@@ -99,7 +99,7 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
               detail={statusDetail}
             />
           </div>
-          <p className="m-0 text-sm text-ink-muted">
+          <p className="m-0 text-[13px] text-ink-muted">
             {radarTypeLabel(radar.connector_type ?? '')}
             {brief ? (
               <>
@@ -121,7 +121,7 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
               </button>
             </form>
           )}
-          <Link href="/sources" className="text-sm text-ink-muted hover:text-ink">
+          <Link href="/sources" className="text-[13px] text-ink-muted hover:text-ink">
             ← Sources
           </Link>
         </div>
@@ -129,7 +129,7 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
 
       {/* Not-set-up banner */}
       {notSetUp && (
-        <div className="rounded-md border border-warning/40 bg-warning/10 px-4 py-3 text-sm text-ink">
+        <div className="rounded-[6px] border border-marker bg-marker-soft px-4 py-3 text-[13px] text-caution">
           <strong>Brave Search not configured.</strong> This radar will start fetching once{' '}
           <code>BRAVE_SEARCH_API_KEY</code> and <code>SEARCH_PROVIDER=brave</code> are added to the
           worker environment. The worker checks the outbox every 5 seconds, so results appear within
@@ -139,15 +139,15 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
 
       {/* Error banner (non-setup errors) */}
       {!notSetUp && radar.last_error && (
-        <div className="rounded-md border border-danger/40 bg-danger/10 px-4 py-3 text-sm text-ink">
+        <div className="rounded-[6px] border border-danger bg-danger-soft px-4 py-3 text-[13px] text-danger">
           <strong>Last error:</strong> {radar.last_error}
         </div>
       )}
 
       {/* Pipeline funnel */}
-      <Card family="pool" kind="feature" aria-labelledby="funnel-h">
-        <FamilyTag family="pool">Radar · funnel</FamilyTag>
-        <h2 id="funnel-h" className="si-h2 text-[20px]">
+      <Card aria-labelledby="funnel-h">
+        <span className="rounded-[4px] bg-surface-sunken border border-line px-2 py-0.5 text-[11px] font-medium text-ink-muted self-start">Radar · funnel</span>
+        <h2 id="funnel-h" className="si-h2">
           {total ? `${nf.format(total)} pages fetched` : 'No pages fetched yet'}
         </h2>
         <div className="grid grid-cols-[minmax(140px,220px)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3">
@@ -164,7 +164,7 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
             </div>
           ))}
         </div>
-        <div className="mt-4 flex flex-wrap gap-6 text-sm text-ink-muted">
+        <div className="mt-2 flex flex-wrap gap-4 text-[13px] text-ink-muted">
           <span>Pending: <strong className="text-ink">{nf.format(pending)}</strong></span>
           <span>Irrelevant: <strong className="text-ink">{nf.format(irrelevant)}</strong></span>
           {failed > 0 && <span>Failed: <strong className="text-danger">{nf.format(failed)}</strong></span>}
@@ -174,8 +174,7 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
 
       {/* Queries + lexicon */}
       {radar.connector_type !== 'csv_upload' && (
-        <Card family="pool" aria-labelledby="queries-h">
-          <FamilyTag family="pool">Radar · queries</FamilyTag>
+        <Card aria-labelledby="queries-h">
           <h2 id="queries-h" className="si-h2">Queries &amp; pre-filter</h2>
           <RadarQueries
             briefId={brief?.id ?? ''}
@@ -190,15 +189,12 @@ export default async function RadarDetailPage({ params }: { params: Promise<{ ra
       )}
 
       {/* Recent pages */}
-      <Card family="pool" className="si-flush" aria-labelledby="pages-h">
-        <div className="flex flex-wrap items-center justify-between gap-3 p-6 pb-4">
-          <div className="flex items-center gap-3">
-            <FamilyTag family="pool">Pages</FamilyTag>
-            <h2 id="pages-h" className="si-h2">20 most recent</h2>
-          </div>
+      <Card className="si-flush" aria-labelledby="pages-h">
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 pb-3">
+          <h2 id="pages-h" className="si-h2">20 most recent pages</h2>
         </div>
         {recentRows.length === 0 ? (
-          <p className="m-0 px-6 pb-6 text-ink-muted">No pages fetched yet.</p>
+          <p className="m-0 px-4 pb-4 text-[13px] text-ink-muted">No pages fetched yet.</p>
         ) : (
           <div className="si-table-box bg-surface">
             <table className="si-table min-w-[640px]">
