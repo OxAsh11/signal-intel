@@ -48,8 +48,11 @@ class Settings(BaseSettings):
     findymail_api_key: SecretStr | None = None
     prospeo_api_key: SecretStr | None = None
     pdl_api_key: SecretStr | None = None
-    # Brave Search (M2 web-search radars, targeted search). Unset: "Not set up yet".
+    # Web search (M2 radars, targeted search, research columns). SEARCH_PROVIDER picks the
+    # provider; its key unset: "Not set up yet".
+    search_provider: Literal["brave", "serper"] = "serper"
     brave_search_api_key: SecretStr | None = None
+    serper_api_key: SecretStr | None = None
 
     # Supabase project URL (same as NEXT_PUBLIC_SUPABASE_URL) and service key —
     # used by the worker to download uploaded files from Supabase Storage.
@@ -58,6 +61,12 @@ class Settings(BaseSettings):
 
     outbox_poll_seconds: float = Field(default=5.0, gt=0)
     outbox_batch_size: int = Field(default=100, gt=0, le=1000)
+
+    def search_api_key(self) -> str | None:
+        """The active search provider's key, or None when it is not set up."""
+        key = self.serper_api_key if self.search_provider == "serper" else self.brave_search_api_key
+        value = key.get_secret_value() if key else ""
+        return value or None
 
 
 @lru_cache

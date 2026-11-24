@@ -79,7 +79,7 @@ export default async function RadarsPage({ params }: { params: Promise<{ id: str
                   </p>
                   {notSetUp ? (
                     <p className="m-0 text-xs text-ink-muted">
-                      Not set up yet: web-search radars start once the Brave Search key is added to the worker.
+                      Not set up yet: web-search radars start once a web search key (Serper or Brave) is added to the worker.
                     </p>
                   ) : r.last_error ? (
                     <p className="m-0 text-xs text-danger truncate max-w-sm" title={r.last_error}>

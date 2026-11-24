@@ -10,7 +10,10 @@ public social posts are all found globally through web search rather than per-co
   Brave's title and snippets (``content_kind = "snippet"``). A result on a private or reserved
   address is dropped.
 * A fetch reserves budget for one call per query before any call and settles the calls made (S6).
-* Without ``BRAVE_SEARCH_API_KEY`` the fetch raises :class:`SearchNotConfigured` before any call.
+* ``provider="serper"`` (SEARCH_PROVIDER) sends the same queries to Serper (Google) instead and
+  maps its ``organic`` list into Brave's response shape; everything downstream is unchanged.
+* Without the active provider's key (``Settings.search_api_key()``) the fetch raises
+  :class:`SearchNotConfigured` before any call.
 
 Fake mode: ``config["fake"]`` returns two fixtures (one full page, one snippet) with no network.
 """
@@ -43,7 +46,9 @@ if TYPE_CHECKING:
 log = get_logger(__name__)
 
 BRAVE_URL = "https://api.search.brave.com/res/v1/web/search"
+SERPER_URL = "https://google.serper.dev/search"
 PRICE_MODEL = "brave-search"
+SERPER_PRICE_MODEL = "serper-search"
 _FALLBACK_PRICE = Decimal("0.005")
 _MAX_COUNT = 20
 _MAX_PAGE_BYTES = 2_000_000
@@ -77,15 +82,15 @@ SOCIAL_SITES = [
 # Targeted search for one entity is not a radar type; its records have source_type "web_search".
 TARGETED_KIND = "web_search"
 
-NOT_SET_UP = "Brave Search is not set up yet"
+NOT_SET_UP = "Web search is not set up yet"
 
 
 class SearchNotConfigured(Exception):
-    """No (or a rejected) Brave Search key: retrying will not help."""
+    """No (or a rejected) web-search key: retrying will not help."""
 
 
 class BraveError(Exception):
-    """Brave answered with a rate limit or server error; the job may retry."""
+    """The search provider answered with a rate limit or server error; the job may retry."""
 
 
 SearchFn = Callable[[str, dict[str, str]], Awaitable[dict[str, Any]]]
@@ -108,6 +113,28 @@ def build_query(query: str, kind: str, sites: list[str] | None) -> str:
     return f"{query} ({' OR '.join(f'site:{s}' for s in chosen)})"
 
 
+def serper_tbs(fresh: str, today: date) -> str | None:
+    """Serper ``tbs`` for a Brave freshness value (``py`` or ``<from>to<to>``); None omits it."""
+    named = {"pd": "qdr:d", "pw": "qdr:w", "pm": "qdr:m", "py": "qdr:y"}
+    if fresh in named:
+        return named[fresh]
+    try:
+        days = (today - date.fromisoformat(fresh.split("to")[0])).days
+    except ValueError:
+        return None
+    if days <= 1:
+        return "qdr:d"
+    if days <= 7:
+        return "qdr:w"
+    if days <= 31:
+        return "qdr:m"
+    return "qdr:y"
+
+
+def price_model(provider: str) -> str:
+    return SERPER_PRICE_MODEL if provider == "serper" else PRICE_MODEL
+
+
 def freshness(cursor: dict[str, Any], today: date) -> str:
     since = cursor.get("since")
     return f"{since}to{today.isoformat()}" if since else "py"
@@ -122,12 +149,16 @@ class BraveSearchConnector:
         search: SearchFn | None = None,
         fetch_page: PageFn | None = None,
         meter: SearchMeter | None = None,
+        provider: str = "brave",
     ) -> None:
+        if provider not in ("brave", "serper"):
+            raise ValueError(f"unknown search provider {provider!r}")
         if kind not in BRAVE_KINDS and kind != TARGETED_KIND:
             raise ValueError(f"unknown Brave radar kind {kind!r}")
         self.kind = kind
         self.source_type = BRAVE_KINDS.get(kind, kind)
         self._api_key = api_key
+        self._provider = provider
         self._search = search or self._default_search
         # Injected page fetchers (tests) get the guard checked here; the default follows
         # redirects itself so that every hop goes through the guard.
@@ -218,6 +249,8 @@ class BraveSearchConnector:
         return _make(url, snippet, query, "snippet")
 
     async def _default_search(self, q: str, params: dict[str, str]) -> dict[str, Any]:
+        if self._provider == "serper":
+            return await self._serper_search(q, params)
         headers = {"Accept": "application/json", "X-Subscription-Token": self._api_key or ""}
         try:
             async with aiohttp.ClientSession(timeout=_SEARCH_TIMEOUT) as session:
@@ -230,6 +263,37 @@ class BraveSearchConnector:
                     return data
         except (aiohttp.ClientError, TimeoutError) as exc:
             raise BraveError(str(exc)) from exc
+
+    async def _serper_search(self, q: str, params: dict[str, str]) -> dict[str, Any]:
+        body: dict[str, Any] = {"q": q, "num": int(params.get("count") or _MAX_COUNT)}
+        tbs = serper_tbs(params.get("freshness", ""), datetime.now(tz=UTC).date())
+        if tbs:
+            body["tbs"] = tbs
+        headers = {"Content-Type": "application/json", "X-API-KEY": self._api_key or ""}
+        try:
+            async with aiohttp.ClientSession(timeout=_SEARCH_TIMEOUT) as session:
+                async with session.post(SERPER_URL, json=body, headers=headers) as r:
+                    if r.status in (401, 403):
+                        raise SearchNotConfigured(NOT_SET_UP)
+                    if r.status >= 400:
+                        raise BraveError(f"Serper answered {r.status}")
+                    data: dict[str, Any] = await r.json(content_type=None)
+        except (aiohttp.ClientError, TimeoutError) as exc:
+            raise BraveError(str(exc)) from exc
+        organic = data.get("organic") or []
+        return {
+            "web": {
+                "results": [
+                    {
+                        "url": o.get("link") or "",
+                        "title": o.get("title") or "",
+                        "description": o.get("snippet") or "",
+                    }
+                    for o in organic
+                    if isinstance(o, dict)
+                ]
+            }
+        }
 
     def _fake(self, query: str | None) -> list[SourcePayload]:
         base = f"https://fake.example.com/{self.kind}"
@@ -325,11 +389,14 @@ async def targeted_search(
 
 
 class PgSearchMeter:
-    """S6 metering for Brave calls over app.reserve_budget / app.settle_reservation."""
+    """S6 metering for search calls over app.reserve_budget / app.settle_reservation."""
 
-    def __init__(self, pool: AsyncConnectionPool, ctx: CallContext) -> None:
+    def __init__(
+        self, pool: AsyncConnectionPool, ctx: CallContext, provider: str = "brave"
+    ) -> None:
         self._pool = pool
         self._ctx = ctx
+        self._provider = provider
         self._price: Decimal | None = None
 
     async def _per_call(self) -> Decimal:
@@ -338,7 +405,7 @@ class PgSearchMeter:
                 cur = await conn.execute(
                     "select usd_per_million from public.model_price"
                     " where model = %s and unit = 'fetch'",
-                    (PRICE_MODEL,),
+                    (price_model(self._provider),),
                 )
                 row = await cur.fetchone()
             self._price = Decimal(str(row[0])) / Decimal(1_000_000) if row else _FALLBACK_PRICE
@@ -381,8 +448,8 @@ class PgSearchMeter:
             cost = await self._per_call() * calls
             actual = {
                 "capability": "search",
-                "provider": "brave",
-                "model": PRICE_MODEL,
+                "provider": self._provider,
+                "model": price_model(self._provider),
                 "latency_ms": 0,
                 "status": "ok",
                 "job_id": self._ctx.job_id,
