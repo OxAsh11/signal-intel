@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Card, FamilyTag } from '@signal/ui';
+import { Card } from '@signal/ui';
 import { navLinks, navSection, type NavItem } from '@/lib/nav';
 import { getOrgContext } from '@/lib/org';
 import { SectionTabs } from './section-tabs';
@@ -23,9 +23,16 @@ export async function PlaceholderPage({ item }: { item: NavItem }) {
     <>
       {section?.children ? <SectionTabs label={section.label} items={navLinks(section.children)} /> : null}
       <div className="flex flex-col gap-3">
+        {item.placeholder && (
+          <div className="flex items-center gap-3 rounded-lg border border-line bg-surface p-4">
+            <span className="rounded-full bg-marker-soft px-2.5 py-0.5 text-[11px] font-semibold uppercase tracking-widest text-caution">
+              Coming Soon
+            </span>
+            <span className="text-[13px] text-ink-muted">{COMING[item.placeholder]}</span>
+          </div>
+        )}
         <h1 className="si-h1">{item.label}</h1>
         <p className="si-lede">{item.job}</p>
-        {item.placeholder ? <FamilyTag family="mustard">{COMING[item.placeholder]}</FamilyTag> : null}
         {item.todayHref && item.todayLabel && ws ? (
           <Link href={item.todayHref(ws)} className="self-start text-ink underline">
             {item.todayLabel}

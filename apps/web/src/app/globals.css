@@ -35,3 +35,23 @@ body {
     animation: none !important;
   }
 }
+
+/* Dark mode: applies when data-theme="dark" is set by the ThemeToggle */
+[data-theme="dark"] body {
+  color-scheme: dark;
+  background: #18181A;
+  color: #F0F0EE;
+}
+[data-theme="dark"] {
+  --paper: #18181A;
+  --surface: #222224;
+  --surface-sunken: #2A2A2C;
+  --line: #2E2E32;
+  --ink: #F0F0EE;
+  --ink-body: #D0D0CC;
+  --ink-muted: #A0A09C;
+  --ink-faint: #666662;
+  --signal: #3B82F6;
+  --signal-soft: #1E3A5F;
+  --signal-strong: #93C5FD;
+}

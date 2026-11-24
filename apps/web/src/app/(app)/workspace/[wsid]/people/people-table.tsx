@@ -55,37 +55,47 @@ export function PeopleTable({ ws, rows, columns }: { ws: string; rows: PersonRow
               {columns.map((c) => <th key={c.id} scope="col" data-column={c.key}>{c.label}</th>)}
             </tr>
           </thead>
-          <tbody>
-            {rows.map((r) => (
-              <tr key={r.entity_id} data-row={r.name}>
-                <td className="min-w-[200px] font-medium text-ink">{r.name}</td>
-                <td>{r.title ?? <Dash />}</td>
-                <td data-column="account">
-                  {r.account_id && r.account_name ? (
-                    <Link href={`/workspace/${ws}/accounts/${r.account_id}`} className="block max-w-[22ch] truncate text-ink no-underline hover:underline">
-                      {r.account_name}
-                    </Link>
-                  ) : (
-                    <Dash />
-                  )}
-                  {r.country ? <span className="block text-[12px] text-ink-muted">{r.country}</span> : null}
+          {rows.length === 0 ? (
+            <tbody>
+              <tr>
+                <td colSpan={SYSTEM.length + columns.length} className="py-10 text-center text-[13px] text-ink-muted">
+                  No people found yet. Find people by running the People column on an account.
                 </td>
-                <td data-column="work_email"><EmailValue row={r} /></td>
-                <td data-column="linkedin">
-                  {r.linkedin ? (
-                    <a href={r.linkedin} target="_blank" rel="noreferrer" className="block max-w-[22ch] truncate text-ink no-underline hover:underline">
-                      {r.linkedin.replace(/^https?:\/\/(www\.)?/, '')}
-                    </a>
-                  ) : <Dash />}
-                </td>
-                <td data-column="location_flag"><LocationFlag row={r} /></td>
-                <td className="whitespace-nowrap">{formatDate(r.last_signal) ?? <Dash />}</td>
-                {columns.map((c) => (
-                  <td key={c.id} data-column={c.key}><Cell cell={r.cells[c.id]} column={c} /></td>
-                ))}
               </tr>
-            ))}
-          </tbody>
+            </tbody>
+          ) : (
+            <tbody>
+              {rows.map((r) => (
+                <tr key={r.entity_id} data-row={r.name}>
+                  <td className="min-w-[200px] font-medium text-ink">{r.name}</td>
+                  <td>{r.title ?? <Dash />}</td>
+                  <td data-column="account">
+                    {r.account_id && r.account_name ? (
+                      <Link href={`/workspace/${ws}/accounts/${r.account_id}`} className="block max-w-[22ch] truncate text-ink no-underline hover:underline">
+                        {r.account_name}
+                      </Link>
+                    ) : (
+                      <Dash />
+                    )}
+                    {r.country ? <span className="block text-[12px] text-ink-muted">{r.country}</span> : null}
+                  </td>
+                  <td data-column="work_email"><EmailValue row={r} /></td>
+                  <td data-column="linkedin">
+                    {r.linkedin ? (
+                      <a href={r.linkedin} target="_blank" rel="noreferrer" className="block max-w-[22ch] truncate text-ink no-underline hover:underline">
+                        {r.linkedin.replace(/^https?:\/\/(www\.)?/, '')}
+                      </a>
+                    ) : <Dash />}
+                  </td>
+                  <td data-column="location_flag"><LocationFlag row={r} /></td>
+                  <td className="whitespace-nowrap">{formatDate(r.last_signal) ?? <Dash />}</td>
+                  {columns.map((c) => (
+                    <td key={c.id} data-column={c.key}><Cell cell={r.cells[c.id]} column={c} /></td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          )}
         </table>
       </div>
     </div>

@@ -9,6 +9,7 @@ import { BudgetMeter } from './budget-meter';
 import { NavCount, NavLinks } from './nav-links';
 import { MembershipGate } from './membership-gate';
 import { SearchBox } from './search-box';
+import { ThemeToggle } from './theme-toggle';
 import { UserMenu } from './user-menu';
 import { WorkspaceSwitcher } from './workspace-switcher';
 
@@ -111,19 +112,18 @@ export function AppShell({ children }: { children: ReactNode }) {
         aria-label="Sidebar"
         className="min-w-0 border-b border-line bg-surface md:sticky md:top-0 md:flex md:h-screen md:flex-col md:border-r md:border-b-0"
       >
-        {/* Phone: brand and lens share one row. Desktop: the lens sits under the brand. */}
-        <div className="flex shrink-0 items-center justify-between gap-3 py-3 pr-3 pl-5 md:block md:p-0">
-          <div className="flex shrink-0 items-center md:h-16 md:px-5">
-            <Link href="/" className="inline-flex items-center gap-2.5 text-[17px] font-medium tracking-tight text-ink no-underline hover:no-underline">
-              <span aria-hidden="true" className="si-brand-dot" />
-              Signal Intel
-            </Link>
-          </div>
-          <div className="w-[52%] min-w-0 md:w-auto md:px-3 md:pb-3">
-            <Suspense fallback={null}>
-              <SidebarLens />
-            </Suspense>
-          </div>
+        {/* Brand row */}
+        <div className="flex shrink-0 items-center py-3 pr-3 pl-5 md:h-16 md:px-5 md:py-0">
+          <Link href="/" className="inline-flex items-center gap-2.5 text-[17px] font-medium tracking-tight text-ink no-underline hover:no-underline">
+            <span aria-hidden="true" className="si-brand-dot" />
+            Signal Intel
+          </Link>
+        </div>
+        {/* Brief lens: below the brand, above the nav, full-width on phone, indented on desktop. */}
+        <div className="shrink-0 px-3 pb-2">
+          <Suspense fallback={null}>
+            <SidebarLens />
+          </Suspense>
         </div>
         {/* The nav reads the pathname, which is request data; the review count streams in after it. */}
         <Suspense fallback={null}>
@@ -148,6 +148,7 @@ export function AppShell({ children }: { children: ReactNode }) {
               <Search />
             </Suspense>
           </div>
+          <ThemeToggle />
           <Suspense fallback={<span className="text-ink-faint">…</span>}>
             <UserMenu />
           </Suspense>
