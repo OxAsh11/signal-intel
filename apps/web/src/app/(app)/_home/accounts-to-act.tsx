@@ -55,7 +55,7 @@ export async function AccountsToActCard(props: HomeCardProps) {
                   <td>{r.band ? <BandChip band={r.band} /> : <span className="text-ink-muted">Not scored</span>}</td>
                   <td className="max-w-[40ch]">
                     {r.why_now ? (
-                      <q className="font-serif text-[14px] leading-[21px] text-ink">{r.why_now.quote}</q>
+                      <q className="font-sans text-[14px] leading-[21px] text-ink">{r.why_now.quote}</q>
                     ) : (
                       <span className="text-ink-muted">No quoted claim yet</span>
                     )}
