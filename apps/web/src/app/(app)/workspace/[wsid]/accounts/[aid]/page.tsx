@@ -124,22 +124,18 @@ export default async function AccountDetailPage({
         </div>
       </div>
 
-      <nav className="flex gap-4 border-b border-line" aria-label="Account sections">
+      <nav className="si-tabs" aria-label="Account sections">
         <Link
           href={`/workspace/${wsid}/accounts/${aid}`}
           aria-current={tab === 'overview' ? 'page' : undefined}
-          className={tab === 'overview'
-            ? 'si-nav-on border-b-2 border-signal pb-2 text-[14px] text-ink no-underline'
-            : 'pb-2 text-[14px] text-ink-muted no-underline hover:text-ink'}
+          className="si-tab"
         >
           Overview
         </Link>
         <Link
           href={`/workspace/${wsid}/accounts/${aid}?tab=people`}
           aria-current={tab === 'people' ? 'page' : undefined}
-          className={tab === 'people'
-            ? 'si-nav-on border-b-2 border-signal pb-2 text-[14px] text-ink no-underline'
-            : 'pb-2 text-[14px] text-ink-muted no-underline hover:text-ink'}
+          className="si-tab"
         >
           People
         </Link>
@@ -152,9 +148,9 @@ export default async function AccountDetailPage({
           <div className="flex min-w-0 flex-col gap-6">
           <Card family="mint" kind="feature" aria-labelledby="why-h" className="min-h-[260px]">
             <FamilyTag family="mint">Judgement · why now</FamilyTag>
-            <h2 id="why-h" className="si-h2 text-[22px]">Why this account, now</h2>
+            <h2 id="why-h" className="si-h3">Why this account, now</h2>
             {card?.bullets?.length ? (
-              <ul className="m-0 flex max-w-[80ch] flex-col gap-1.5 pl-5 text-[16px] leading-[1.6]">
+              <ul className="m-0 flex max-w-[80ch] flex-col gap-1.5 pl-5 text-[14px] leading-[1.6]">
                 {card.bullets.map((b, i) => <li key={i}>{b}</li>)}
               </ul>
             ) : (
@@ -223,7 +219,7 @@ export default async function AccountDetailPage({
         <aside className="flex flex-col gap-4" aria-label="Next step, score and people">
           <Card family="grass" kind="feature" aria-labelledby="next-h" className="min-h-[220px] p-7">
             <FamilyTag family="grass">Engagement · next step</FamilyTag>
-            <h2 id="next-h" className="si-h2 text-[20px]">{card?.next_step ?? 'No next step yet'}</h2>
+            <p id="next-h" className="m-0 text-[14px] font-medium text-ink leading-[1.6]">{card?.next_step ?? 'No next step yet'}</p>
             <p className="m-0 text-[14px]">
               {card?.next_step ? 'Suggested from the evidence and the account’s stage.' : 'A next step is suggested once the account is scored.'}
             </p>

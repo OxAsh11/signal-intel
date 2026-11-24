@@ -39,7 +39,7 @@ export function WaterfallOrder({ ws, order, canEdit, labels }: Props) {
 
   return (
     <div className="flex flex-col gap-2" data-waterfall-order="">
-      <h3 className="m-0 text-[15px] font-semibold">Waterfall order</h3>
+      <h3 className="si-h2">Waterfall order</h3>
       <p className="m-0 text-[13px] text-ink-muted">
         {canEdit ? 'Admins can move a provider up or down. Everyone else sees the order read-only.' : 'The order is read-only for your role.'}
       </p>

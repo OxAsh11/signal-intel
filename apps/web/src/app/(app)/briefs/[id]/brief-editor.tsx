@@ -61,7 +61,7 @@ export function BriefEditor({ brief, canEdit, workspacePredicates }: { brief: Br
   return (
     <div className="flex min-w-0 flex-col gap-4">
       <ChipField briefId={brief.id} fieldName="hypothesis" label="The signal we look for" required disabled={disabled} currentConfig={c0}
-        renderValue={(c) => <p className="m-0 max-w-[70ch] text-[17px] leading-[1.55]">{String(c.hypothesis ?? '')}</p>}
+        renderValue={(c) => <p className="m-0 max-w-[70ch] text-[14px] leading-[1.6] text-ink">{String(c.hypothesis ?? '')}</p>}
         renderEditor={(c, onChange) => (
           <label className="flex flex-col gap-1">
             <span className="text-[13px] text-ink-muted">The public event that marks a company as ready to buy.</span>
@@ -185,7 +185,7 @@ export function BriefEditor({ brief, canEdit, workspacePredicates }: { brief: Br
       {cfg.assumptions?.length ? (
         <section className="si-card" aria-label="What I assumed">
           <h2 className="si-label m-0">What I assumed</h2>
-          <ul className="m-0 flex flex-col gap-1.5 pl-5 text-[15px] leading-[1.6] text-ink">
+          <ul className="m-0 flex flex-col gap-1.5 pl-5 text-[13px] leading-[1.6] text-ink">
             {cfg.assumptions.map((a) => <li key={a}>{a}</li>)}
           </ul>
         </section>
