@@ -131,7 +131,16 @@ export default async function AccountDetailPage({
         .in('id', allClaimIds)
         .order('observed_at', { ascending: false })
     : { data: [] };
-  const claims = (claimRows ?? []) as ClaimRow[];
+  // Deduplicate by (quote, source URL) — the same document can be ingested more than once,
+  // producing separate claim rows with identical content.
+  const seen = new Set<string>();
+  const claims = ((claimRows ?? []) as ClaimRow[]).filter((c) => {
+    const src = one(c.source);
+    const key = `${c.quote ?? ''}::${src?.url ?? src?.source_type ?? ''}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
   const claimMap = new Map(
     claims.map((c) => {
       const src = one(c.source);
