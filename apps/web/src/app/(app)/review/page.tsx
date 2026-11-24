@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import type { ReactNode } from 'react';
-import { Button, EvidenceQuote, FamilyTag } from '@signal/ui';
+import { Button, EvidenceQuote } from '@signal/ui';
 import { dismissUnlinkedPersonForm, linkPersonFromReviewForm } from '@/app/actions/people';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
@@ -20,7 +20,7 @@ export const metadata: Metadata = { title: 'Review' };
 const VERDICTS = ['Confirmed', 'Likely', 'Unverified', 'Contradicted'];
 const REPLY_CLASSES = ['Interested', 'Referral', 'Not now', 'Not interested', 'Out of office', 'Unsubscribe'];
 const field =
-  'h-8 rounded-sm border border-line-strong bg-surface px-2.5 text-[14px] text-ink placeholder:text-ink-faint';
+  'h-8 rounded-sm border border-line-strong bg-surface px-2.5 text-[13px] text-ink placeholder:text-ink-faint';
 
 type One<T> = T | T[] | null;
 const one = <T,>(v: One<T>): T | null => (Array.isArray(v) ? (v[0] ?? null) : v);
@@ -103,12 +103,12 @@ function Section({ title, hint, count, children }: { title: string; hint: string
     <section className="flex flex-col gap-4">
       <div className="flex flex-col gap-2">
         <div className="flex flex-wrap items-center gap-3">
-          <FamilyTag family="mustard">Needs you</FamilyTag>
+          <span className="rounded-[4px] bg-marker-soft border border-line px-2 py-0.5 text-[11px] font-medium text-caution">Needs you</span>
           <h2 className="si-h2">
             {title} <span className="font-mono text-ink-muted">{count}</span>
           </h2>
         </div>
-        <p className="m-0 max-w-[70ch] text-[14px] text-ink-muted">{hint}</p>
+        <p className="m-0 max-w-[70ch] text-[13px] text-ink-muted">{hint}</p>
       </div>
       {children}
     </section>
@@ -297,7 +297,7 @@ export default async function ReviewPage() {
     return (
       <Card key={r.id}>
         <div className="flex flex-wrap items-center gap-2">
-          <span className="text-[15px] font-semibold">{one(v.entity)?.display_name ?? 'Unknown entity'}</span>
+          <span className="text-[13px] font-semibold">{one(v.entity)?.display_name ?? 'Unknown entity'}</span>
           <VerdictChip value={v.value} />
           <span className="text-[13px] text-ink-muted">
             {one(one(v.brief_version)?.brief ?? null)?.name ?? 'Brief'} · waiting since {day(r.created_at)}
@@ -347,14 +347,14 @@ export default async function ReviewPage() {
               <div className="grid gap-3 sm:grid-cols-2">
                 <div className="flex flex-col gap-1">
                   <span className="si-label">Mention</span>
-                  <span className="text-[14px] font-medium">{mention?.raw_name ?? '—'}</span>
+                  <span className="text-[13px] font-medium">{mention?.raw_name ?? '—'}</span>
                   <span className="text-[13px] text-ink-muted">
                     {[mention?.raw_domain, mention?.raw_country, mention?.entity_type].filter(Boolean).join(' · ') || '—'}
                   </span>
                 </div>
                 <div className="flex flex-col gap-1">
                   <span className="si-label">Candidate</span>
-                  <span className="text-[14px] font-medium">{candidate?.display_name ?? 'None'}</span>
+                  <span className="text-[13px] font-medium">{candidate?.display_name ?? 'None'}</span>
                   <span className="text-[13px] text-ink-muted">
                     {item.match_method ?? '—'} · {item.match_confidence != null ? `${item.match_confidence}% match` : '—'}
                   </span>
@@ -410,7 +410,7 @@ export default async function ReviewPage() {
           return (
             <Card key={item.id}>
               <div className="flex flex-col gap-1">
-                <span className="text-[14px] font-medium">
+                <span className="text-[13px] font-medium">
                   Marked wrong: {column?.label ?? column?.key ?? 'Column'} = {c ? shown(c.value) : '—'} on{' '}
                   {one(c?.entity ?? null)?.display_name ?? 'Unknown account'}
                 </span>
@@ -458,7 +458,7 @@ export default async function ReviewPage() {
           return (
             <Card key={r.id}>
               <div className="flex flex-col gap-1">
-                <span className="text-[14px] font-medium">
+                <span className="text-[13px] font-medium">
                   {one(r.person)?.display_name ?? 'Unknown person'}
                   {one(one(r.account)?.entity ?? null)?.display_name ? ` · ${one(one(r.account)?.entity ?? null)?.display_name}` : ''}
                 </span>
@@ -493,7 +493,7 @@ export default async function ReviewPage() {
         {meetings.map((m) => (
           <Card key={m.id}>
             <div className="flex flex-col gap-1">
-              <span className="text-[14px] font-medium">Meeting on {day(m.scheduled_at)}</span>
+              <span className="text-[13px] font-medium">Meeting on {day(m.scheduled_at)}</span>
               <span className="text-[13px] text-ink-muted">
                 {[one(m.person)?.display_name, m.external_id].filter(Boolean).join(' · ') || 'No attendee details'}
               </span>
@@ -540,7 +540,7 @@ export default async function ReviewPage() {
           <Card key={item.id}>
             <div data-review-item="unlinked_person" className="flex flex-col gap-3">
               <div className="flex flex-col gap-1">
-                <span className="text-[14px] font-medium">{one(item.person)?.display_name ?? 'Unknown person'}</span>
+                <span className="text-[13px] font-medium">{one(item.person)?.display_name ?? 'Unknown person'}</span>
                 <span className="text-[13px] text-ink-muted">Waiting since {day(item.created_at)}</span>
               </div>
               {canDecide ? (
