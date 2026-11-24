@@ -285,12 +285,11 @@ test.describe('Brief lens', () => {
     await expect(lens(page)).toHaveValue(newer);
     await expect(lens(page).locator('option:checked')).toHaveText('Newer Brief · Pilot');
     await expect(lens(page).locator('option')).toHaveText(['All Briefs', 'Draft Brief', 'Newer Brief · Pilot', 'Older Brief']);
-    // Top of the sidebar, under the brand and above the nav; reachable by keyboard.
-    const brand = await aside(page).getByRole('link', { name: 'Signal Intel' }).boundingBox();
+    // In the top-bar header (not the sidebar); reachable by keyboard.
+    const header = await page.locator('header').first().boundingBox();
     const select = await lens(page).boundingBox();
-    const home = await sidebar(page).getByRole('link', { name: 'Home', exact: true }).boundingBox();
-    expect(select!.y).toBeGreaterThan(brand!.y);
-    expect(select!.y).toBeLessThan(home!.y);
+    expect(select!.y).toBeGreaterThanOrEqual(header!.y);
+    expect(select!.y).toBeLessThan(header!.y + header!.height);
     await lens(page).focus();
     await expect(lens(page)).toBeFocused();
     await page.screenshot({ path: 'test-results/shell-desktop-lens.png', fullPage: true });
