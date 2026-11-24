@@ -76,7 +76,7 @@ export function ChipField({ briefId, fieldName, fields, label, required, disable
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div className="flex items-center gap-3">
           <h2 className="si-label m-0">{label}</h2>
-          {required && isEmpty ? <span className="si-ftag si-fam-mustard">Needed to start the pilot</span> : null}
+          {required && isEmpty ? <span className="rounded-[4px] bg-marker-soft border border-line px-2 py-0.5 text-[11px] font-medium text-caution">Needed to start the pilot</span> : null}
         </div>
         {!open && !disabled ? (
           <Button size="sm" onClick={openEditor}>
@@ -85,7 +85,7 @@ export function ChipField({ briefId, fieldName, fields, label, required, disable
         ) : null}
       </div>
       {!open ? (
-        <div className="text-[15px] leading-[1.6] text-ink">{isEmpty ? <span className="text-ink-muted">Not drafted yet.</span> : renderValue(currentConfig)}</div>
+        <div className="text-[13px] leading-[1.6] text-ink">{isEmpty ? <span className="text-ink-muted">Not drafted yet.</span> : renderValue(currentConfig)}</div>
       ) : (
         <form onSubmit={submit} className="flex flex-col gap-3">
           <fieldset disabled={isPending} className="contents">

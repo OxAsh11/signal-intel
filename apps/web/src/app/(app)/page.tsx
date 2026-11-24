@@ -1,7 +1,7 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { Suspense } from 'react';
-import { Card, FamilyTag } from '@signal/ui';
+import { Card } from '@signal/ui';
 import { getBriefLens, lensBriefs } from '@/lib/brief-lens';
 import { getOrgContext } from '@/lib/org';
 import { AccountsToActCard } from './_home/accounts-to-act';
@@ -75,8 +75,8 @@ export default async function HomePage({ searchParams }: PageProps<'/'>) {
         <Suspense fallback={<CardSkeleton title="Getting started" lines={1} />}>
           <Journey {...card} />
         </Suspense>
-        <Card family="mint" kind="feature" aria-labelledby="home-start" className="max-w-[720px]">
-          <FamilyTag family="mint">Start here</FamilyTag>
+        <Card aria-labelledby="home-start" className="max-w-[720px]">
+          <span className="rounded-[4px] bg-surface-sunken border border-line px-2 py-0.5 text-[11px] font-medium text-ink-muted self-start">Start here</span>
           <h2 id="home-start" className="si-h2">Describe who you sell to</h2>
           <p className="m-0">
             Say what you sell and who buys it. Signal Intel drafts the Brief from that: the companies to look for, the
@@ -93,7 +93,7 @@ export default async function HomePage({ searchParams }: PageProps<'/'>) {
 
   return (
     <>
-      <header className="flex flex-wrap items-end justify-between gap-4">
+      <header className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex min-w-0 flex-col gap-1">
           <h1 className="si-h1">Home</h1>
           <Suspense fallback={<span className="block h-7 w-64 max-w-full animate-pulse rounded-[2px] bg-surface-sunken" />}>

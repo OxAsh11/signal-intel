@@ -9,9 +9,9 @@ type Sources = { radars: Radar[]; href: string };
 /** Health per radar in the lens, failures first (the RPC orders them), with records in the last 7 days. Pool: discovery. */
 export async function SourcesCard(props: HomeCardProps) {
   const s = await loadCard<Sources>('home_sources', props);
-  if (!s) return <CardError id="home-sources" title="Sources" family="pool" retry={props.retry} />;
+  if (!s) return <CardError id="home-sources" title="Sources" retry={props.retry} />;
   return (
-    <Card family="pool" aria-labelledby="home-sources">
+    <Card aria-labelledby="home-sources">
       <div className="flex items-center justify-between gap-2">
         <h2 id="home-sources" className="si-h2">Sources</h2>
         <Link href={s.href} className="text-[13px]">Open →</Link>

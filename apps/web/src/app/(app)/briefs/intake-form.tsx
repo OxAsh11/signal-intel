@@ -3,7 +3,7 @@ import { useActionState, useState } from 'react';
 import { Button } from '@signal/ui';
 import { createBrief } from '@/app/actions/briefs';
 
-const field = 'w-full rounded-sm border border-line-strong bg-surface px-3 py-2 text-[15px] text-ink';
+const field = 'w-full rounded-sm border border-line-strong bg-surface px-3 py-2 text-[13px] text-ink';
 const EXAMPLES: [string, string][] = [
   ['Manufacturers expanding a plant', 'We sell industrial automation. Find manufacturers that announced a new plant or a production-line expansion in the next 12 months.'],
   ['Hospitals buying new equipment', 'We supply diagnostic imaging equipment. Find hospitals and diagnostic chains that are opening a new centre or tendering for imaging equipment.'],
@@ -53,8 +53,8 @@ export function IntakeForm({ workspaceId }: { workspaceId: string }) {
       </div>
       {state?.error ? <p className="m-0 text-[13px] text-danger">{state.error}</p> : null}
 
-      <div className="si-card si-gcard si-fam-mint">
-        <span className="si-ftag si-fam-mint">The AI will draft</span>
+      <div className="si-card">
+        <span className="si-ftag">The AI will draft</span>
         <div className="grid grid-cols-[repeat(auto-fit,minmax(220px,1fr))] gap-3 text-[13px] leading-[1.5]">
           <span><strong className="text-ink">The signal</strong>: the public event that marks a company as ready.</span>
           <span><strong className="text-ink">Who fits</strong>: countries, industries and size.</span>
@@ -69,7 +69,7 @@ export function IntakeForm({ workspaceId }: { workspaceId: string }) {
         <span className="si-label">Or start from an example</span>
         <div className="flex flex-wrap gap-2">
           {EXAMPLES.map(([label, text]) => (
-            <button key={label} type="button" onClick={() => setDescription(text)} className="si-ftag si-fam-pool cursor-pointer border-0 text-[13px]">
+            <button key={label} type="button" onClick={() => setDescription(text)} className="si-ftag cursor-pointer border-0 text-[13px]">
               {label}
             </button>
           ))}

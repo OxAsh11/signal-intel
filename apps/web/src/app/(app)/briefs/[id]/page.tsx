@@ -71,7 +71,7 @@ export default async function BriefDetailPage({ params, searchParams }: PageProp
   return (
     <>
       {brief.state !== 'Archived' ? <LensOnOpen briefId={id} already={lensIsThis} /> : null}
-      <div className="flex flex-wrap items-end justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex min-w-0 flex-col gap-2">
           <Link href="/briefs" className="text-[13px] text-ink-muted">‹ Briefs</Link>
           <span className="si-eyebrow">{brief.state === 'Draft' ? 'New Brief · step 2 of 2' : `Brief · ${brief.state}`}</span>
@@ -80,26 +80,24 @@ export default async function BriefDetailPage({ params, searchParams }: PageProp
         </div>
         {canEdit && brief.state !== 'Draft' ? <StateControls brief={brief} /> : null}
       </div>
-      <nav aria-label="Brief tabs" className="flex flex-wrap gap-2 border-b border-line pb-2 text-[14px]">
+      <nav aria-label="Brief tabs" className="si-tabs">
         {['overview', 'icp', 'columns', 'sources', 'versions'].map((t) => (
           <Link
             key={t}
             href={`/briefs/${id}?tab=${t}`}
-            className={tab === t ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}
+            className={`si-tab${tab === t ? ' si-tab-on' : ''}`}
           >
             {t.charAt(0).toUpperCase() + t.slice(1)}
           </Link>
         ))}
         {brief.state === 'Pilot' ? (
-          <>
-            <Link href={`/briefs/${id}?tab=pilot`} className={tab === 'pilot' ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}>
-              Pilot
-            </Link>
-            <Link href={`/briefs/${id}/pilot`} className="font-medium text-ink underline">Pilot results</Link>
-          </>
+          <Link href={`/briefs/${id}?tab=pilot`} className={`si-tab${tab === 'pilot' ? ' si-tab-on' : ''}`}>
+            Pilot
+          </Link>
         ) : null}
-        <Link href={`/briefs/${id}/radars`} className="text-ink underline">Radars</Link>
-        <Link href={`/briefs/${id}/versions`} className="text-ink underline">Version history</Link>
+        <Link href={`/briefs/${id}/pilot`} className="si-tab ml-auto">Pilot results ↗</Link>
+        <Link href={`/briefs/${id}/radars`} className="si-tab">Radars ↗</Link>
+        <Link href={`/briefs/${id}/versions`} className="si-tab">Versions ↗</Link>
       </nav>
 
       <div className="si-cols">

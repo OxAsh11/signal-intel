@@ -116,7 +116,7 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
   return (
     <>
       <div className="flex flex-col gap-1">
-        <Link href={`/briefs/${id}`} className="text-sm text-ink-muted hover:text-ink">
+        <Link href={`/briefs/${id}`} className="text-[13px] text-ink-muted hover:text-ink">
           ← {brief.name}
         </Link>
         <h1 className="si-h1">
@@ -132,7 +132,7 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
         <p className="m-0 text-ink-muted">This Brief is {brief.state}, not in a pilot.</p>
       ) : null}
 
-      <div className="flex flex-wrap gap-6 text-[14px]">
+      <div className="flex flex-wrap gap-4 text-[13px] text-ink-muted">
         <span>
           Sample {rows.length} of {settings.pilot_sample_size}
         </span>
@@ -191,7 +191,7 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
               className="si-card"
             >
               <div className="flex flex-wrap items-center gap-2">
-                <span className="text-[15px] font-semibold">{r.name}</span>
+                <span className="text-[13px] font-semibold">{r.name}</span>
                 {r.verdict ? (
                   <span className={`si-chip si-verdict-${r.verdict.toLowerCase()}`}>
                     {r.verdict}

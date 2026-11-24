@@ -1,6 +1,6 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import { Card, FamilyTag, HealthIndicator, MetricTile } from '@signal/ui';
+import { Card, HealthIndicator, MetricTile } from '@signal/ui';
 import type { HealthStatus } from '@signal/ui';
 import { createClient } from '@/lib/supabase/server';
 import { getOrgContext } from '@/lib/org';
@@ -71,9 +71,11 @@ export default async function SourcesPage() {
         </p>
       </div>
 
-      <Card family="pool" kind="feature" aria-labelledby="funnel-h">
-        <FamilyTag family="pool">Sources · funnel</FamilyTag>
-        <h2 id="funnel-h" className="si-h2 text-[20px]">What happened to every page</h2>
+      <Card aria-labelledby="funnel-h">
+        <div className="flex items-center gap-2">
+          <span className="rounded-[4px] bg-surface-sunken border border-line px-2 py-0.5 text-[11px] font-medium text-ink-muted">Sources · funnel</span>
+        </div>
+        <h2 id="funnel-h" className="si-h2">What happened to every page</h2>
         <div className="grid grid-cols-[minmax(140px,240px)_minmax(0,1fr)_auto] items-center gap-x-4 gap-y-3">
           {steps.map(([label, n, note]) => (
             <div key={label} className="contents">
@@ -91,21 +93,20 @@ export default async function SourcesPage() {
       </Card>
 
       <div className="si-tiles">
-        <MetricTile family="pool" label="Waiting to be read" value={nf.format(pending)} href="/sources" version="def v1" />
-        <MetricTile family="pool" label="Not relevant" value={nf.format(irrelevant)} href="/sources" delta="kept, never deleted" version="def v1" />
-        <MetricTile family="lava" label="Failed" value={nf.format(failed)} href="/sources" delta="retried automatically" version="def v1" />
+        <MetricTile label="Waiting to be read" value={nf.format(pending)} href="/sources" version="def v1" />
+        <MetricTile label="Not relevant" value={nf.format(irrelevant)} href="/sources" delta="kept, never deleted" version="def v1" />
+        <MetricTile label="Failed" value={nf.format(failed)} href="/sources" delta="retried automatically" version="def v1" />
       </div>
 
-      <Card family="pool" className="si-flush" aria-labelledby="radars-h">
-        <div className="flex flex-wrap items-center justify-between gap-3 p-6 pb-4">
+      <Card className="si-flush" aria-labelledby="radars-h">
+        <div className="flex flex-wrap items-center justify-between gap-3 p-4 pb-3">
           <div className="flex items-center gap-3">
-            <FamilyTag family="pool">Radars</FamilyTag>
             <h2 id="radars-h" className="si-h2">{radars.length} radar{radars.length === 1 ? '' : 's'}</h2>
           </div>
-          <span className="text-[13px] text-ink-muted">Yield: share of AI-judged pages that led to a Confirmed or Likely company</span>
+          <span className="text-[12px] text-ink-muted">Yield: share of AI-judged pages that led to a Confirmed or Likely company</span>
         </div>
         {radars.length === 0 ? (
-          <p className="m-0 px-6 pb-6 text-ink-muted">
+          <p className="m-0 px-4 pb-4 text-[13px] text-ink-muted">
             No radars yet. Publish a Brief in <Link href="/briefs">Brief Studio</Link>; its sources become radars.
           </p>
         ) : (

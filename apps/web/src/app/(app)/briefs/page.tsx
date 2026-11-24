@@ -11,7 +11,7 @@ export default async function BriefStudioPage() {
   const canEdit = atLeast(ctx?.workspaceRole, 'Editor');
   return (
     <>
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-wrap items-center justify-between gap-4">
         <div className="flex flex-col gap-1">
           <h1 className="si-h1">Brief Studio</h1>
           <p className="si-lede">
@@ -19,8 +19,7 @@ export default async function BriefStudioPage() {
           </p>
         </div>
         {canEdit && (
-          <Link href="/briefs/new"
-            className="si-btn si-btn-primary">
+          <Link href="/briefs/new" className="si-btn si-btn-primary no-underline hover:no-underline shrink-0">
             New Brief
           </Link>
         )}

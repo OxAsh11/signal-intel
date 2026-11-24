@@ -37,14 +37,14 @@ export default async function ReportsPage() {
     <div className="flex flex-col gap-4">
       <h1 className="si-h1">Reports</h1>
       <Card title="Funnel">
-        <ul className="m-0 pl-5 text-[14px]">
+        <ul className="m-0 pl-5 text-[13px]">
           <li>Found: {f.found ?? 0}</li>
           <li>Matched: {f.matched ?? 0}</li>
           <li>Confirmed: {f.confirmed ?? 0}</li>
         </ul>
       </Card>
       <Card title="Coverage">
-        <ul className="m-0 pl-5 text-[14px]">
+        <ul className="m-0 pl-5 text-[13px]">
           {(cov.columns ?? []).map((col) => (
             <li key={col.key}>
               {col.label}: {col.filled} / {col.total}
@@ -54,8 +54,8 @@ export default async function ReportsPage() {
         </ul>
       </Card>
       <Card title="Cost">
-        <p className="m-0 text-[14px]">Total: ${Number(c.total ?? 0).toFixed(2)}</p>
-        <ul className="m-0 pl-5 text-[14px]">
+        <p className="m-0 text-[13px]">Total: ${Number(c.total ?? 0).toFixed(2)}</p>
+        <ul className="m-0 pl-5 text-[13px]">
           {(c.by_provider ?? []).map((p) => (
             <li key={p.provider}>
               {p.provider}: ${Number(p.cost).toFixed(2)}
@@ -64,7 +64,7 @@ export default async function ReportsPage() {
         </ul>
       </Card>
       <Card title="Sources">
-        <ul className="m-0 pl-5 text-[14px]">
+        <ul className="m-0 pl-5 text-[13px]">
           {(s.radars ?? []).map((r) => (
             <li key={r.radar_id}>{r.name}</li>
           ))}
@@ -72,7 +72,7 @@ export default async function ReportsPage() {
         </ul>
       </Card>
       <Card title="Calibration">
-        <p className="m-0 text-[14px]">Marked wrong: {cal.marked_wrong ?? 0}</p>
+        <p className="m-0 text-[13px]">Marked wrong: {cal.marked_wrong ?? 0}</p>
       </Card>
     </div>
   );

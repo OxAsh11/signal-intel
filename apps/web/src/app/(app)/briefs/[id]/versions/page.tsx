@@ -22,7 +22,7 @@ export default async function VersionsPage({ params, searchParams }: PageProps<'
 
   return (
     <>
-      <h2 className="m-0 text-xl font-semibold">Version history</h2>
+      <h1 className="si-h1">Version history</h1>
       {versions.length < 2
         ? <p className="m-0 text-ink-muted">Publish at least two versions to compare them.</p>
         : <VersionDiff versions={versions} vA={vA} vB={vB} briefId={id} />}

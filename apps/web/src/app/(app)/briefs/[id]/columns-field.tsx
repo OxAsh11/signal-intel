@@ -85,7 +85,7 @@ function ColumnList({ columns }: { columns: Column[] }) {
           <li key={c.key} className="flex min-w-0 flex-col gap-1 border-b border-line pb-3 last:border-b-0 last:pb-0">
             <div className="flex flex-wrap items-center gap-2">
               <span className="font-medium text-ink">{c.label}</span>
-              <span className="si-ftag si-fam-pool">{TYPE_LABELS[c.value_type] ?? c.value_type}</span>
+              <span className="si-ftag">{TYPE_LABELS[c.value_type] ?? c.value_type}</span>
               <span className="text-[13px] text-ink-muted">{ROLE_LABELS[c.role] ?? c.role}</span>
               <span className="text-[13px] text-ink-muted">{FILL_LABELS[c.fill_method ?? 'extract'] ?? c.fill_method}</span>
             </div>
