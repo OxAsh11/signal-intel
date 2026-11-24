@@ -480,11 +480,12 @@ def build_app(
 
     def _brave(kind: str, ctx: CallContext) -> BraveSearchConnector:
         assert pool is not None
-        key = get_settings().brave_search_api_key
+        settings = get_settings()
         return BraveSearchConnector(
             kind,
-            api_key=key.get_secret_value() if key else None,
-            meter=PgSearchMeter(pool, ctx),
+            api_key=settings.search_api_key(),
+            meter=PgSearchMeter(pool, ctx, settings.search_provider),
+            provider=settings.search_provider,
         )
 
     async def _fetch_brave(
@@ -579,7 +580,7 @@ def build_app(
             brief_id=brief_id,
             workspace_id=workspace_id,
             approval_id=approval_id,
-            configured=get_settings().brave_search_api_key is not None,
+            configured=get_settings().search_api_key() is not None,
         )
 
     _m05_verdict.targeted_search_job = targeted_search_task

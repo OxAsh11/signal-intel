@@ -11,7 +11,7 @@ export const RADAR_TYPES = [
   { value: 'csv_upload', label: 'CSV upload' },
 ] as const;
 
-/** Types found through web search (Brave); they accept an optional list of sites. */
+/** Types found through web search (Serper or Brave); they accept an optional list of sites. */
 export const WEB_SEARCH_TYPES: ReadonlySet<string> = new Set([
   'registry',
   'tender',
@@ -42,7 +42,7 @@ export function yieldLabel(records: number, prefiltered: number, yielded: number
   return `${yielded} (${Math.round((yielded / judged) * 100)}%)`;
 }
 
-/** The worker marks a radar this way when the Brave Search key is missing. */
+/** The worker marks a radar this way when the web search key is missing. */
 export function isNotSetUp(error: string | null | undefined): boolean {
   return Boolean(error && /not set up yet/i.test(error));
 }

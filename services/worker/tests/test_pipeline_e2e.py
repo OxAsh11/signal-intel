@@ -1202,6 +1202,7 @@ async def _scenario(pool: AsyncConnectionPool, monkeypatch: pytest.MonkeyPatch) 
 
         # Publishing provisions a tenders radar from the Brief's sources (M2). Brave and the
         # page fetches are stubbed; everything else (metering, attribution, pre-filter) is real.
+        monkeypatch.setenv("SEARCH_PROVIDER", "brave")
         monkeypatch.setenv("BRAVE_SEARCH_API_KEY", "test-key")
         get_settings.cache_clear()
 
@@ -2285,6 +2286,8 @@ async def _provider_research_scenario(
     http = _PdlHttp()
     web = _ResearchWeb()
     monkeypatch.setattr(research_fill, "BraveResearchWeb", lambda: web)
+    monkeypatch.setenv("SEARCH_PROVIDER", "brave")
+    get_settings.cache_clear()
 
     gateway = FakeGateway()
     connector = InMemoryConnector()

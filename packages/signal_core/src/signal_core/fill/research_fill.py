@@ -25,6 +25,7 @@ from signal_core.connectors.brave import (
 from signal_core.connectors.brave import (
     TARGETED_KIND,
     BraveSearchConnector,
+    price_model,
 )
 from signal_core.contracts.enums import UsageUnit
 from signal_core.fill.base import (
@@ -73,11 +74,12 @@ class BraveResearchWeb:
     async def search(
         self, queries: list[str], max_pages: int, ctx: CallContext
     ) -> list[SourcePage]:
-        key = get_settings().brave_search_api_key
+        settings = get_settings()
         connector = BraveSearchConnector(
             TARGETED_KIND,
-            api_key=key.get_secret_value() if key else None,
+            api_key=settings.search_api_key(),
             meter=None,
+            provider=settings.search_provider,
         )
         payloads, _ = await connector.fetch({}, queries, {}, FetchGuard(), limit=max_pages)
         pages: list[SourcePage] = []
@@ -150,7 +152,11 @@ async def fill_research(
     if use_web:
         queries = _queries(question, run.get("name"), run.get("domain"))
         web = web or BraveResearchWeb()
-        price = await unit_price(pool, BRAVE_PRICE_MODEL, UsageUnit.FETCH)
+        provider = get_settings().search_provider
+        model = price_model(provider)
+        price = await unit_price(pool, model, UsageUnit.FETCH)
+        if not price:  # no row for the active provider: bound it by Brave's price, never free
+            price = await unit_price(pool, BRAVE_PRICE_MODEL, UsageUnit.FETCH)
         reservation = await budget.reserve(ctx, price * max_pages)
         try:
             pages = await web.search(queries, max_pages, ctx)
@@ -161,8 +167,8 @@ async def fill_research(
             reservation,
             ctx,
             "search",
-            "brave",
-            BRAVE_PRICE_MODEL,
+            provider,
+            model,
             [UsageLine(UsageUnit.FETCH, len(pages), price * len(pages))],
             0,
             "ok",
