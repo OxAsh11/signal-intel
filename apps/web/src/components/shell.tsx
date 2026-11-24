@@ -89,7 +89,7 @@ async function Search() {
  * client-side). Renders nothing when the Briefs cannot be read, rather than a selector that
  * claims there are none.
  */
-async function SidebarLens() {
+async function SidebarLens({ compact }: { compact?: boolean }) {
   const ctx = await getOrgContext();
   if (!ctx?.workspace) return null;
   const [lens, briefs] = await Promise.all([getBriefLens(), lensBriefs(ctx.workspace.id)]);
@@ -98,6 +98,7 @@ async function SidebarLens() {
     <BriefLens
       briefs={briefs.map(({ id, name, state }) => ({ id, name, state }))}
       value={lens.briefId ?? 'all'}
+      compact={compact}
     />
   );
 }
@@ -119,8 +120,8 @@ export function AppShell({ children }: { children: ReactNode }) {
             Signal Intel
           </Link>
         </div>
-        {/* Brief lens: below the brand, above the nav, full-width on phone, indented on desktop. */}
-        <div className="shrink-0 px-3 pb-2">
+        {/* Brief lens: only shown on phone (desktop has it in the top bar). */}
+        <div className="shrink-0 px-3 pb-2 md:hidden">
           <Suspense fallback={null}>
             <SidebarLens />
           </Suspense>
@@ -146,6 +147,12 @@ export function AppShell({ children }: { children: ReactNode }) {
           <div className="min-w-0 shrink-0 md:flex-1 md:max-w-[360px]">
             <Suspense fallback={null}>
               <Search />
+            </Suspense>
+          </div>
+          {/* Brief lens: only shown on desktop (phone has it in the sidebar). */}
+          <div className="hidden shrink-0 md:block" data-lens="desktop">
+            <Suspense fallback={null}>
+              <SidebarLens compact />
             </Suspense>
           </div>
           <ThemeToggle />

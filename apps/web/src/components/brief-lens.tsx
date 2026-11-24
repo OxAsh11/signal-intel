@@ -22,15 +22,15 @@ const optionLabel = (b: LensOption) => (b.state === 'Pilot' || b.state === 'Paus
  * A valid `?brief=` in the URL outranks the cookie, so it is what the selector shows; choosing
  * then lands on the same page without it.
  */
-export function BriefLens({ briefs, value }: { briefs: LensOption[]; value: string }) {
+export function BriefLens({ briefs, value, compact }: { briefs: LensOption[]; value: string; compact?: boolean }) {
   const params = useSearchParams();
   const fromUrl = params.get('brief');
   const urlValid = fromUrl === 'all' || briefs.some((b) => b.id === fromUrl);
   const current = urlValid && fromUrl ? fromUrl : value;
-  return <LensForm briefs={briefs} current={current} />;
+  return <LensForm briefs={briefs} current={current} compact={compact} />;
 }
 
-function LensForm({ briefs, current }: { briefs: LensOption[]; current: string }) {
+function LensForm({ briefs, current, compact }: { briefs: LensOption[]; current: string; compact?: boolean }) {
   const pathname = usePathname();
   const params = useSearchParams();
   const [choice, setChoice] = useState(current);
@@ -63,6 +63,10 @@ function LensForm({ briefs, current }: { briefs: LensOption[]; current: string }
     });
   }
 
+  const selectCls = compact
+    ? 'h-[30px] cursor-pointer rounded-md border border-signal/30 bg-signal-soft px-3 text-[13px] font-medium text-signal focus-visible:outline-none focus-visible:shadow-[var(--focus-ring)]'
+    : `${inputClass} w-full min-w-0 flex-1 truncate`;
+
   return (
     <form onSubmit={onSubmit} className="flex min-w-0 items-center gap-1.5">
       {next ? <input type="hidden" name="next" value={next} /> : null}
@@ -70,7 +74,7 @@ function LensForm({ briefs, current }: { briefs: LensOption[]; current: string }
         name="brief"
         aria-label="Brief lens"
         value={choice}
-        className={`${inputClass} w-full min-w-0 flex-1 truncate`}
+        className={selectCls}
         onPointerDown={() => {
           fromPointer.current = true;
         }}
@@ -96,11 +100,13 @@ function LensForm({ briefs, current }: { briefs: LensOption[]; current: string }
           </option>
         ))}
       </select>
-      <div className="flex-none">
-        <button type="submit" aria-label="Apply Brief lens" className="si-btn si-btn-sm">
-          Apply
-        </button>
-      </div>
+      {!compact && (
+        <div className="flex-none">
+          <button type="submit" aria-label="Apply Brief lens" className="si-btn si-btn-sm">
+            Apply
+          </button>
+        </div>
+      )}
     </form>
   );
 }
