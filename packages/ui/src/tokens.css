@@ -45,5 +45,6 @@
   --font-sans: "DM Sans", "Helvetica Neue", Arial, sans-serif;
   --font-serif: "Source Serif 4", "Iowan Old Style", Georgia, serif;
   --font-mono: "DM Mono", "SF Mono", ui-monospace, monospace;
+  --row-hover: rgba(0,0,0,0.04);
   color-scheme: light;
 }
