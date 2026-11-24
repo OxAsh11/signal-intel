@@ -55,4 +55,17 @@ body {
   --signal-soft: #1E3A5F;
   --signal-strong: #93C5FD;
   --row-hover: rgba(255,255,255,0.059);
+  --marker: #d4922e;
+  --marker-soft: #2a1a06;
+  --caution: #d9924a;
+  --caution-soft: #231206;
+  --positive: #3aaa6e;
+  --positive-soft: #071c0f;
+  --danger: #d46b6a;
+  --danger-soft: #1e0909;
+  --on-danger: #ffffff;
+  --verdict-confirmed: #2aaa96;
+  --verdict-confirmed-soft: #061a16;
+  --on-verdict-confirmed: #ffffff;
+  --band-medium: #93c5fd;
 }
