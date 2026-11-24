@@ -25,9 +25,9 @@ export default async function SettingsPage({ searchParams }: PageProps<'/setting
         <h1 className="si-h1">Settings</h1>
         <p className="si-lede">Members and access, API tokens, integrations and webhooks, AI usage and budgets.</p>
       </div>
-      <nav aria-label="Settings sections" className="flex flex-wrap gap-2 border-b border-line pb-2 text-[14px]">
+      <nav aria-label="Settings sections" className="si-tabs">
         {SECTIONS.map((s) => (
-          <a key={s} href={`/settings?section=${s}`} className={section === s ? 'font-semibold text-ink' : 'text-ink-muted hover:text-ink'}>
+          <a key={s} href={`/settings?section=${s}`} className={`si-tab${section === s ? ' si-tab-on' : ''}`}>
             {s}
           </a>
         ))}
