@@ -54,4 +54,5 @@ body {
   --signal: #3B82F6;
   --signal-soft: #1E3A5F;
   --signal-strong: #93C5FD;
+  --row-hover: rgba(255,255,255,0.059);
 }

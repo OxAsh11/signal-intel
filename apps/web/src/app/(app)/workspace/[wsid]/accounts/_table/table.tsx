@@ -18,6 +18,7 @@ export type OpenCellDetail = { accountId: string; entityId: string; predicateId:
 
 const SYSTEM = [
   { id: 'name', label: 'Account', sort: 'name' },
+  { id: 'country', label: 'Country', sort: null },
   { id: 'verdict', label: 'Verdict', sort: 'verdict' },
   { id: 'score', label: 'Score', sort: 'priority' },
   { id: 'stage', label: 'Stage', sort: null },
@@ -158,7 +159,7 @@ export function AccountsTable({
           <thead>
             <tr>
               {SYSTEM.map((s, i) => (
-                <th key={s.id} scope="col" className={i === 0 ? 'sticky left-0 z-[1] min-w-[220px] bg-[#fafafa]' : ''} aria-sort={ariaSort(sorts, s.sort)}>
+                <th key={s.id} scope="col" className={i === 0 ? 'sticky left-0 z-[1] min-w-[200px] bg-surface-sunken' : ''} aria-sort={ariaSort(sorts, s.sort)}>
                   <Head label={s.label} sortKey={s.sort} sorts={sorts} hrefs={sortHrefs} />
                 </th>
               ))}
@@ -209,7 +210,7 @@ export function AccountsTable({
               });
               return (
                 <tr key={r.account_id} data-row={r.name} aria-selected={isSel} className={isSel ? '[&>td]:bg-signal-soft' : ''}>
-                  <td {...cellProps(0)} className={`${sticky} ${isSel ? '!bg-signal-soft' : ''} min-w-[220px]`}>
+                  <td {...cellProps(0)} className={`${sticky} ${isSel ? '!bg-signal-soft' : ''} min-w-[200px]`}>
                     <div className="flex items-start gap-2">
                       <input
                         type="checkbox"
@@ -222,21 +223,21 @@ export function AccountsTable({
                         <Link href={`/workspace/${ws}/accounts/${r.account_id}`} className="block max-w-[28ch] truncate font-medium text-ink no-underline hover:underline">
                           {r.name}
                         </Link>
-                        {r.country ? <span className="block text-[12px] text-ink-muted">{r.country}</span> : null}
                         <AccountTags ws={ws} entityId={r.entity_id} tags={tagsByAccount[r.entity_id] ?? []} />
                       </div>
                     </div>
                   </td>
-                  <td {...cellProps(1)}>{verdict.success ? <VerdictBadge verdict={verdict.data} /> : <Dash />}</td>
-                  <td {...cellProps(2)}>
+                  <td {...cellProps(1)}>{r.country ? <span className="whitespace-nowrap">{r.country}</span> : <Dash />}</td>
+                  <td {...cellProps(2)}>{verdict.success ? <VerdictBadge verdict={verdict.data} /> : <Dash />}</td>
+                  <td {...cellProps(3)}>
                     <span className="inline-flex items-center gap-2">
                       {r.priority != null ? <span className="tabular-nums">{Math.round(r.priority)}</span> : null}
                       {band.success ? <BandChip band={band.data} /> : r.priority == null ? <Dash /> : null}
                     </span>
                   </td>
-                  <td {...cellProps(3)}>{stage.success ? <StageBadge stage={stage.data} /> : r.stage}</td>
-                  <td {...cellProps(4)}>{r.owner ? <span className="block max-w-[18ch] truncate" title={r.owner.name}>{r.owner.name}</span> : <Dash />}</td>
-                  <td {...cellProps(5)} className="whitespace-nowrap">{formatDate(r.last_signal) ?? <Dash />}</td>
+                  <td {...cellProps(4)}>{stage.success ? <StageBadge stage={stage.data} /> : r.stage}</td>
+                  <td {...cellProps(5)}>{r.owner ? <span className="block max-w-[18ch] truncate" title={r.owner.name}>{r.owner.name}</span> : <Dash />}</td>
+                  <td {...cellProps(6)} className="whitespace-nowrap">{formatDate(r.last_signal) ?? <Dash />}</td>
                   {columns.map((c, ci) => (
                     <td
                       key={c.id}

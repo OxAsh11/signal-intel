@@ -27,8 +27,8 @@ export function LayoutSwitch({ ws, q, exportHref }: { ws: string; q: TableQuery;
   return (
     <div className="flex flex-wrap items-center gap-2" data-layout-switch="">
       <nav aria-label="Layout" className="flex items-center gap-1">
-        {item('Table', { layout: null, group: null }, layout === 'table')}
-        {item('Board', { layout: 'board' }, layout === 'board')}
+        {item('Board', { layout: null, group: null }, layout === 'board')}
+        {item('Table', { layout: 'table', group: null }, layout === 'table')}
         {item('By country', { layout: 'country', group: null }, layout === 'country')}
       </nav>
       {layout === 'board' ? (
