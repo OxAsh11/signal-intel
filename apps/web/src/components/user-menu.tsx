@@ -1,5 +1,6 @@
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/supabase/server';
+import { UserDropdown } from './user-dropdown';
 
 /** Reads the session, so it always renders inside a <Suspense> boundary. */
 export async function UserMenu() {
@@ -11,5 +12,5 @@ export async function UserMenu() {
       </Link>
     );
   }
-  return <span className="min-w-0 truncate text-ink-muted" data-user-menu="">{user.name ?? user.email}</span>;
+  return <UserDropdown email={user.email} name={user.name} />;
 }
