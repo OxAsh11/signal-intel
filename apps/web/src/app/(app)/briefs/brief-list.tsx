@@ -33,25 +33,36 @@ export async function BriefList() {
   const byState: Record<string, BriefRow[]> = Object.fromEntries(groups.map(s => [s, data.filter(b => b.state === s)]));
   byState['Other'] = data.filter(b => !knownStates.has(b.state));
 
+  const STATE_DOT: Record<string, string> = {
+    Active: 'bg-positive',
+    Pilot: 'bg-signal',
+    Draft: 'bg-ink-faint',
+    Paused: 'bg-ink-faint',
+    Archived: 'bg-ink-faint',
+  };
+
   return (
-    <div className="flex flex-col gap-6">
+    <div className="flex flex-col gap-5">
       {([...groups, 'Other'] as const).filter(s => (byState[s]?.length ?? 0) > 0).map(state => (
         <section key={state}>
-          <h2 className="mb-2 text-sm font-medium text-ink-muted uppercase tracking-wide">{state}</h2>
-          <ul className="flex flex-col gap-2">
-            {byState[state].map(b => (
-              <li key={b.id}>
-                <Link href={`/briefs/${b.id}`}
-                  className="flex items-center justify-between rounded-md border border-line bg-surface px-4 py-3 hover:bg-surface-sunken transition-colors">
-                  <span className="font-medium">{b.name}</span>
-                  <span className="text-xs text-ink-muted tabular-nums">
-                    {b.intake_status === 'pending' ? 'drafting…' :
-                     b.intake_status === 'failed' ? 'intake failed' :
-                     b.version_count ? `v${b.current_version}` : 'draft'}
-                  </span>
-                </Link>
-              </li>
-            ))}
+          <h2 className="si-label mb-1.5">{state}</h2>
+          <ul className="flex flex-col rounded-md border border-line overflow-hidden">
+            {byState[state].map((b, i) => {
+              const statusText =
+                b.intake_status === 'pending' ? 'Drafting…' :
+                b.intake_status === 'failed' ? 'Intake failed' :
+                b.version_count ? `v${b.current_version}` : 'Draft';
+              return (
+                <li key={b.id} className={i ? 'border-t border-line' : undefined}>
+                  <Link href={`/briefs/${b.id}`}
+                    className="flex items-center gap-3 px-3 py-2.5 text-[13px] text-ink no-underline hover:bg-surface-sunken hover:no-underline transition-colors">
+                    <span aria-hidden="true" className={`h-1.5 w-1.5 shrink-0 rounded-full ${STATE_DOT[state] ?? 'bg-ink-faint'}`} />
+                    <span className="flex-1 font-medium truncate">{b.name}</span>
+                    <span className="text-[12px] text-ink-muted tabular-nums">{statusText}</span>
+                  </Link>
+                </li>
+              );
+            })}
           </ul>
         </section>
       ))}
