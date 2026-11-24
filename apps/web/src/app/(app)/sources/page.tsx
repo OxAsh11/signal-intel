@@ -123,7 +123,7 @@ export default async function SourcesPage() {
                   return (
                     <tr key={r.id}>
                       <td>
-                        <span className="font-medium text-ink">{r.name}</span>
+                        <Link href={`/sources/${r.id}`} className="font-medium text-ink no-underline hover:underline">{r.name}</Link>
                         <div className="si-meta">{radarTypeLabel(r.connector_type)}</div>
                       </td>
                       <td>{brief ? <Link href={`/briefs/${brief.id}/radars`} className="text-ink underline">{brief.name}</Link> : '—'}</td>
