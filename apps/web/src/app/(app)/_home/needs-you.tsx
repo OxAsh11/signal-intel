@@ -1,5 +1,5 @@
 import Link from 'next/link';
-import { Card, FamilyTag } from '@signal/ui';
+import { Card } from '@signal/ui';
 import { CardError } from './card-error';
 import { createClient } from '@/lib/supabase/server';
 import { type HomeCardProps, fmt, loadCard, plural, usd } from './shared';
@@ -20,7 +20,7 @@ export async function NeedsYouCard(props: HomeCardProps) {
     ? await supabase.rpc('budget_alerts', { p_ws: props.ws })
     : { data: [] };
   const alertList = (alerts as { threshold: number }[] | null) ?? [];
-  if (!n) return <CardError id="home-needs" title="Needs you" family="mustard" retry={props.retry} />;
+  if (!n) return <CardError id="home-needs" title="Needs you" retry={props.retry} />;
   // The count is accounts; the re-run is the cells of those accounts a run can reach (see the RPC).
   const s = n.stale;
   const staleNote =
@@ -39,14 +39,14 @@ export async function NeedsYouCard(props: HomeCardProps) {
   ];
   const total = rows.reduce((a, r) => a + Number(r.c.count), 0);
   return (
-    <Card family="mustard" aria-labelledby="home-needs">
+    <Card aria-labelledby="home-needs">
       <div className="flex items-center justify-between gap-2">
         <h2 id="home-needs" className="si-h2">Needs you</h2>
         {total === 0 ? (
-          <FamilyTag family="mustard">Nothing waiting</FamilyTag>
+          <span className="rounded-[4px] bg-surface-sunken border border-line px-2 py-0.5 text-[11px] font-medium text-ink-muted">All clear</span>
         ) : (
           <Link href="/review" className="no-underline hover:no-underline">
-            <FamilyTag family="mustard">{fmt(total)} waiting</FamilyTag>
+            <span className="rounded-[4px] bg-marker-soft border border-line px-2 py-0.5 text-[11px] font-medium text-caution">{fmt(total)} waiting</span>
           </Link>
         )}
       </div>

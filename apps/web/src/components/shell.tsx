@@ -108,14 +108,14 @@ export function AppShell({ children }: { children: ReactNode }) {
     // Phone: two rows, the sidebar sized to its content and the page taking the rest. Without the
     // explicit rows the grid stretches both auto rows to fill min-h-full, opening a gap under the
     // sidebar on short pages.
-    <div className="grid min-h-full grid-cols-1 grid-rows-[auto_1fr] bg-paper md:grid-cols-[236px_minmax(0,1fr)] md:grid-rows-1">
+    <div className="grid min-h-full grid-cols-1 grid-rows-[auto_1fr] bg-paper md:grid-cols-[220px_minmax(0,1fr)] md:grid-rows-1">
       <aside
         aria-label="Sidebar"
         className="min-w-0 border-b border-line bg-surface md:sticky md:top-0 md:flex md:h-screen md:flex-col md:border-r md:border-b-0"
       >
         {/* Brand row */}
-        <div className="flex shrink-0 items-center py-3 pr-3 pl-5 md:h-16 md:px-5 md:py-0">
-          <Link href="/" className="inline-flex items-center gap-2.5 text-[17px] font-medium tracking-tight text-ink no-underline hover:no-underline">
+        <div className="flex shrink-0 items-center py-2.5 pr-3 pl-4 md:h-11 md:px-4 md:py-0">
+          <Link href="/" className="inline-flex items-center gap-2 text-[13px] font-semibold tracking-tight text-ink no-underline hover:no-underline">
             <span aria-hidden="true" className="si-brand-dot" />
             Signal Intel
           </Link>
@@ -139,7 +139,7 @@ export function AppShell({ children }: { children: ReactNode }) {
         </Suspense>
       </aside>
       <div className="flex min-w-0 flex-col">
-        <header className="sticky top-0 z-10 flex h-16 items-center justify-between gap-3 border-b border-line bg-surface px-4 md:px-10">
+        <header className="sticky top-0 z-10 flex h-11 items-center justify-between gap-3 border-b border-line bg-surface px-4 md:px-6">
           <Suspense fallback={<span className="si-label">Workspace</span>}>
             <WorkspaceSwitcher />
           </Suspense>

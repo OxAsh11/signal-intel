@@ -112,9 +112,9 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
           href={item.href}
           aria-current={exact ? 'page' : on ? 'true' : undefined}
           className={cx(
-            'si-nav-item flex items-center gap-2 border-l-[3px] py-1.5 pr-2.5 pl-[9px] text-[13px] leading-5 whitespace-nowrap no-underline hover:no-underline rounded-r-[4px]',
+            'si-nav-item flex items-center gap-2 border-l-[2px] py-1 pr-2.5 pl-[10px] text-[13px] leading-5 whitespace-nowrap no-underline hover:no-underline rounded-r-[4px]',
             on
-              ? 'si-nav-on border-signal bg-signal-soft font-medium text-signal-strong hover:bg-signal-soft'
+              ? 'si-nav-on border-signal bg-surface-sunken font-medium text-ink hover:bg-surface-sunken'
               : 'border-transparent text-ink-muted hover:bg-surface-sunken hover:text-ink',
           )}
         >
@@ -135,9 +135,9 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
             href={c.href}
             aria-current={c.href === path ? 'page' : undefined}
             className={cx(
-              'hidden rounded-r-[4px] border-l-[3px] py-1 pr-2.5 pl-[30px] text-[12px] leading-[18px] text-ink-muted no-underline hover:bg-surface-sunken hover:text-ink hover:no-underline md:block',
+              'hidden rounded-r-[4px] border-l-[2px] py-1 pr-2.5 pl-[28px] text-[12px] leading-[18px] text-ink-muted no-underline hover:bg-surface-sunken hover:text-ink hover:no-underline md:block',
               c.href === path
-                ? 'border-signal bg-signal-soft font-medium text-signal-strong hover:bg-signal-soft si-nav-on'
+                ? 'border-signal bg-surface-sunken font-medium text-ink hover:bg-surface-sunken si-nav-on'
                 : 'border-transparent',
             )}
           >
@@ -156,7 +156,7 @@ export function NavLinks({ nav, counts, footer }: { nav: NavLink[]; counts: Coun
       {home.map(top)}
       {ORDER.map((g) => (
         <div key={g} role="group" aria-labelledby={`nav-group-${g}`} className="contents md:flex md:flex-col md:gap-0">
-          <span id={`nav-group-${g}`} className="si-label hidden pl-3 pt-4 pb-1 md:block">
+          <span id={`nav-group-${g}`} className="si-label hidden pl-4 pt-4 pb-0.5 md:block">
             {GROUP_LABELS[g]}
           </span>
           {nav.filter((i) => i.group === g).map(top)}
