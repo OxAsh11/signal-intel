@@ -21,13 +21,13 @@ export function BriefIntakeLoading({ briefId, steps }: { briefId: string; steps:
   }, [router]);
   const list: Step[] = steps.length ? steps : Object.keys(LABELS).map((s) => ({ step: s, status: 'pending' as const, detail: '' }));
   return (
-    <section className="si-fcard si-fam-mint" aria-live="polite">
-      <span className="si-ftag si-fam-mint">Drafting</span>
-      <h2 className="si-h2 text-[22px]">The AI is drafting your Brief</h2>
+    <section className="si-fcard" aria-live="polite">
+      <span className="si-ftag">Drafting</span>
+      <h2 className="si-h2">The AI is drafting your Brief</h2>
       <p className="m-0">It writes the signal to look for, who fits, examples, sources and who to contact. About 15 seconds; this page updates by itself.</p>
       <ol className="m-0 flex flex-col gap-2 p-0">
         {list.map((s) => (
-          <li key={s.step} className="flex items-center gap-2 text-[14px]">
+          <li key={s.step} className="flex items-center gap-2 text-[13px]">
             <span aria-hidden="true">
               {s.status === 'done' ? '✓' : s.status === 'failed' ? '✗' : s.status === 'running' ? '…' : '○'}
             </span>
