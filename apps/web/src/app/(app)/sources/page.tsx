@@ -62,7 +62,7 @@ export default async function SourcesPage() {
     <>
       <div className="flex flex-col gap-2">
         <h1 className="si-h1">Sources</h1>
-        <p className="m-0 text-[20px] leading-7 font-medium text-ink">
+        <p className="m-0 text-[16px] font-medium text-ink">
           {total ? `From ${nf.format(total)} pages to ${nf.format(matched)} matches` : 'Where your Briefs are looking'}
         </p>
         <p className="si-lede">
@@ -81,7 +81,7 @@ export default async function SourcesPage() {
             <div key={label} className="contents">
               <span className="font-medium text-ink">{label}</span>
               <div className="h-5 rounded-xs bg-surface/70">
-                <div className="h-full rounded-xs bg-ink" style={{ width: `${pct(n)}%` }} />
+                <div className="h-full rounded-xs bg-signal" style={{ width: `${pct(n)}%` }} />
               </div>
               <span className="text-right">
                 <span className="font-mono text-ink">{nf.format(n)}</span>{' '}

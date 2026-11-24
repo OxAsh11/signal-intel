@@ -1,6 +1,8 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
 import { notFound } from 'next/navigation';
+import { BandChip } from '@signal/ui';
+import type { Band } from '@signal/contracts';
 import { atLeast, getOrgContext } from '@/lib/org';
 import { createClient } from '@/lib/supabase/server';
 import { AutoRefresh } from '../auto-refresh';
@@ -199,15 +201,10 @@ export default async function PilotPage({ params }: PageProps<'/briefs/[id]/pilo
                 ) : (
                   <span className="text-[13px] text-ink-muted">Judging…</span>
                 )}
-                {r.band ? (
-                  <span className="text-[13px] text-ink-muted">
-                    {r.band}
-                    {r.priority != null ? ` · ${Math.round(r.priority)}` : ''}
-                  </span>
-                ) : null}
+                {r.band ? <BandChip band={r.band as Band} /> : null}
                 {r.mark ? (
-                  <span className="text-[13px] text-ink-muted">
-                    Marked {r.mark === 'confirm' ? 'right' : 'wrong'}
+                  <span className={`text-[12px] font-medium ${r.mark === 'confirm' ? 'text-positive' : 'text-danger'}`}>
+                    {r.mark === 'confirm' ? '✓ Right' : '✗ Wrong'}
                   </span>
                 ) : null}
               </div>
