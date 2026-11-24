@@ -20,7 +20,7 @@ export type NavItem = {
 };
 
 /** The serialisable part of a nav item, for the client sidebar (no functions). */
-export type NavLink = { key: string; label: string; href: string; group: NavGroup; children?: NavLink[] };
+export type NavLink = { key: string; label: string; href: string; group: NavGroup; placeholder?: 'email' | 'crm' | 'p6'; children?: NavLink[] };
 
 export const GROUP_LABELS = { find: 'Find', work: 'Work', engage: 'Engage', measure: 'Measure' } as const;
 
@@ -97,8 +97,8 @@ export function allRoutes(): string[] {
 
 /** The tree without functions, safe to pass to a client component. */
 export function navLinks(items: NavItem[] = NAV): NavLink[] {
-  return items.map(({ key, label, href, group, children }) =>
-    children ? { key, label, href, group, children: navLinks(children) } : { key, label, href, group },
+  return items.map(({ key, label, href, group, children, placeholder }) =>
+    children ? { key, label, href, group, placeholder, children: navLinks(children) } : { key, label, href, group, placeholder },
   );
 }
 
