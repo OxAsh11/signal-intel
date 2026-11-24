@@ -4,7 +4,7 @@ import { ChipField, fieldInput } from './chip-field';
 import { ColumnsField } from './columns-field';
 import { RulesField } from './rules-field';
 import { startPilot } from '@/app/actions/briefs';
-import { Button, Card, FamilyTag } from '@signal/ui';
+import { Button, Card } from '@signal/ui';
 import type { BriefConfig, WorkspacePredicate } from '@/lib/briefs';
 
 type Brief = { id: string; state: string; draft_config: BriefConfig | null };
@@ -127,7 +127,7 @@ export function BriefEditor({ brief, canEdit, workspacePredicates }: { brief: Br
         renderValue={(c) => (
           <ul className="m-0 flex list-none flex-wrap gap-2 p-0">
             {((c.sources as { radar_types?: string[] } | undefined)?.radar_types ?? []).map((t) => (
-              <li key={t} className="si-ftag si-fam-pool">{SOURCE_LABELS[t] ?? t.replace(/_/g, ' ')}</li>
+              <li key={t} className="si-ftag">{SOURCE_LABELS[t] ?? t.replace(/_/g, ' ')}</li>
             ))}
           </ul>
         )}
@@ -199,9 +199,11 @@ export function StartPilotCard({ brief, canEdit }: { brief: Brief; canEdit: bool
   const [state, formAction, pending] = useActionState(startPilot, {});
   const ready = isPublishable(brief.draft_config);
   return (
-    <Card family="mint" kind="feature" aria-labelledby="pilot-h">
-      <FamilyTag family="mint">Next · pilot</FamilyTag>
-      <h2 id="pilot-h" className="si-h2 text-[22px]">Test the Brief on 20 companies</h2>
+    <Card aria-labelledby="pilot-h">
+      <div className="flex items-center justify-between gap-2">
+        <span className="rounded-[4px] bg-surface-sunken border border-line px-2 py-0.5 text-[11px] font-medium text-ink-muted">Next · pilot</span>
+      </div>
+      <h2 id="pilot-h" className="si-h2">Test the Brief on 20 companies</h2>
       <ol className="m-0 flex flex-col gap-1.5 pl-5 text-[14px]">
         <li>Radars collect from the sources you chose.</li>
         <li>The AI judges 20 companies and shows the quotes behind each verdict.</li>
