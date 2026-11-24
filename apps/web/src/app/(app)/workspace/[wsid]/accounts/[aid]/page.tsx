@@ -40,6 +40,33 @@ const host = (url: string | null) => {
   }
 };
 
+/** Extract all claim UUIDs from AI-generated bullet text. */
+function extractClaimIds(bullets: string[] | undefined): string[] {
+  if (!bullets?.length) return [];
+  const ids = new Set<string>();
+  for (const b of bullets) {
+    for (const m of b.matchAll(/\[CLAIM:([a-f0-9-]+)\]/gi)) ids.add(m[1]!);
+  }
+  return [...ids];
+}
+
+/** Render bullet text, replacing [CLAIM:uuid] markers with clickable source links. */
+function BulletWithSources({ text, claimMap }: { text: string; claimMap: Map<string, { url: string | null; name: string }> }) {
+  return (
+    <>
+      {text.split(/(\[CLAIM:[a-f0-9-]+\])/i).map((part, i) => {
+        const m = part.match(/^\[CLAIM:([a-f0-9-]+)\]$/i);
+        if (!m) return part;
+        const info = claimMap.get(m[1]!);
+        if (!info) return null;
+        return info.url
+          ? <a key={i} href={info.url} target="_blank" rel="noopener noreferrer" className="font-medium text-signal underline underline-offset-2">{info.name}</a>
+          : <span key={i} className="font-medium text-ink">{info.name}</span>;
+      })}
+    </>
+  );
+}
+
 /**
  * The account page: the evidence instrument. Verdict and score with their receipts, who to
  * contact, and the next step. Families: mint = judgement, grass = engagement, pool = research.
@@ -69,35 +96,50 @@ export default async function AccountDetailPage({
   const entity = one(account.entity as { id: string; display_name: string } | { id: string; display_name: string }[] | null);
   const entityId = entity?.id ?? null;
 
-  const [{ data: scores }, { data: verdicts }, { data: labels }, { data: cards }, { data: research }, { data: contacts }, { data: stageEvents }, { data: activities }, { data: domains }] =
+  const [{ data: scores }, { data: cards }, { data: research }, { data: contacts }, { data: stageEvents }, { data: activities }, { data: domains }, { data: countryRows }] =
     await Promise.all([
       supabase.from('score').select('band, fit, evidence, scale, timing, priority, readiness, gates, computed_at, brief_version_id').eq('account_id', aid).order('computed_at', { ascending: false }).limit(1),
-      entityId
-        ? supabase.from('verdict').select('value, claim_ids, computed_at, inputs, brief_version:brief_version_id(version)').eq('entity_id', entityId).order('computed_at', { ascending: false }).limit(1)
-        : Promise.resolve({ data: null }),
-      supabase.from('label').select('id, kind, value').eq('account_id', aid).order('kind'),
       supabase.from('account_card').select('content, computed_at').eq('account_id', aid).order('computed_at', { ascending: false }).limit(1),
       supabase.from('research_doc').select('id, version, published_at').eq('account_id', aid).order('published_at', { ascending: false }),
       supabase.from('contact_point').select('id, type, status, provider, person:entity_id(display_name)').eq('account_id', aid),
       supabase.from('account_stage_event').select('id, to_stage, occurred_at').eq('account_id', aid).order('occurred_at', { ascending: false }).limit(20),
       supabase.from('activity').select('id, kind, occurred_at, person:person_entity_id(display_name)').eq('account_id', aid).order('occurred_at', { ascending: false }).limit(20),
       entityId ? supabase.from('entity_alias').select('value_normalised').eq('entity_id', entityId).eq('alias_type', 'domain').limit(1) : Promise.resolve({ data: null }),
+      entityId ? supabase.from('mention').select('raw_country').eq('entity_id', entityId).not('raw_country', 'is', null).neq('raw_country', '').order('created_at', { ascending: false }).limit(1) : Promise.resolve({ data: null }),
     ]);
 
   const score = scores?.[0] ?? null;
+  const briefVersionId = (score?.brief_version_id as string | null) ?? null;
+
+  // Filter verdict by the same brief version as the score so this page agrees with the accounts list.
+  const { data: verdicts } = entityId
+    ? briefVersionId
+      ? await supabase.from('verdict').select('value, claim_ids, computed_at, inputs, brief_version:brief_version_id(version)').eq('entity_id', entityId).eq('brief_version_id', briefVersionId).order('computed_at', { ascending: false }).limit(1)
+      : await supabase.from('verdict').select('value, claim_ids, computed_at, inputs, brief_version:brief_version_id(version)').eq('entity_id', entityId).order('computed_at', { ascending: false }).limit(1)
+    : { data: null };
+
   const verdict = verdicts?.[0] ?? null;
   const card = (cards?.[0]?.content ?? null) as { bullets?: string[]; next_step?: string } | null;
-  const claimIds = (verdict?.claim_ids as string[] | null) ?? [];
-  const { data: claimRows } = claimIds.length
+  const verdictClaimIds = (verdict?.claim_ids as string[] | null) ?? [];
+  const bulletClaimIds = extractClaimIds(card?.bullets);
+  const allClaimIds = [...new Set([...verdictClaimIds, ...bulletClaimIds])];
+  const { data: claimRows } = allClaimIds.length
     ? await supabase
         .from('claim')
         .select('id, quote, observed_at, predicate:predicate_id(key, label), source:source_record_id(id, url, source_type)')
-        .in('id', claimIds)
+        .in('id', allClaimIds)
         .order('observed_at', { ascending: false })
     : { data: [] };
   const claims = (claimRows ?? []) as ClaimRow[];
+  const claimMap = new Map(
+    claims.map((c) => {
+      const src = one(c.source);
+      return [c.id, { url: src?.url ?? null, name: host(src?.url ?? null) }];
+    })
+  );
   const version = one(verdict?.brief_version as { version: number } | { version: number }[] | null)?.version;
   const domain = domains?.[0]?.value_normalised as string | undefined;
+  const country = countryRows?.[0]?.raw_country as string | undefined;
 
   const timeline = [
     ...(stageEvents ?? []).map((e) => ({ id: `s${e.id}`, at: e.occurred_at as string, text: `Stage moved to ${e.to_stage}` })),
@@ -114,7 +156,12 @@ export default async function AccountDetailPage({
         <div className="flex flex-wrap items-end justify-between gap-4">
           <div className="flex min-w-0 flex-col gap-2">
             <h1 className="si-h1">{entity?.display_name ?? 'Unknown company'}</h1>
-            {domain ? <span className="si-meta">{domain}</span> : null}
+            {(domain || country) ? (
+              <div className="flex flex-wrap items-center gap-3">
+                {domain ? <span className="si-meta">{domain}</span> : null}
+                {country ? <span className="si-meta">{country}</span> : null}
+              </div>
+            ) : null}
             <div className="mt-1 flex flex-wrap items-center gap-3">
               {verdict ? <VerdictBadge verdict={verdict.value as Verdict} /> : <span className="si-meta">no verdict yet</span>}
               {score ? <BandChip band={score.band as Band} /> : null}
@@ -151,7 +198,7 @@ export default async function AccountDetailPage({
             <h2 id="why-h" className="si-h3">Why this account, now</h2>
             {card?.bullets?.length ? (
               <ul className="m-0 flex max-w-[80ch] flex-col gap-1.5 pl-5 text-[14px] leading-[1.6]">
-                {card.bullets.map((b, i) => <li key={i}>{b}</li>)}
+                {card.bullets.map((b, i) => <li key={i}><BulletWithSources text={b} claimMap={claimMap} /></li>)}
               </ul>
             ) : (
               <p className="m-0">The account summary is written once the account has a verdict and a score.</p>
@@ -162,9 +209,9 @@ export default async function AccountDetailPage({
                 <DerivedValue
                   label="Verdict"
                   versions={version ? `brief v${version}` : undefined}
-                  explanation={`Rests on ${claimIds.length} claim${claimIds.length === 1 ? '' : 's'}. Each quote below is the exact text the verdict uses.`}
+                  explanation={`Rests on ${verdictClaimIds.length} claim${verdictClaimIds.length === 1 ? '' : 's'}. Each quote below is the exact text the verdict uses.`}
                 >
-                  {verdict.value} · {claimIds.length} claim{claimIds.length === 1 ? '' : 's'}
+                  {verdict.value} · {verdictClaimIds.length} claim{verdictClaimIds.length === 1 ? '' : 's'}
                 </DerivedValue>
               </div>
             ) : null}
@@ -262,17 +309,6 @@ export default async function AccountDetailPage({
             })}
             {!contacts?.length ? <p className="m-0 text-[13px]">Contacts are found automatically for High-band accounts.</p> : null}
           </Card>
-
-          {labels?.length ? (
-            <Card aria-labelledby="labels-h">
-              <h2 id="labels-h" className="si-h2">Labels</h2>
-              <div className="flex flex-wrap gap-2">
-                {labels.map((l) => (
-                  <span key={l.id} className="si-chip si-band">{l.kind}: {l.value}</span>
-                ))}
-              </div>
-            </Card>
-          ) : null}
 
           {research?.length ? (
             <Card family="pool" aria-labelledby="research-h">
