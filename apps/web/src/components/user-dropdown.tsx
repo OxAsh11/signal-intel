@@ -50,8 +50,8 @@ export function UserDropdown({ email, name }: Props) {
         <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-signal-soft text-[11px] font-semibold text-signal-strong">
           {initials}
         </span>
-        <span className="max-w-[120px] truncate text-[13px] text-ink-muted">{displayName}</span>
-        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="shrink-0 text-ink-faint">
+        <span className="hidden max-w-[120px] truncate text-[13px] text-ink-muted md:inline">{displayName}</span>
+        <svg width="12" height="12" viewBox="0 0 12 12" fill="none" aria-hidden="true" className="hidden shrink-0 text-ink-faint md:block">
           <path d="M2 4L6 8L10 4" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
