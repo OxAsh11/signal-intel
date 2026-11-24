@@ -149,7 +149,7 @@ export function AppShell({ children }: { children: ReactNode }) {
             </Suspense>
           </div>
           {/* Brief lens: only shown on desktop (phone has it in the sidebar). */}
-          <div className="hidden shrink-0 md:block">
+          <div className="hidden shrink-0 md:block" data-lens="desktop">
             <Suspense fallback={null}>
               <SidebarLens />
             </Suspense>

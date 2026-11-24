@@ -390,7 +390,7 @@ test.describe('Brief lens', () => {
       await expect(lens(page)).toHaveValue(other);
       // Select first (it re-renders the form), then tamper, then submit.
       await lens(page).selectOption('all');
-      await page.locator('input[name="next"]').evaluate((el: HTMLInputElement, v) => (el.value = v), next);
+      await page.locator('[data-lens="desktop"] input[name="next"]').evaluate((el: HTMLInputElement, v) => (el.value = v), next);
       const action = lensAction(page);
       await applyLens(page).click();
       const res = await action;
